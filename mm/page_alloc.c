@@ -4451,6 +4451,9 @@ __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
 	int reserve_flags;
 	unsigned long alloc_start = jiffies;
 	bool should_alloc_retry = false;
+	pg_data_t *pgdat = ac->preferred_zoneref->zone->zone_pgdat;
+	bool woke_kswapd = false;
+
 	unsigned long direct_reclaim_retries = 0;
 	unsigned long pages_reclaimed = 0;
 	int retry_loop_count = 0;
@@ -4496,8 +4499,13 @@ restart:
 			goto nopage;
 	}
 
-	if (alloc_flags & ALLOC_KSWAPD)
+	if (alloc_flags & ALLOC_KSWAPD) {
+		if (!woke_kswapd) {
+			atomic_inc(&pgdat->kswapd_waiters);
+			woke_kswapd = true;
+		}
 		wake_all_kswapds(order, gfp_mask, ac);
+	}
 
 	if (can_direct_reclaim && !direct_reclaim_retries && !(current->flags & PF_MEMALLOC)) {
 		/*
@@ -4749,14 +4757,16 @@ nopage:
 		goto retry;
 	}
 fail:
-	trace_android_vh_alloc_pages_failure_bypass(gfp_mask, order,
-		alloc_flags, ac->migratetype, &page);
-	if (page)
-		goto got_pg;
-
-	warn_alloc(gfp_mask, ac->nodemask,
-			"page allocation failure: order:%u", order);
 got_pg:
+	if (woke_kswapd)
+		atomic_dec(&pgdat->kswapd_waiters);
+	if (!page) {
+		trace_android_vh_alloc_pages_failure_bypass(gfp_mask, order,
+			alloc_flags, ac->migratetype, &page);
+		if (!page)
+			warn_alloc(gfp_mask, ac->nodemask,
+					"page allocation failure: order:%u", order);
+	}
 	trace_android_vh_alloc_pages_slowpath(gfp_mask, order, alloc_start);
 	trace_android_vh_alloc_pages_slowpath_end(&gfp_mask, order, alloc_start,
 			stime, did_some_progress, pages_reclaimed, retry_loop_count);

@@ -4316,22 +4316,6 @@ static u64 mem_cgroup_swappiness_read(struct cgroup_subsys_state *css,
 	return mem_cgroup_swappiness(memcg);
 }
 
-static int mem_cgroup_swappiness_write(struct cgroup_subsys_state *css,
-				       struct cftype *cft, u64 val)
-{
-	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
-
-	if (val > 200)
-		return -EINVAL;
-
-	if (!mem_cgroup_is_root(memcg))
-		WRITE_ONCE(memcg->swappiness, val);
-	else
-		WRITE_ONCE(vm_swappiness, val);
-
-	return 0;
-}
-
 static void __mem_cgroup_threshold(struct mem_cgroup *memcg, bool swap)
 {
 	struct mem_cgroup_threshold_ary *t;
@@ -5201,7 +5185,6 @@ static struct cftype mem_cgroup_legacy_files[] = {
 	{
 		.name = "swappiness",
 		.read_u64 = mem_cgroup_swappiness_read,
-		.write_u64 = mem_cgroup_swappiness_write,
 	},
 	{
 		.name = "move_charge_at_immigrate",

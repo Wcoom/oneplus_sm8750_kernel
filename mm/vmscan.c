@@ -223,7 +223,11 @@ static u64 workingset_protection_prev_totalram __read_mostly = 0;
 /*
  * From 0 .. MAX_SWAPPINESS.  Higher means more swappy.
  */
+#ifdef CONFIG_SET_SWAPPINESS_IN_KERNEL
+int vm_swappiness = CONFIG_SWAPPINESS;
+#else
 int vm_swappiness = 60;
+#endif
 
 LIST_HEAD(shrinker_list);
 DECLARE_RWSEM(shrinker_rwsem);

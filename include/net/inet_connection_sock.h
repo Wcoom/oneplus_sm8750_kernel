@@ -138,7 +138,7 @@ struct inet_connection_sock {
 	u32			  icsk_probes_tstamp;
 	u32			  icsk_user_timeout;
 
-	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_USE(1, void *icsk_ca_priv_ext);
 
 	u64			  icsk_ca_priv[104 / sizeof(u64)];
 #define ICSK_CA_PRIV_SIZE	  sizeof_field(struct inet_connection_sock, icsk_ca_priv)
@@ -158,6 +158,49 @@ static inline struct inet_connection_sock *inet_csk(const struct sock *sk)
 static inline void *inet_csk_ca(const struct sock *sk)
 {
 	return (void *)inet_csk(sk)->icsk_ca_priv;
+}
+
+/* Store the allocation size so TCP can release state without knowing its type. */
+struct inet_csk_ca_priv_ext {
+	unsigned int alloc_size;
+	u8 data[] __aligned(8);
+};
+
+static inline void *inet_csk_ca_ext_alloc(struct sock *sk, unsigned int size,
+					  gfp_t gfp)
+{
+	struct inet_connection_sock *icsk = inet_csk(sk);
+	struct inet_csk_ca_priv_ext *ext;
+	unsigned int alloc_size;
+
+	if (size > INT_MAX - sizeof(*ext))
+		return NULL;
+	alloc_size = sizeof(*ext) + size;
+	ext = sock_kmalloc(sk, alloc_size, gfp);
+	if (!ext)
+		return NULL;
+
+	ext->alloc_size = alloc_size;
+	if (cmpxchg(&icsk->icsk_ca_priv_ext, NULL, ext->data)) {
+		sock_kfree_s(sk, ext, alloc_size);
+		return NULL;
+	}
+
+	return ext->data;
+}
+
+static inline void inet_csk_ca_ext_free(struct sock *sk)
+{
+	struct inet_connection_sock *icsk = inet_csk(sk);
+	struct inet_csk_ca_priv_ext *ext;
+	void *data;
+
+	data = xchg(&icsk->icsk_ca_priv_ext, NULL);
+	if (!data)
+		return;
+
+	ext = container_of(data, struct inet_csk_ca_priv_ext, data);
+	sock_kfree_s(sk, ext, ext->alloc_size);
 }
 
 struct sock *inet_csk_clone_lock(const struct sock *sk,

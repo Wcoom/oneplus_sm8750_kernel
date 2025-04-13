@@ -68,4 +68,5 @@ endif # CONFIG_ARM64
 
 endif # CONFIG_SCHED_CAMBYSES_SIMD
 
+obj-y += bore.o
 obj-$(CONFIG_ANDROID_VENDOR_HOOKS) += vendor_hooks.o

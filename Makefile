@@ -849,6 +849,15 @@ KBUILD_CFLAGS += -Os
 KBUILD_RUSTFLAGS += -Copt-level=s
 endif
 
+KBUILD_CFLAGS += -march=armv8.2-a
+KBUILD_CFLAGS += -mllvm -polly \
+		 -mllvm -polly-run-dce \
+		 -mllvm -polly-run-inliner \
+		 -mllvm -polly-loopfusion-greedy \
+		 -mllvm -polly-ast-use-context \
+		 -mllvm -polly-detect-keep-going \
+		 -mllvm -polly-vectorizer=stripmine
+
 # Always set `debug-assertions` and `overflow-checks` because their default
 # depends on `opt-level` and `debug-assertions`, respectively.
 KBUILD_RUSTFLAGS += -Cdebug-assertions=$(if $(CONFIG_RUST_DEBUG_ASSERTIONS),y,n)

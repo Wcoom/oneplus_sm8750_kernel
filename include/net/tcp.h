@@ -1096,7 +1096,7 @@ enum tcp_ca_ack_event_flags {
 /* Requires ECN/ECT set on all packets */
 #define TCP_CONG_NEEDS_ECN		BIT(1)
 /* Wants notification of CE events (CA_EVENT_ECN_IS_CE, CA_EVENT_ECN_NO_CE). */
-#define TCP_CONG_WANTS_CE_EVENTS	0x4
+#define TCP_CONG_WANTS_CE_EVENTS	BIT(2)
 #define TCP_CONG_MASK	(TCP_CONG_NON_RESTRICTED | \
 			 TCP_CONG_NEEDS_ECN | \
 			 TCP_CONG_WANTS_CE_EVENTS)

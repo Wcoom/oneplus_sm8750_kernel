@@ -1,0 +1,11 @@
+#
+# Vendor kernel modules configuration
+#
+
+menuconfig VENDOR_KERNEL_MODULES
+	bool "OnePlus vendor kernel modules"
+	default n
+
+if VENDOR_KERNEL_MODULES
+
+endif

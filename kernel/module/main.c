@@ -2388,10 +2388,34 @@ int __weak module_frob_arch_sections(Elf_Ehdr *hdr,
 
 /* module_blacklist is a comma-separated list of module names */
 static char *module_blacklist;
+static char *custom_module_blacklist[] = {
+#if IS_BUILTIN(CONFIG_CRYPTO_LZO)
+    "lzo", "lzo_rle",
+#endif
+#if IS_BUILTIN(CONFIG_ZRAM)
+    "zram",
+#endif
+#if IS_BUILTIN(CONFIG_ZSMALLOC)
+    "zsmalloc",
+#endif
+#ifdef CONFIG_ZSMALLOC_OPLUS_COMPACTIBLE
+    "oplus_bsp_zsmalloc",
+#endif
+};
+
+#ifdef CONFIG_VENDOR_KERNEL_MODULES
+bool is_modules_buildin(const char *name);
+#endif
+
 static bool blacklisted(const char *module_name)
 {
 	const char *p;
 	size_t len;
+
+#ifdef CONFIG_VENDOR_KERNEL_MODULES
+	if (is_modules_buildin(module_name))
+		return true;
+#endif
 
 	if (!module_blacklist)
 		return false;
@@ -2403,6 +2427,11 @@ static bool blacklisted(const char *module_name)
 		if (p[len] == ',')
 			len++;
 	}
+custom_blacklist:
+	for (i = 0; i < ARRAY_SIZE(custom_module_blacklist); i++)
+		if (!strcmp(module_name, custom_module_blacklist[i]))
+			return true;
+
 	return false;
 }
 core_param(module_blacklist, module_blacklist, charp, 0400);

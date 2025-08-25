@@ -6,4 +6,6 @@ config OPLUS_FEATURE_PERFORMANCE_MM
 
 if OPLUS_FEATURE_PERFORMANCE_MM
 
+source "vendor/mm/mm_osvelte/Kconfig"
+
 endif

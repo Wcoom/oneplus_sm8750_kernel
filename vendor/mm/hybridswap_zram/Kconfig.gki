@@ -1,3 +1,12 @@
 #
 # GKI kernel modules feature configuration
 #
+
+config HYBRIDSWAP_OPLUS_SCHEDINFO
+	bool "Hybridswap oneplus sched info support"
+	depends on HYBRIDSWAP_ZRAM && HYBRIDSWAP && !HYBRIDSWAP_ZRAM_WRITEBACK
+	select OPLUS_FEATURE_UXMEM_OPT
+	default n
+
+config OPLUS_FEATURE_UXMEM_OPT
+	bool

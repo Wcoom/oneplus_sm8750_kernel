@@ -3,3 +3,4 @@
 #
 
 obj-y	+= mm_osvelte/
+obj-y	+= hybridswap_zram/

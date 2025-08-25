@@ -1,0 +1,9 @@
+config OPLUS_FEATURE_PERFORMANCE_MM
+	bool "config oplus kernel mm feature"
+	default n
+	help
+	  define this config to add oplus kernel mm feature
+
+if OPLUS_FEATURE_PERFORMANCE_MM
+
+endif

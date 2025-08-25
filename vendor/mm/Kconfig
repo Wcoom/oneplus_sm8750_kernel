@@ -8,4 +8,6 @@ if OPLUS_FEATURE_PERFORMANCE_MM
 
 source "vendor/mm/mm_osvelte/Kconfig"
 
+source "vendor/mm/hybridswap_zram/Kconfig"
+
 endif

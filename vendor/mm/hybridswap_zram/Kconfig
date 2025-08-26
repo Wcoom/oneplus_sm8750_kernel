@@ -121,3 +121,14 @@ config HYBRIDSWAP_CORE
 	  If unsure, say N here.
 	  This module can't be compiled as a module,
 	  the module is as one part of the ZRAM driver.
+
+config HYBRIDSWAP_GKI_FEATURE
+	bool "Hybridswap GKI modules feature support"
+	depends on HYBRIDSWAP_ZRAM && HYBRIDSWAP && !HYBRIDSWAP_ZRAM_WRITEBACK
+	default n
+
+if HYBRIDSWAP_GKI_FEATURE
+
+source "vendor/mm/hybridswap_zram/Kconfig.gki"
+
+endif

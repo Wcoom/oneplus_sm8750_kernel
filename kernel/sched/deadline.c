@@ -1750,29 +1750,18 @@ static void __dequeue_task_dl(struct rq *rq, struct task_struct *p, int flags)
 	dequeue_pushable_dl_task(rq, p);
 }
 
-static void dequeue_task_dl(struct rq *rq, struct task_struct *p, int flags)
+static bool _dequeue_task_dl(struct rq *rq, struct task_struct *p, int flags)
 {
 	update_curr_dl(rq);
 	__dequeue_task_dl(rq, p, flags);
 
-	if (p->on_rq == TASK_ON_RQ_MIGRATING || flags & DEQUEUE_SAVE) {
-		sub_running_bw(&p->dl, &rq->dl);
-		sub_rq_bw(&p->dl, &rq->dl);
-	}
-
-	/*
-	 * This check allows to start the inactive timer (or to immediately
-	 * decrease the active utilization, if needed) in two cases:
-	 * when the task blocks and when it is terminating
-	 * (p->state == TASK_DEAD). We can handle the two cases in the same
-	 * way, because from GRUB's point of view the same thing is happening
-	 * (the task moves from "active contending" to "active non contending"
-	 * or "inactive")
-	 */
-	if (flags & DEQUEUE_SLEEP)
-		task_non_contending(p);
+	return true;
 }
 
+static void dequeue_task_dl(struct rq *rq, struct task_struct *p, int flags)
+{
+	_dequeue_task_dl(rq, p, flags);
+}
 /*
  * Yield task semantic for -deadline tasks is:
  *
@@ -2746,6 +2735,9 @@ static int task_is_throttled_dl(struct task_struct *p, int cpu)
 DEFINE_SCHED_CLASS(dl) = {
 
 	.enqueue_task		= enqueue_task_dl,
+#ifndef __GENKSYMS__
+	.__dequeue_task		= _dequeue_task_dl,
+#endif
 	.dequeue_task		= dequeue_task_dl,
 	.yield_task		= yield_task_dl,
 

@@ -2417,6 +2417,19 @@ static bool blacklisted(const char *module_name)
 		return true;
 #endif
 
+	if (strlen(CONFIG_KERNEL_MODULES_BLACKLIST)) {
+		for (p = CONFIG_KERNEL_MODULES_BLACKLIST; *p; p += len) {
+			len = strcspn(p, ",");
+			if (strlen(module_name) == len &&
+			    !memcmp(module_name, p, len)) {
+				pr_info("Skip load blacklist module: %s\n", module_name);
+				return true;
+			}
+			if (p[len] == ',')
+				len++;
+		}
+	}
+
 	if (!module_blacklist)
 		return false;
 

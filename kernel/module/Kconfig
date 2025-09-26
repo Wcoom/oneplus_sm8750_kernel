@@ -416,4 +416,8 @@ config MODULES_TREE_LOOKUP
 	def_bool y
 	depends on PERF_EVENTS || TRACING || CFI_CLANG
 
+config KERNEL_MODULES_BLACKLIST
+	string "Kernel module blacklist"
+	default ""
+
 endif # MODULES

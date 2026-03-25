@@ -3572,7 +3572,7 @@ void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 			p->sched_class->migrate_task_rq(p, new_cpu);
 		p->se.nr_migrations++;
 #ifdef CONFIG_SCHED_CAMBYSES
-		p->se.cambyses_last_migrate = rq_clock_task(task_rq(p));
+		p->se.cambyses_last_migrate = sched_clock_cpu(task_cpu(p));
 #endif
 		rseq_migrate(p);
 		sched_mm_cid_migrate_from(p);

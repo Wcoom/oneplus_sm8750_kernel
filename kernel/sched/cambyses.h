@@ -31,9 +31,10 @@ extern struct static_key_true sched_cambyses;
 /*
  * sysctl_cambyses_config — per-slot (signal, weight) pairs for F0..F3.
  * Format: "src0 w0 src1 w1 src2 w2 src3 w3"
- * Default: {0, 2,  1, 1,  2, 1,  3, -3}
+ * Default: {0, 2,  1, -5,  2, 0,  3, 0}
  */
 extern int sysctl_cambyses_config[8];
+extern const int sysctl_cambyses_config_default[8];
 
 /*
  * Per-weight activity keys — NOP-patched when the slot weight is 0.

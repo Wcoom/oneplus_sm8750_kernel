@@ -20,7 +20,7 @@
 #define CAMBYSES_PROGNAME "Cambyses Migration Selector"
 #define CAMBYSES_AUTHOR   "Masahito Suzuki"
 
-#define CAMBYSES_VERSION  "0.3.0-beta1"
+#define CAMBYSES_VERSION  "0.3.0-beta4"
 
 /* Runtime toggle — NOP-patched when disabled */
 DEFINE_STATIC_KEY_TRUE(sched_cambyses);
@@ -32,11 +32,11 @@ DEFINE_STATIC_KEY_TRUE(sched_cambyses);
  *   src: 0-7  (signal function index, see CAMBYSES_SIG_* below)
  *   w:  -7..+7 (signed weight; 0 = disable slot entirely via NOP patch)
  *
- * Default: "0 2 1 1 2 1 3 -3"
+ * Default: "0 2 1 -5 2 0 3 0"
  *   slot0: sig0 (exec_start delta)      × +2
- *   slot1: sig1 (runnable starvation)   × +1
- *   slot2: sig2 (io_boundness)          × +1
- *   slot3: sig3 (wakee_penalty)         × -3
+ *   slot1: sig1 (runnable starvation)   × -5
+ *   slot2: sig2 (io_boundness)          × 0 (disabled)
+ *   slot3: sig3 (wakee_penalty)         × 0 (disabled)
  *
  * Signal index table:
  *   0: exec_start delta      — log2p1(rq_clock - exec_start)    [inline]
@@ -48,18 +48,21 @@ DEFINE_STATIC_KEY_TRUE(sched_cambyses);
  *   6: util_avg              — util_avg >> 4 (0-64)             [inline]
  *   7: weighted_load         — util_avg × log2p1(weight) >> 10  [inline]
  */
-int sysctl_cambyses_config[8] = {0, 2,  1, 1,  2, 1,  3, -3};
+int sysctl_cambyses_config[8] = {0, 2,  1, -5,  2, 0,  3, 0};
+
+/* Read-only copy of the compiled-in default configuration */
+const int sysctl_cambyses_config_default[8] = {0, 2,  1, -5,  2, 0,  3, 0};
 
 /*
  * Per-weight activity keys — NOP-patched when the slot weight is 0.
  * All start FALSE; sched_cambyses_sysctl_init() enables slots with
- * non-zero default weights {2, 1, 1, -3} → w0, w1, w2, w3 enabled.
+ * non-zero default weights {2, -5, 0, 0} → w0, w1 enabled; w2, w3 disabled.
  * Updated by sched_cambyses_config_handler() on sysctl write.
  */
 DEFINE_STATIC_KEY_FALSE(cambyses_w0_active);   /* config[1] = 2  */
-DEFINE_STATIC_KEY_FALSE(cambyses_w1_active);   /* config[3] = 1  */
-DEFINE_STATIC_KEY_FALSE(cambyses_w2_active);   /* config[5] = 1  */
-DEFINE_STATIC_KEY_FALSE(cambyses_w3_active);   /* config[7] = -3 */
+DEFINE_STATIC_KEY_FALSE(cambyses_w1_active);   /* config[3] = -5 */
+DEFINE_STATIC_KEY_FALSE(cambyses_w2_active);   /* config[5] = 0  */
+DEFINE_STATIC_KEY_FALSE(cambyses_w3_active);   /* config[7] = 0  */
 
 /*
  * Per-slot signal-selection keys — 3 bits (bit2..bit0) per slot encode
@@ -203,7 +206,7 @@ static inline int cambyses_sig3(struct task_struct *p, struct lb_env *env)
 
 static inline int cambyses_sig4(struct task_struct *p, struct lb_env *env)
 {
-	return log2p1_u64_u8fp2(rq_clock_task(env->src_rq) -
+	return log2p1_u64_u8fp2(sched_clock_cpu(env->src_cpu) -
 				 p->se.cambyses_last_migrate);
 }
 
@@ -415,24 +418,37 @@ static __always_inline void cambyses_simd_end(void)
 
 
 /*
- * argmax_scores — find index of highest score (branchless).
+ * argmax_scores — find index of highest score via 4-way parallel reduction.
  *
- * Compiles to CMP + CMOV per iteration — no branches, no mispredictions.
- * For 32 candidates: ~62 micro-ops, ~20 cycles on modern OOO.
+ * Four independent accumulators break the serial dependency chain so the
+ * OOO engine can overlap 4 CMP+CMOV streams in parallel.  A 3-comparison
+ * tree merge produces the global best.  GPR-only — no FPU context needed.
  *
- * Replaces full bitonic sort: instead of O(n log²n) comparators to
- * establish total order, extract the single best candidate in O(n).
+ * For 32 candidates: ~27-43 cycles vs ~104 for serial scan.
  * Repeated extraction (K times) costs O(K*n) — for typical K=1..4
  * this is 5-20x faster than a full sort.
  */
 static __always_inline int argmax_scores(const s16 *scores, int nr_cands)
 {
-	int best = 0, j;
+	s16 bv0 = S16_MIN, bv1 = S16_MIN, bv2 = S16_MIN, bv3 = S16_MIN;
+	int bi0 = 0, bi1 = 0, bi2 = 0, bi3 = 0;
+	int j;
 
-	for (j = 1; j < nr_cands; j++)
-		if (scores[j] > scores[best])
-			best = j;
-	return best;
+	for (j = 0; j + 3 < nr_cands; j += 4) {
+		if (scores[j]     > bv0) { bv0 = scores[j];     bi0 = j;     }
+		if (scores[j + 1] > bv1) { bv1 = scores[j + 1]; bi1 = j + 1; }
+		if (scores[j + 2] > bv2) { bv2 = scores[j + 2]; bi2 = j + 2; }
+		if (scores[j + 3] > bv3) { bv3 = scores[j + 3]; bi3 = j + 3; }
+	}
+	/* Handle 0–3 remaining elements in chain 0 */
+	for (; j < nr_cands; j++) {
+		if (scores[j] > bv0) { bv0 = scores[j]; bi0 = j; }
+	}
+	/* Tree merge: 3 comparisons */
+	if (bv1 > bv0) { bv0 = bv1; bi0 = bi1; }
+	if (bv3 > bv2) { bv2 = bv3; bi2 = bi3; }
+	if (bv2 > bv0) { bi0 = bi2; }
+	return bi0;
 }
 
 /*
@@ -910,6 +926,13 @@ static struct ctl_table sched_cambyses_sysctls[] = {
 		.maxlen		= sizeof(sysctl_cambyses_config),
 		.mode		= 0644,
 		.proc_handler	= sched_cambyses_config_handler,
+	},
+	{
+		.procname	= "sched_cambyses_config_default",
+		.data		= (void *)sysctl_cambyses_config_default,
+		.maxlen		= sizeof(sysctl_cambyses_config_default),
+		.mode		= 0444,
+		.proc_handler	= proc_dointvec,
 	},
 };
 

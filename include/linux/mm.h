@@ -81,6 +81,10 @@ static inline void totalram_pages_add(long count)
 extern void * high_memory;
 extern int page_cluster;
 extern const int page_cluster_max;
+extern int sysctl_zram_admission_protect_workingset;
+extern int sysctl_zram_admission_protect_referenced;
+extern int sysctl_zram_readahead_adaptive;
+extern int sysctl_zram_readahead_max_pages;
 
 #ifdef CONFIG_SYSCTL
 extern int sysctl_legacy_va_layout;

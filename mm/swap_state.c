@@ -39,6 +39,8 @@ static const struct address_space_operations swap_aops = {
 struct address_space *swapper_spaces[MAX_SWAPFILES] __read_mostly;
 static unsigned int nr_swapper_spaces[MAX_SWAPFILES] __read_mostly;
 static bool enable_vma_readahead __read_mostly = true;
+int sysctl_zram_readahead_adaptive __read_mostly;
+int sysctl_zram_readahead_max_pages __read_mostly = 2;
 
 #define SWAP_RA_WIN_SHIFT	(PAGE_SHIFT / 2)
 #define SWAP_RA_HITS_MASK	((1UL << SWAP_RA_WIN_SHIFT) - 1)
@@ -59,6 +61,7 @@ static bool enable_vma_readahead __read_mostly = true;
 	(atomic_long_read(&(vma)->swap_readahead_info) ? : 4)
 
 static atomic_t swapin_readahead_hits = ATOMIC_INIT(4);
+static atomic_t zram_swapin_readahead_hits = ATOMIC_INIT(0);
 
 void show_swap_cache_info(void)
 {
@@ -355,10 +358,11 @@ struct folio *swap_cache_get_folio(swp_entry_t entry,
 		struct vm_area_struct *vma, unsigned long addr)
 {
 	struct folio *folio;
+	bool zram_entry = swap_entry_is_zram(entry);
 
 	folio = filemap_get_folio(swap_address_space(entry), swp_offset(entry));
 	if (!IS_ERR(folio)) {
-		bool vma_ra = swap_use_vma_readahead();
+		bool vma_ra = swap_use_vma_readahead() && !zram_entry;
 		bool readahead;
 
 		/*
@@ -384,8 +388,13 @@ struct folio *swap_cache_get_folio(swp_entry_t entry,
 
 		if (readahead) {
 			count_vm_event(SWAP_RA_HIT);
-			if (!vma || !vma_ra)
-				atomic_inc(&swapin_readahead_hits);
+			if (!vma || !vma_ra) {
+				if (zram_entry &&
+				    READ_ONCE(sysctl_zram_readahead_adaptive))
+					atomic_inc(&zram_swapin_readahead_hits);
+				else
+					atomic_inc(&swapin_readahead_hits);
+			}
 		}
 	} else {
 		folio = NULL;
@@ -624,6 +633,42 @@ static unsigned long swapin_nr_pages(unsigned long offset)
 	return pages;
 }
 
+static unsigned long zram_swapin_nr_pages(unsigned long offset)
+{
+	static unsigned long prev_offset;
+	static atomic_t last_readahead_pages = ATOMIC_INIT(1);
+	unsigned int hits, pages, max_pages, prev_win;
+
+	max_pages = 1U << READ_ONCE(page_cluster);
+	max_pages = min_t(unsigned int, max_pages,
+			  max_t(int, READ_ONCE(sysctl_zram_readahead_max_pages), 1));
+	if (max_pages <= 1)
+		return 1;
+
+	hits = atomic_xchg(&zram_swapin_readahead_hits, 0);
+	prev_win = atomic_read(&last_readahead_pages);
+	pages = 1;
+
+	if (offset == READ_ONCE(prev_offset) + 1 ||
+	    offset + 1 == READ_ONCE(prev_offset))
+		pages = min_t(unsigned int, 2, max_pages);
+
+	if (hits >= 2)
+		pages = max_pages;
+	else if (hits)
+		pages = max_t(unsigned int, pages,
+			      min_t(unsigned int, 2, max_pages));
+
+	if (hits && prev_win > pages)
+		pages = max_t(unsigned int, pages,
+			      max_t(unsigned int, 1, prev_win >> 1));
+
+	WRITE_ONCE(prev_offset, offset);
+	atomic_set(&last_readahead_pages, pages);
+
+	return pages;
+}
+
 /**
  * swap_cluster_readahead - swap in pages in hope we need them soon
  * @entry: swap entry of this memory
@@ -661,9 +706,13 @@ struct page *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	bool zram_entry = swap_entry_is_zram(entry);
 
 	max_pages = 1UL << READ_ONCE(page_cluster);
-	nr_pages = swapin_nr_pages(offset);
+	if (zram_entry && READ_ONCE(sysctl_zram_readahead_adaptive))
+		nr_pages = zram_swapin_nr_pages(offset);
+	else
+		nr_pages = swapin_nr_pages(offset);
 
-	if (zram_entry && max_pages > 1 && nr_pages == 1)
+	if (zram_entry && !READ_ONCE(sysctl_zram_readahead_adaptive) &&
+	    max_pages > 1 && nr_pages == 1)
 		nr_pages = min_t(unsigned long, max_pages, 8);
 
 	mask = nr_pages - 1;

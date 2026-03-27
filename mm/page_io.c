@@ -21,6 +21,7 @@
 #include <linux/writeback.h>
 #include <linux/blkdev.h>
 #include <linux/psi.h>
+#include <linux/string.h>
 #include <linux/uio.h>
 #include <linux/sched/task.h>
 #include <linux/delayacct.h>
@@ -31,6 +32,35 @@
 
 #undef CREATE_TRACE_POINTS
 #include <trace/hooks/mm.h>
+
+int sysctl_zram_admission_protect_workingset __read_mostly;
+int sysctl_zram_admission_protect_referenced __read_mostly;
+
+static inline bool swap_info_is_zram(struct swap_info_struct *sis)
+{
+	if (!sis || !sis->bdev || !sis->bdev->bd_disk)
+		return false;
+
+	return !strncmp(sis->bdev->bd_disk->disk_name, "zram", 4);
+}
+
+static bool zram_should_activate_for_admission(struct folio *folio,
+		struct writeback_control *wbc, struct swap_info_struct *sis)
+{
+	if (!wbc->for_reclaim || !folio_test_anon(folio) ||
+	    !swap_info_is_zram(sis))
+		return false;
+
+	if (READ_ONCE(sysctl_zram_admission_protect_workingset) &&
+	    folio_test_workingset(folio))
+		return true;
+
+	if (READ_ONCE(sysctl_zram_admission_protect_referenced) &&
+	    folio_test_referenced(folio))
+		return true;
+
+	return false;
+}
 
 static void __end_swap_bio_write(struct bio *bio)
 {
@@ -292,6 +322,7 @@ static bool kcompressd_store(struct folio *folio)
 int swap_writepage(struct page *page, struct writeback_control *wbc)
 {
 	struct folio *folio = page_folio(page);
+	struct swap_info_struct *sis = page_swap_info(page);
 	int ret;
 
 	if (folio_free_swap(folio)) {
@@ -307,6 +338,11 @@ int swap_writepage(struct page *page, struct writeback_control *wbc)
 		folio_mark_dirty(folio);
 		folio_unlock(folio);
 		return ret;
+	}
+
+	if (zram_should_activate_for_admission(folio, wbc, sis)) {
+		folio_mark_dirty(folio);
+		return AOP_WRITEPAGE_ACTIVATE;
 	}
 
 	/*

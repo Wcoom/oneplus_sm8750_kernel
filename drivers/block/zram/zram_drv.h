@@ -20,7 +20,6 @@
 #include <linux/crypto.h>
 #include <linux/list_lru.h>
 #include <linux/percpu_counter.h>
-#include <linux/xarray.h>
 
 #include "zcomp.h"
 
@@ -72,15 +71,19 @@ enum zram_pageflags {
 struct zram_table_entry {
 	unsigned long handle;
 	unsigned long flags;
-#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
-	ktime_t ac_time;
-#endif
-#ifdef	CONFIG_ZRAM_WRITEBACK
-	struct list_head lru;
-	u16 wb_ext_len;
-	u16 wb_ext_off;
-#endif
 };
+
+#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
+struct zram_actime_entry {
+	ktime_t ac_time;
+};
+#endif
+
+#ifdef	CONFIG_ZRAM_WRITEBACK
+struct zram_wb_table_entry {
+	struct list_head lru;
+};
+#endif
 
 #ifdef CONFIG_ZRAM_WRITEBACK
 #define BATCH_SIZE 32
@@ -138,6 +141,12 @@ struct zram_stats {
 
 struct zram {
 	struct zram_table_entry *table;
+#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
+	struct zram_actime_entry *ac_time_table;
+#endif
+#ifdef CONFIG_ZRAM_WRITEBACK
+	struct zram_wb_table_entry *wb_table;
+#endif
 	struct zs_pool *mem_pool;
 	struct zcomp *comp;
 	struct gendisk *disk;
@@ -169,13 +178,13 @@ struct zram {
 	struct list_head active_list;
 	spinlock_t active_list_lock;
 	atomic_long_t active_pages;
-	struct xarray wb_extent_xa;
 	u8 wb_read_policy;
 	u8 wb_read_gap_pages;
 	u8 wb_frag_mode;
 	u8 wb_frag_reserved;
 	u32 wb_read_batch_ewma;
 	u32 wb_read_fallback_ewma;
+	u32 current_shrinker_window_ms;
 #endif
 #ifdef CONFIG_ZRAM_MEMORY_TRACKING
 	struct dentry *debugfs_dir;
@@ -187,6 +196,63 @@ struct zram {
 	spinlock_t pressure_lock; 
 #endif
 };
+
+#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
+
+static inline struct zram_actime_entry *zram_actime_entry(struct zram *zram,
+			u32 index)
+{
+	return &zram->ac_time_table[index];
+}
+
+static inline ktime_t zram_read_ac_time(struct zram *zram, u32 index)
+{
+	return READ_ONCE(zram_actime_entry(zram, index)->ac_time);
+}
+
+static inline void zram_write_ac_time(struct zram *zram, u32 index,
+			      ktime_t time)
+{
+	WRITE_ONCE(zram_actime_entry(zram, index)->ac_time, time);
+}
+
+static inline void zram_clear_ac_time(struct zram *zram, u32 index)
+{
+	WRITE_ONCE(zram_actime_entry(zram, index)->ac_time, 0);
+}
+
+#else
+
+static inline ktime_t zram_read_ac_time(struct zram *zram, u32 index)
+{
+	return 0;
+}
+
+static inline void zram_write_ac_time(struct zram *zram, u32 index,
+			      ktime_t time)
+{
+}
+
+static inline void zram_clear_ac_time(struct zram *zram, u32 index)
+{
+}
+
+#endif
+
+#ifdef CONFIG_ZRAM_WRITEBACK
+
+static inline struct zram_wb_table_entry *zram_wb_table_entry(struct zram *zram,
+				u32 index)
+{
+	return &zram->wb_table[index];
+}
+
+static inline struct list_head *zram_wb_lru(struct zram *zram, u32 index)
+{
+	return &zram_wb_table_entry(zram, index)->lru;
+}
+
+#endif
 
 void zram_slot_lock(struct zram *zram, u32 index);
 void zram_slot_unlock(struct zram *zram, u32 index);
@@ -217,32 +283,6 @@ struct zram_pp_ctl {
 };
 
 void free_pp_slot(struct zram *zram, struct zram_pp_slot *pps);
-void zram_wb_extent_init(struct zram *zram);
-void zram_wb_extent_destroy(struct zram *zram);
-void zram_wb_extent_record_run(struct zram *zram,
-			      unsigned long index_start,
-			      unsigned long blk_start,
-			      unsigned int nr_pages,
-			      gfp_t gfp);
-bool zram_wb_extent_lookup(struct zram *zram,
-			 unsigned long index,
-			 unsigned long *blk,
-			 unsigned int *max_pages);
-#else
-static inline void zram_wb_extent_init(struct zram *zram) {}
-static inline void zram_wb_extent_destroy(struct zram *zram) {}
-static inline void zram_wb_extent_record_run(struct zram *zram,
-			      unsigned long index_start,
-			      unsigned long blk_start,
-			      unsigned int nr_pages,
-			      gfp_t gfp) {}
-static inline bool zram_wb_extent_lookup(struct zram *zram,
-			 unsigned long index,
-			 unsigned long *blk,
-			 unsigned int *max_pages)
-{
-	return false;
-}
 #endif
 
 #endif

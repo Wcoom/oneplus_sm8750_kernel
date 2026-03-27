@@ -27,33 +27,6 @@ static void zram_wb_release_bio_pages(struct zram *zram, struct bio *bio)
 		mempool_free(bv->bv_page, zram->wb_page_pool);
 }
 
-void zram_wb_record_run(struct zram_wb_batch_request *req,
-			unsigned long index,
-			unsigned long blk_idx)
-{
-	struct zram_wb_run *run;
-
-	if (!req->run_count) {
-		run = &req->runs[req->run_count++];
-		run->index_start = index;
-		run->blk_start = blk_idx;
-		run->nr_pages = 1;
-		return;
-	}
-
-	run = &req->runs[req->run_count - 1];
-	if (run->index_start + run->nr_pages == index &&
-	    run->blk_start + run->nr_pages == blk_idx) {
-		run->nr_pages++;
-		return;
-	}
-
-	run = &req->runs[req->run_count++];
-	run->index_start = index;
-	run->blk_start = blk_idx;
-	run->nr_pages = 1;
-}
-
 /* 
  * front_pad: 在 bio 结构之前预留空间存放 zram_wb_batch_request
  * 这个结构现在比较大 (包含数组)，必须确保 bio 对齐
@@ -260,12 +233,6 @@ handle_err:
 		free_pp_slot(zram, pps);
 	}
 
-	for (i = 0; i < req->run_count; i++)
-		zram_wb_extent_record_run(zram, req->runs[i].index_start,
-					  req->runs[i].blk_start,
-					  req->runs[i].nr_pages,
-					  GFP_ATOMIC);
-
 finalize_batch:
 
 	if (success_count > 0) {
@@ -408,7 +375,6 @@ struct zram_wb_batch_request *alloc_wb_batch_request(struct zram *zram,
 	req->bio = bio;
 	INIT_LIST_HEAD(&req->node);
 	req->count = 0; /* 初始计数为 0 */
-	req->run_count = 0;
 	req->reserved_wb_units = 0;
 
 	/* 设置 bio 的起始扇区和回调 */

@@ -36,6 +36,9 @@ enum zs_mapmode {
 struct zs_pool_stats {
 	/* How many pages were migrated (freed) */
 	atomic_long_t pages_compacted;
+	/* Small hot-class allocator/free fastpath selections */
+	atomic_long_t fastpath_allocs;
+	atomic_long_t fastpath_frees;
 };
 
 struct zs_pool;

@@ -219,10 +219,15 @@ struct link_free {
 static struct kmem_cache *handle_cachep;
 static struct kmem_cache *zspage_cachep;
 
+#define ZS_FASTPATH_CLASS_WINDOW 3
+#define ZS_INUSE_RATIO_80_GROUP	(ZS_INUSE_RATIO_99 - 2)
+
 struct zs_pool {
 	const char *name;
 
 	struct size_class *size_class[ZS_SIZE_CLASSES];
+	unsigned int fastpath_class_min;
+	unsigned int fastpath_class_max;
 
 	atomic_long_t pages_allocated;
 
@@ -1027,6 +1032,48 @@ static struct zspage *find_get_zspage(struct size_class *class)
 	return zspage;
 }
 
+static bool zs_class_fastpath(struct zs_pool *pool, struct size_class *class)
+{
+	return class->index >= pool->fastpath_class_min &&
+	       class->index <= pool->fastpath_class_max;
+}
+
+static struct zspage *find_get_zspage_fast(struct zs_pool *pool,
+		struct size_class *class)
+{
+	struct zspage *zspage;
+
+	if (!zs_class_fastpath(pool, class))
+		return find_get_zspage(class);
+
+	if (list_empty(&class->fullness_list[ZS_INUSE_RATIO_100]) &&
+	    !list_empty(&class->fullness_list[ZS_INUSE_RATIO_99])) {
+		zspage = list_first_entry(&class->fullness_list[ZS_INUSE_RATIO_99],
+					 struct zspage, list);
+		atomic_long_inc(&pool->stats.fastpath_allocs);
+		return zspage;
+	}
+
+	if (list_empty(&class->fullness_list[ZS_INUSE_RATIO_100]) &&
+	    !list_empty(&class->fullness_list[ZS_INUSE_RATIO_80_GROUP])) {
+		zspage = list_first_entry(&class->fullness_list[ZS_INUSE_RATIO_80_GROUP],
+					 struct zspage, list);
+		atomic_long_inc(&pool->stats.fastpath_allocs);
+		return zspage;
+	}
+
+	return find_get_zspage(class);
+}
+
+static bool zs_should_count_fast_free(struct zs_pool *pool,
+		struct size_class *class, int fullness)
+{
+	if (!zs_class_fastpath(pool, class))
+		return false;
+
+	return fullness == ZS_INUSE_RATIO_100 || fullness == ZS_INUSE_RATIO_99;
+}
+
 static inline int __zs_cpu_up(struct mapping_area *area)
 {
 	/*
@@ -1498,7 +1545,7 @@ unsigned long zs_malloc(struct zs_pool *pool, size_t size, gfp_t gfp)
 
 	/* pool->lock effectively protects the zpage migration */
 	spin_lock(&pool->lock);
-	zspage = find_get_zspage(class);
+	zspage = find_get_zspage_fast(pool, class);
 	if (likely(zspage)) {
 		obj = obj_malloc(pool, zspage, handle);
 		/* Now move the zspage to another fullness group, if required */
@@ -1588,6 +1635,8 @@ void zs_free(struct zs_pool *pool, unsigned long handle)
 	obj_free(class->size, obj);
 
 	fullness = fix_fullness_group(class, zspage);
+	if (zs_should_count_fast_free(pool, class, fullness))
+		atomic_long_inc(&pool->stats.fastpath_frees);
 	if (fullness == ZS_INUSE_RATIO_0)
 		free_zspage(pool, class, zspage);
 
@@ -2383,6 +2432,11 @@ struct zs_pool *zs_create_pool(const char *name)
 
 		prev_class = class;
 	}
+
+	pool->fastpath_class_min = get_size_class_index(512 + ZS_HANDLE_SIZE);
+	pool->fastpath_class_max = min_t(unsigned int,
+		pool->fastpath_class_min + ZS_FASTPATH_CLASS_WINDOW,
+		ZS_SIZE_CLASSES - 1);
 
 	/* debug only, don't abort if it fails */
 	zs_pool_stat_create(pool, name);

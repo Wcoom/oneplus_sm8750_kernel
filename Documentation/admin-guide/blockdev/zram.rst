@@ -279,7 +279,8 @@ a single line of text and contains the following stats separated by whitespace:
  ============== =============================================================
  bd_count	size of data written in backing device.
 		Unit: 4K bytes
- bd_reads	the number of reads from backing device
+ bd_reads	the number of first successful readbacks from backing
+		device. Each writeback generation is counted at most once.
 		Unit: 4K bytes
  bd_writes	the number of writes to backing device
 		Unit: 4K bytes

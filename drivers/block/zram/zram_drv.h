@@ -63,7 +63,7 @@ enum zram_pageflags {
 	ZRAM_TEMP_0, /* temperature bit0: read-frequency tier */
 	ZRAM_TEMP_1, /* temperature bit1: read-frequency tier */
 	ZRAM_TEMP_2, /* temperature bit2: read-frequency tier */
-	ZRAM_WB_READ_ONCE, /* count one successful readback per WB generation */
+	ZRAM_WB_READ_ONCE, /* count only the first successful readback per WB generation */
 
 	__NR_ZRAM_PAGEFLAGS,
 };
@@ -132,9 +132,9 @@ struct zram_stats {
 	atomic64_t writestall;		/* no. of write slow paths */
 	atomic64_t miss_free;		/* no. of missed free */
 #ifdef	CONFIG_ZRAM_WRITEBACK
-	struct percpu_counter bd_count;		/* no. of pages in backing device */
-	struct percpu_counter bd_reads;		/* no. of first successful readbacks */
-	struct percpu_counter bd_writes;		/* no. of writes from backing device */
+	atomic64_t bd_count;		/* no. of pages in backing device */
+	atomic64_t bd_reads;		/* no. of first successful readbacks from backing device */
+	atomic64_t bd_writes;		/* no. of writes from backing device */
 	atomic64_t wb_pages_skipped;	/* no. of pages skipped by writeback filters */
 	atomic64_t wb_read_batch_pages;	/* total pages served via wb read batches */
 	atomic64_t wb_read_batch_bios;	/* total bios submitted for wb read batches */

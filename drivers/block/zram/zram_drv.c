@@ -638,7 +638,7 @@ static void zram_promote_accessed(struct zram *zram, u32 index, bool from_wb)
 
 	zram_slot_lock(zram, index);
 
-	/* 普通访问 +2；从 backing device 读回直接回到最高温，重新开始降温流程。 */
+	/* 普通访问 +2；从 backing device 读回直接回到最高温。 */
 	if (from_wb)
 		zram_set_temp_locked(zram, index, ZRAM_TEMP_MAX);
 	else
@@ -670,7 +670,7 @@ static void zram_promote_accessed(struct zram *zram, u32 index, bool from_wb)
 	zram_slot_unlock(zram, index);
 
 	if (count_readback)
-		percpu_counter_inc(&zram->stats.bd_reads);
+		atomic64_inc(&zram->stats.bd_reads);
 
 	if (need_enqueue)
 		zram_queue_active(zram, index);
@@ -2112,24 +2112,32 @@ static int read_from_bdev(struct zram *zram, struct page *page,
 			unsigned long entry, struct bio *parent)
 {
 	struct page *pages[1] = { page };
+	int ret;
 
 	if (!parent) {
 		if (WARN_ON_ONCE(!IS_ENABLED(ZRAM_PARTIAL_IO)))
 			return -EIO;
-		return read_from_bdev_sync(zram, pages, ARRAY_SIZE(pages), entry);
+		ret = read_from_bdev_sync(zram, pages, ARRAY_SIZE(pages), entry);
+	} else {
+		ret = read_from_bdev_async(zram, pages, ARRAY_SIZE(pages), entry,
+					    parent);
 	}
-	return read_from_bdev_async(zram, pages, ARRAY_SIZE(pages), entry,
-				    parent);
+
+	return ret;
 	}
 
 static int read_from_bdev_batch(struct zram *zram, struct page **pages,
 				unsigned int nr_pages, unsigned long entry,
 				struct bio *parent)
 {
-	if (!parent)
-		return read_from_bdev_sync(zram, pages, nr_pages, entry);
+	int ret;
 
-	return read_from_bdev_async(zram, pages, nr_pages, entry, parent);
+	if (!parent)
+		ret = read_from_bdev_sync(zram, pages, nr_pages, entry);
+	else
+		ret = read_from_bdev_async(zram, pages, nr_pages, entry, parent);
+
+	return ret;
 }
 #else
 static inline void reset_bdev(struct zram *zram) {};
@@ -2397,14 +2405,20 @@ static ssize_t bd_stat_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	struct zram *zram = dev_to_zram(dev);
+	u64 bd_count;
+	u64 bd_reads;
+	u64 bd_writes;
 	ssize_t ret;
 
 	down_read(&zram->init_lock);
+	bd_count = max_t(s64, atomic64_read(&zram->stats.bd_count), 0);
+	bd_reads = max_t(s64, atomic64_read(&zram->stats.bd_reads), 0);
+	bd_writes = max_t(s64, atomic64_read(&zram->stats.bd_writes), 0);
 	ret = scnprintf(buf, PAGE_SIZE,
 		"%8llu %8llu %8llu\n",
-			FOUR_K((u64)percpu_counter_read(&zram->stats.bd_count)),
-			FOUR_K((u64)percpu_counter_read(&zram->stats.bd_reads)),
-			FOUR_K((u64)percpu_counter_read(&zram->stats.bd_writes)));
+			FOUR_K(bd_count),
+			FOUR_K(bd_reads),
+			FOUR_K(bd_writes));
 	up_read(&zram->init_lock);
 
 	return ret;
@@ -2605,7 +2619,6 @@ void zram_free_page(struct zram *zram, size_t index)
 	clear_mask = BIT(ZRAM_IDLE) | BIT(ZRAM_INCOMPRESSIBLE) |
 		     BIT(ZRAM_PAGE_ANON) | BIT(ZRAM_PAGE_FILE) |
 		     BIT(ZRAM_PAGE_DIRTY) | BIT(ZRAM_WB_SECOND_CHANCE) |
-		     BIT(ZRAM_WB_READ_ONCE) |
 		     BIT(ZRAM_REFERENCED) | BIT(ZRAM_TEMP_0) |
 		     BIT(ZRAM_TEMP_1) | BIT(ZRAM_TEMP_2) |
 		     BIT(ZRAM_PP_SLOT);
@@ -2632,6 +2645,8 @@ void zram_free_page(struct zram *zram, size_t index)
 		handle = zram_get_handle(zram, index);
 
 		zram_clear_flag(zram, index, ZRAM_WB);
+		if (zram_test_flag(zram, index, ZRAM_WB_READ_ONCE))
+			zram_clear_flag(zram, index, ZRAM_WB_READ_ONCE);
 		free_block_bdev(zram, handle);
 		goto out;
 	}
@@ -3218,6 +3233,15 @@ check_err:
 			bio->bi_status = BLK_STS_IOERR;
 			break;
 		}
+	#ifdef CONFIG_ZRAM_WRITEBACK
+		if (from_bdev) {
+			unsigned int active_pages = bdev_nr_pages ?: 1;
+			unsigned int active_idx;
+
+			for (active_idx = 0; active_idx < active_pages; active_idx++)
+				zram_promote_accessed(zram, index + active_idx, true);
+		}
+	#endif
 		if (!from_bdev)
 			flush_dcache_page(bv.bv_page);
 
@@ -3759,26 +3783,12 @@ static int zram_stats_init(struct zram *zram)
 	if (ret)
 		goto err_pages_stored;
 #ifdef CONFIG_ZRAM_WRITEBACK
-	ret = percpu_counter_init(&zram->stats.bd_count, 0, GFP_KERNEL);
-	if (ret)
-		goto err_bd_count;
-	ret = percpu_counter_init(&zram->stats.bd_reads, 0, GFP_KERNEL);
-	if (ret)
-		goto err_bd_reads;
-	ret = percpu_counter_init(&zram->stats.bd_writes, 0, GFP_KERNEL);
-	if (ret)
-		goto err_bd_writes;
+	atomic64_set(&zram->stats.bd_count, 0);
+	atomic64_set(&zram->stats.bd_reads, 0);
+	atomic64_set(&zram->stats.bd_writes, 0);
 #endif
 	return 0;
 
-#ifdef CONFIG_ZRAM_WRITEBACK
-err_bd_writes:
-	percpu_counter_destroy(&zram->stats.bd_reads);
-err_bd_reads:
-	percpu_counter_destroy(&zram->stats.bd_count);
-err_bd_count:
-	percpu_counter_destroy(&zram->stats.pages_stored);
-#endif
 err_pages_stored:
 	percpu_counter_destroy(&zram->stats.huge_pages_since);
 err_huge_pages_since:
@@ -3800,11 +3810,6 @@ static void zram_stats_destroy(struct zram *zram)
 	percpu_counter_destroy(&zram->stats.huge_pages);
 	percpu_counter_destroy(&zram->stats.huge_pages_since);
 	percpu_counter_destroy(&zram->stats.pages_stored);
-#ifdef CONFIG_ZRAM_WRITEBACK
-	percpu_counter_destroy(&zram->stats.bd_count);
-	percpu_counter_destroy(&zram->stats.bd_reads);
-	percpu_counter_destroy(&zram->stats.bd_writes);
-#endif
 }
 
 static int zram_add(void)
@@ -4177,7 +4182,7 @@ static unsigned long __get_zram_usage(struct zram *zram)
 		return 0;
 
 	pages_stored = percpu_counter_read(&zram->stats.pages_stored);
-	bd_count = percpu_counter_read(&zram->stats.bd_count);
+	bd_count = max_t(s64, atomic64_read(&zram->stats.bd_count), 0);
 	total_pages = zram->disksize >> PAGE_SHIFT;
 
 	if (total_pages == 0)

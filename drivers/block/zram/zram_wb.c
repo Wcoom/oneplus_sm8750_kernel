@@ -150,7 +150,7 @@ unsigned long alloc_block_bdev_batch(struct zram *zram, int req_count, int *act_
 	spin_unlock(&zram->bitmap_lock);
 
 	if (blk_idx) {
-		percpu_counter_add(&zram->stats.bd_count, count);
+		atomic64_add(count, &zram->stats.bd_count);
 		if (act_count)
 			*act_count = count;
 	} else {
@@ -170,7 +170,7 @@ void free_block_bdev_range(struct zram *zram, unsigned long blk_idx, int count)
 		zram->bitmap_last_free_hint = blk_idx;
 	spin_unlock(&zram->bitmap_lock);
 
-	percpu_counter_sub(&zram->stats.bd_count, count);
+	atomic64_sub(count, &zram->stats.bd_count);
 }
 
 /* 保持原有单块释放函数的兼容性 */
@@ -242,6 +242,7 @@ static void complete_wb_batch(struct zram_wb_batch_request *req)
 		zram_set_flag(zram, index, ZRAM_WB);
 		zram_set_flag(zram, index, ZRAM_WB_READ_ONCE);
 		zram_set_handle(zram, index, blk_idx);
+		atomic64_inc(&zram->stats.bd_writes);
 
 		zram_clear_flag(zram, index, ZRAM_PP_SLOT);
 		zram_slot_unlock(zram, index);
@@ -259,7 +260,6 @@ handle_err:
 finalize_batch:
 
 	if (success_count > 0) {
-		percpu_counter_add(&zram->stats.bd_writes, success_count);
 		percpu_counter_add(&zram->stats.pages_stored, success_count);
 	}
 

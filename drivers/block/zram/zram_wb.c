@@ -15,8 +15,30 @@
 
 static struct task_struct *wb_thread;
 static DECLARE_WAIT_QUEUE_HEAD(wb_wq);
-static struct zram_wb_request_list wb_req_list;
+static struct zram_wb_request_list wb_submit_req_list;
+static struct zram_wb_request_list wb_complete_req_list;
 static struct bio_set zram_wb_bs;
+
+static void enqueue_wb_request(struct zram_wb_request_list *req_list,
+			       struct zram_wb_batch_request *req);
+
+static void zram_wb_put_inflight(struct zram *zram)
+{
+	if (atomic_dec_and_test(&zram->wb_inflight))
+		wake_up_all(&zram->wb_done_wait);
+}
+
+void zram_wb_submit_batch(struct zram_wb_batch_request *req)
+{
+	atomic_inc(&req->zram->wb_inflight);
+	enqueue_wb_request(&wb_submit_req_list, req);
+	wake_up(&wb_wq);
+}
+
+void zram_wb_wait_for_idle(struct zram *zram)
+{
+	wait_event(zram->wb_done_wait, !atomic_read(&zram->wb_inflight));
+}
 
 static void zram_wb_release_bio_pages(struct zram *zram, struct bio *bio)
 {
@@ -218,6 +240,7 @@ static void complete_wb_batch(struct zram_wb_batch_request *req)
 		/* 成功路径：释放内存页，设置写回标志 */
 		zram_free_page(zram, index);
 		zram_set_flag(zram, index, ZRAM_WB);
+		zram_set_flag(zram, index, ZRAM_WB_READ_ONCE);
 		zram_set_handle(zram, index, blk_idx);
 
 		zram_clear_flag(zram, index, ZRAM_PP_SLOT);
@@ -264,56 +287,84 @@ finalize_batch:
 	zram_wb_release_bio_pages(zram, bio);
 	/* bio_put 会释放 bio 内存以及 front_pad */
 	bio_put(bio);
+	zram_wb_put_inflight(zram);
 }
 
 static void enqueue_wb_request(struct zram_wb_request_list *req_list,
 			       struct zram_wb_batch_request *req)
 {
-	spin_lock_bh(&req_list->lock);
-	list_add_tail(&req->node, &req_list->head);
-	WRITE_ONCE(req_list->count, req_list->count + 1);
-	spin_unlock_bh(&req_list->lock);
+	llist_add(&req->node, &req_list->head);
 }
 
-static struct zram_wb_batch_request *dequeue_wb_request(
+static struct llist_node *dequeue_wb_requests(
 	struct zram_wb_request_list *req_list)
 {
-	struct zram_wb_batch_request *req = NULL;
+	return llist_del_all(&req_list->head);
+}
 
-	spin_lock_bh(&req_list->lock);
-	if (!list_empty(&req_list->head)) {
-		req = list_first_entry(&req_list->head,
-				       struct zram_wb_batch_request,
-				       node);
-		list_del(&req->node);
-		WRITE_ONCE(req_list->count, req_list->count - 1);
+static void complete_wb_requests(struct llist_node *head)
+{
+	struct llist_node *node, *next;
+
+	head = llist_reverse_order(head);
+	llist_for_each_safe(node, next, head) {
+		struct zram_wb_batch_request *req;
+
+		req = llist_entry(node, struct zram_wb_batch_request, node);
+		complete_wb_batch(req);
 	}
-	spin_unlock_bh(&req_list->lock);
+}
 
-	return req;
+static void submit_wb_requests(struct llist_node *head)
+{
+	struct blk_plug plug;
+	struct llist_node *node, *next;
+
+	blk_start_plug(&plug);
+	head = llist_reverse_order(head);
+	llist_for_each_safe(node, next, head) {
+		struct zram_wb_batch_request *req;
+
+		req = llist_entry(node, struct zram_wb_batch_request, node);
+		if (unlikely(atomic_read(&req->zram->quiescing))) {
+			req->bio->bi_status = BLK_STS_IOERR;
+			complete_wb_batch(req);
+			continue;
+		}
+
+		submit_bio(req->bio);
+	}
+	blk_finish_plug(&plug);
 }
 
 static void destroy_wb_request_list(struct zram_wb_request_list *req_list)
 {
-	struct zram_wb_batch_request *req;
+	struct llist_node *head, *node, *next;
 
-	while (!list_empty(&req_list->head)) {
-		req = dequeue_wb_request(req_list);
-		int i;
-		for(i = 0; i < req->count; i++) {
-			free_block_bdev(req->zram, req->sub_reqs[i].blk_idx);
-			free_pp_slot(req->zram, req->sub_reqs[i].pps);
+	while ((head = dequeue_wb_requests(req_list)) != NULL) {
+		head = llist_reverse_order(head);
+		llist_for_each_safe(node, next, head) {
+			struct zram_wb_batch_request *req;
+			int i;
+
+			req = llist_entry(node, struct zram_wb_batch_request, node);
+			for (i = 0; i < req->count; i++) {
+				free_block_bdev(req->zram, req->sub_reqs[i].blk_idx);
+				free_pp_slot(req->zram, req->sub_reqs[i].pps);
+			}
+
+			/* Free pages and bio */
+			zram_wb_release_bio_pages(req->zram, req->bio);
+			bio_put(req->bio);
+			zram_wb_put_inflight(req->zram);
 		}
-		
-		/* Free pages and bio */
-		zram_wb_release_bio_pages(req->zram, req->bio);
-		bio_put(req->bio);
 	}
 }
 
 static bool wb_ready_to_run(void)
 {
-	return READ_ONCE(wb_req_list.count) > 0;
+	return !llist_empty(&wb_submit_req_list.head) ||
+	       !llist_empty(&wb_complete_req_list.head);
 }
 
 static int wb_thread_func(void *data)
@@ -327,11 +378,23 @@ static int wb_thread_func(void *data)
 		wait_event_freezable(wb_wq, wb_ready_to_run() || kthread_should_stop());
 
 		while (1) {
-			struct zram_wb_batch_request *req;
-			req = dequeue_wb_request(&wb_req_list);
-			if (!req)
+			struct llist_node *head;
+			bool did_work = false;
+
+			head = dequeue_wb_requests(&wb_complete_req_list);
+			if (head) {
+				did_work = true;
+				complete_wb_requests(head);
+			}
+
+			head = dequeue_wb_requests(&wb_submit_req_list);
+			if (head) {
+				did_work = true;
+				submit_wb_requests(head);
+			}
+
+			if (!did_work)
 				break;
-			complete_wb_batch(req);
 		}
 	}
 
@@ -342,7 +405,7 @@ static int wb_thread_func(void *data)
 static void zram_writeback_end_io(struct bio *bio)
 {
 	struct zram_wb_batch_request *req = bio_to_wb_batch(bio);
-	enqueue_wb_request(&wb_req_list, req);
+	enqueue_wb_request(&wb_complete_req_list, req);
 	wake_up(&wb_wq);
 }
 
@@ -373,7 +436,7 @@ struct zram_wb_batch_request *alloc_wb_batch_request(struct zram *zram,
 	req->zram = zram;
 	req->ppctl = ctl;
 	req->bio = bio;
-	INIT_LIST_HEAD(&req->node);
+	req->node.next = NULL;
 	req->count = 0; /* 初始计数为 0 */
 	req->reserved_wb_units = 0;
 
@@ -396,9 +459,8 @@ int setup_zram_writeback(void)
 		return -1;
 	}
 
-	spin_lock_init(&wb_req_list.lock);
-	INIT_LIST_HEAD(&wb_req_list.head);
-	wb_req_list.count = 0;
+	init_llist_head(&wb_submit_req_list.head);
+	init_llist_head(&wb_complete_req_list.head);
 
 	wb_thread = kthread_run(wb_thread_func, NULL, "zram_wb_thread");
 	if (IS_ERR(wb_thread)) {
@@ -411,8 +473,12 @@ int setup_zram_writeback(void)
 
 void destroy_zram_writeback(void)
 {
-	if (wb_thread)
+	if (wb_thread) {
+		wake_up_all(&wb_wq);
 		kthread_stop(wb_thread);
-	destroy_wb_request_list(&wb_req_list);
+		wb_thread = NULL;
+	}
+	destroy_wb_request_list(&wb_submit_req_list);
+	destroy_wb_request_list(&wb_complete_req_list);
 	bioset_exit(&zram_wb_bs);
 }

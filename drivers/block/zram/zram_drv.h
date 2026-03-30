@@ -20,6 +20,7 @@
 #include <linux/crypto.h>
 #include <linux/list_lru.h>
 #include <linux/percpu_counter.h>
+#include <linux/wait.h>
 
 #include "zcomp.h"
 
@@ -61,6 +62,8 @@ enum zram_pageflags {
 	ZRAM_ACTIVE, /* Page is in active list (percpu_pagevec or active_list) */
 	ZRAM_TEMP_0, /* temperature bit0: read-frequency tier */
 	ZRAM_TEMP_1, /* temperature bit1: read-frequency tier */
+	ZRAM_TEMP_2, /* temperature bit2: read-frequency tier */
+	ZRAM_WB_READ_ONCE, /* count one successful readback per WB generation */
 
 	__NR_ZRAM_PAGEFLAGS,
 };
@@ -130,7 +133,7 @@ struct zram_stats {
 	atomic64_t miss_free;		/* no. of missed free */
 #ifdef	CONFIG_ZRAM_WRITEBACK
 	struct percpu_counter bd_count;		/* no. of pages in backing device */
-	struct percpu_counter bd_reads;		/* no. of reads from backing device */
+	struct percpu_counter bd_reads;		/* no. of first successful readbacks */
 	struct percpu_counter bd_writes;		/* no. of writes from backing device */
 	atomic64_t wb_pages_skipped;	/* no. of pages skipped by writeback filters */
 	atomic64_t wb_read_batch_pages;	/* total pages served via wb read batches */
@@ -164,6 +167,10 @@ struct zram {
 	spinlock_t wb_limit_lock;
 	bool wb_limit_enable;
 	u64 bd_wb_limit;
+	atomic_t wb_inflight;
+	atomic_t quiescing;
+	wait_queue_head_t wb_done_wait;
+	wait_queue_head_t pp_done_wait;
 	struct block_device *bdev;
 	unsigned long *bitmap;
 	unsigned long nr_pages;

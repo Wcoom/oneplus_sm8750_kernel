@@ -4,6 +4,7 @@
 #define _ZRAM_WRITEBACK_H_
 
 #include <linux/bio.h>
+#include <linux/llist.h>
 #include "zram_drv.h"
 
 /* 定义最大合并数量 */
@@ -26,7 +27,7 @@ struct zram_wb_batch_request {
 	struct zram *zram;
 	struct zram_pp_ctl *ppctl;
 	struct bio *bio;
-	struct list_head node;
+	struct llist_node node;
 	
 	/* 当前批次中包含的有效子请求数量 */
 	unsigned int count;
@@ -37,9 +38,7 @@ struct zram_wb_batch_request {
 };
 
 struct zram_wb_request_list {
-	struct list_head head;
-	int count;
-	spinlock_t lock;
+	struct llist_head head;
 };
 
 #if IS_ENABLED(CONFIG_ZRAM_WRITEBACK)
@@ -52,12 +51,17 @@ struct zram_wb_batch_request *alloc_wb_batch_request(struct zram *zram,
 					     unsigned long start_blk_idx,
 					     gfp_t gfp_mask);
 
+void zram_wb_submit_batch(struct zram_wb_batch_request *req);
+void zram_wb_wait_for_idle(struct zram *zram);
+
 int setup_zram_writeback(void);
 void destroy_zram_writeback(void);
 #else
 inline unsigned long alloc_block_bdev_batch(struct zram *zram, int req_count, int *act_count) { return 0; }
 inline void free_block_bdev(struct zram *zram, unsigned long blk_idx) {};
 inline void free_block_bdev_range(struct zram *zram, unsigned long blk_idx, int count) {};
+inline void zram_wb_submit_batch(struct zram_wb_batch_request *req) {}
+inline void zram_wb_wait_for_idle(struct zram *zram) {}
 inline int setup_zram_writeback(void) { return 0; }
 inline void destroy_zram_writeback(void) {}
 #endif

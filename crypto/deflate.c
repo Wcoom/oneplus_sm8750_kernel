@@ -119,7 +119,7 @@ out:
 	return ret;
 }
 
-static void *gen_deflate_alloc_ctx(int format)
+static void *gen_deflate_alloc_ctx(struct crypto_scomp *tfm, int format)
 {
 	struct deflate_ctx *ctx;
 	int ret;
@@ -137,14 +137,14 @@ static void *gen_deflate_alloc_ctx(int format)
 	return ctx;
 }
 
-static void *deflate_alloc_ctx(void)
+static void *deflate_alloc_ctx(struct crypto_scomp *tfm)
 {
-	return gen_deflate_alloc_ctx(0);
+	return gen_deflate_alloc_ctx(tfm, 0);
 }
 
-static void *zlib_deflate_alloc_ctx(void)
+static void *zlib_deflate_alloc_ctx(struct crypto_scomp *tfm)
 {
-	return gen_deflate_alloc_ctx(1);
+	return gen_deflate_alloc_ctx(tfm, 1);
 }
 
 static int deflate_init(struct crypto_tfm *tfm)
@@ -160,7 +160,7 @@ static void __deflate_exit(void *ctx)
 	deflate_decomp_exit(ctx);
 }
 
-static void deflate_free_ctx(void *ctx)
+static void deflate_free_ctx(struct crypto_scomp *tfm, void *ctx)
 {
 	__deflate_exit(ctx);
 	kfree_sensitive(ctx);

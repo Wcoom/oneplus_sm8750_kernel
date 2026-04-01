@@ -669,7 +669,11 @@ static struct dma_async_tx_descriptor *bam_prep_slave_sg(struct dma_chan *chan,
 
 	/* allocate enough room to accomodate the number of entries */
 	async_desc = kzalloc(struct_size(async_desc, desc, num_alloc),
-			     GFP_NOWAIT);
+			     //#ifndef OPLUS_ARCH_EXTENDS
+//			     GFP_NOWAIT);
+//#else
+			     GFP_ATOMIC);
+//#endif
 
 	if (!async_desc)
 		return NULL;

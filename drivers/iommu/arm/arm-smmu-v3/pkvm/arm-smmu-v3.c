@@ -1250,6 +1250,13 @@ static int smmu_detach_dev(struct kvm_hyp_iommu *iommu, struct kvm_hyp_iommu_dom
 				goto out_skip_ste;
 			}
 		}
+	} else {
+		domain_id = FIELD_GET(STRTAB_STE_2_S2VMID, dst[2]);
+		if ((ste_cfg != STRTAB_STE_0_CFG_S2_TRANS) ||
+		    (domain->domain_id != domain_id)) {
+			ret = -EACCES;
+			goto out_unlock;
+		}
 	}
 	/* For stage-2 and pasid = 0 */
 	if (!(dst[0] & STRTAB_STE_0_V)) {

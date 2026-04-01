@@ -34,7 +34,9 @@
 #include <linux/statfs.h>
 #include <linux/uaccess.h>
 #include <linux/blk-mq.h>
+#include <trace/hooks/blk.h>
 #include <linux/spinlock.h>
+#include <linux/math64.h>
 #include <uapi/linux/loop.h>
 
 /* Possible states of device */
@@ -46,6 +48,19 @@ enum {
 };
 
 struct loop_func_table;
+struct loop_worker;
+struct loop_backing_extent;
+
+#define LOOP_PARALLEL_MAX_SHARDS	8
+#define LOOP_LAYOUT_DEFAULT_SCAN_MB	256
+#define LOOP_LAYOUT_SMALL_EXTENT_BYTES	(128 * 1024ULL)
+
+enum loop_layout_state {
+	LOOP_LAYOUT_UNKNOWN = 0,
+	LOOP_LAYOUT_GOOD,
+	LOOP_LAYOUT_FRAGMENTED,
+	LOOP_LAYOUT_SEVERE,
+};
 
 struct loop_device {
 	int		lo_number;
@@ -65,11 +80,30 @@ struct loop_device {
 	struct workqueue_struct *workqueue;
 	struct work_struct      rootcg_work;
 	struct list_head        rootcg_cmd_list;
+	struct loop_worker      *root_workers;
 	struct list_head        idle_worker_list;
 	struct rb_root          worker_tree;
 	struct timer_list       timer;
 	bool			use_dio;
 	bool			sysfs_inited;
+	u8			layout_state;
+	u8			layout_default_shards;
+	u16			layout_pad;
+	u32			layout_frag_score;
+	u32			layout_nr_extents;
+	u32			layout_small_extents;
+	u64			layout_scanned_bytes;
+	u64			layout_avg_extent_bytes;
+	u64			layout_max_extent_bytes;
+	struct loop_backing_extent *layout_map;
+	atomic64_t		stats_parallel_read_hits;
+	atomic64_t		stats_parallel_read_fallbacks;
+	atomic64_t		stats_cross_extent_rqs;
+	atomic64_t		stats_serialized_small_frag_reads;
+	atomic64_t		stats_layout_refreshes;
+	atomic64_t		stats_layout_refresh_failures;
+	atomic64_t		stats_extent_shard_hits;
+	atomic64_t		stats_hash_shard_hits;
 
 	struct request_queue	*lo_queue;
 	struct blk_mq_tag_set	tag_set;
@@ -89,12 +123,35 @@ struct loop_cmd {
 	struct cgroup_subsys_state *memcg_css;
 };
 
+static int loop_refresh_backing_layout(struct loop_device *lo);
+
 #define LOOP_IDLE_WORKER_TIMEOUT (60 * HZ)
 #define LOOP_DEFAULT_HW_Q_DEPTH 128
 
 static DEFINE_IDR(loop_index_idr);
 static DEFINE_MUTEX(loop_ctl_mutex);
 static DEFINE_MUTEX(loop_validate_mutex);
+static bool parallel_read_enable = true;
+static unsigned int parallel_read_shards = 4;
+static unsigned int parallel_read_min_kb = 16;
+static unsigned int parallel_read_chunk_kb = 128;
+static bool parallel_read_nonrot_only = true;
+static unsigned int parallel_read_severe_min_kb = 32;
+static unsigned int layout_scan_limit_mb = LOOP_LAYOUT_DEFAULT_SCAN_MB;
+
+static const char *loop_layout_state_name(u8 state)
+{
+	switch (state) {
+	case LOOP_LAYOUT_GOOD:
+		return "good";
+	case LOOP_LAYOUT_FRAGMENTED:
+		return "fragmented";
+	case LOOP_LAYOUT_SEVERE:
+		return "severe";
+	default:
+		return "unknown";
+	}
+}
 
 /**
  * loop_global_lock_killable() - take locks for safe loop_validate_file() test
@@ -606,6 +663,7 @@ static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
 	mapping_set_gfp_mask(file->f_mapping,
 			     lo->old_gfp_mask & ~(__GFP_IO|__GFP_FS));
 	loop_update_dio(lo);
+	loop_refresh_backing_layout(lo);
 	blk_mq_unfreeze_queue(lo->lo_queue);
 	partscan = lo->lo_flags & LO_FLAGS_PARTSCAN;
 	loop_global_unlock(lo, is_loop);
@@ -715,12 +773,64 @@ static ssize_t loop_attr_dio_show(struct loop_device *lo, char *buf)
 	return sysfs_emit(buf, "%s\n", dio ? "1" : "0");
 }
 
+static ssize_t loop_attr_layout_state_show(struct loop_device *lo, char *buf)
+{
+	return sysfs_emit(buf, "%s\n",
+			  loop_layout_state_name(lo->layout_state));
+}
+
+static ssize_t loop_attr_layout_frag_show(struct loop_device *lo, char *buf)
+{
+	return sysfs_emit(buf,
+		"score=%u extents=%u small_extents=%u scanned_mb=%llu avg_kb=%llu max_kb=%llu default_shards=%u\n",
+		lo->layout_frag_score,
+		lo->layout_nr_extents,
+		lo->layout_small_extents,
+		(unsigned long long)(lo->layout_scanned_bytes >> 20),
+		(unsigned long long)(lo->layout_avg_extent_bytes >> 10),
+		(unsigned long long)(lo->layout_max_extent_bytes >> 10),
+		lo->layout_default_shards);
+}
+
+static ssize_t loop_attr_parallel_read_show(struct loop_device *lo, char *buf)
+{
+	return sysfs_emit(buf,
+		"enable=%u dio=%u nonrot=%u layout=%s default_shards=%u min_kb=%u severe_min_kb=%u chunk_kb=%u scan_limit_mb=%u\n",
+		parallel_read_enable ? 1 : 0,
+		lo->use_dio ? 1 : 0,
+		test_bit(QUEUE_FLAG_NONROT, &lo->lo_queue->queue_flags) ? 1 : 0,
+		loop_layout_state_name(lo->layout_state),
+		lo->layout_default_shards,
+		parallel_read_min_kb,
+		parallel_read_severe_min_kb,
+		parallel_read_chunk_kb,
+		layout_scan_limit_mb);
+}
+
+static ssize_t loop_attr_parallel_stats_show(struct loop_device *lo, char *buf)
+{
+	return sysfs_emit(buf,
+		"hits=%llu fallbacks=%llu cross_extent=%llu severe_small_serial=%llu extent_shard=%llu hash_shard=%llu layout_refreshes=%llu layout_refresh_failures=%llu\n",
+		(unsigned long long)atomic64_read(&lo->stats_parallel_read_hits),
+		(unsigned long long)atomic64_read(&lo->stats_parallel_read_fallbacks),
+		(unsigned long long)atomic64_read(&lo->stats_cross_extent_rqs),
+		(unsigned long long)atomic64_read(&lo->stats_serialized_small_frag_reads),
+		(unsigned long long)atomic64_read(&lo->stats_extent_shard_hits),
+		(unsigned long long)atomic64_read(&lo->stats_hash_shard_hits),
+		(unsigned long long)atomic64_read(&lo->stats_layout_refreshes),
+		(unsigned long long)atomic64_read(&lo->stats_layout_refresh_failures));
+}
+
 LOOP_ATTR_RO(backing_file);
 LOOP_ATTR_RO(offset);
 LOOP_ATTR_RO(sizelimit);
 LOOP_ATTR_RO(autoclear);
 LOOP_ATTR_RO(partscan);
 LOOP_ATTR_RO(dio);
+LOOP_ATTR_RO(layout_state);
+LOOP_ATTR_RO(layout_frag);
+LOOP_ATTR_RO(parallel_read);
+LOOP_ATTR_RO(parallel_stats);
 
 static struct attribute *loop_attrs[] = {
 	&loop_attr_backing_file.attr,
@@ -729,6 +839,10 @@ static struct attribute *loop_attrs[] = {
 	&loop_attr_autoclear.attr,
 	&loop_attr_partscan.attr,
 	&loop_attr_dio.attr,
+	&loop_attr_layout_state.attr,
+	&loop_attr_layout_frag.attr,
+	&loop_attr_parallel_read.attr,
+	&loop_attr_parallel_stats.attr,
 	NULL,
 };
 
@@ -800,6 +914,13 @@ static void loop_config_discard(struct loop_device *lo)
 	}
 }
 
+struct loop_backing_extent {
+	u64 logical;
+	u64 len;
+	u32 extent_id;
+	u32 flags;
+};
+
 struct loop_worker {
 	struct rb_node rb_node;
 	struct work_struct work;
@@ -808,9 +929,369 @@ struct loop_worker {
 	struct loop_device *lo;
 	struct cgroup_subsys_state *blkcg_css;
 	unsigned long last_ran_at;
+	u16 shard_id;
+	bool root_worker;
 };
 
 static void loop_workfn(struct work_struct *work);
+
+static unsigned int loop_clamp_parallel_shards(unsigned int shards)
+{
+	if (shards < 1)
+		return 1;
+	if (shards > LOOP_PARALLEL_MAX_SHARDS)
+		return LOOP_PARALLEL_MAX_SHARDS;
+	return shards;
+}
+
+static void loop_reset_parallel_stats(struct loop_device *lo)
+{
+	atomic64_set(&lo->stats_parallel_read_hits, 0);
+	atomic64_set(&lo->stats_parallel_read_fallbacks, 0);
+	atomic64_set(&lo->stats_cross_extent_rqs, 0);
+	atomic64_set(&lo->stats_serialized_small_frag_reads, 0);
+	atomic64_set(&lo->stats_extent_shard_hits, 0);
+	atomic64_set(&lo->stats_hash_shard_hits, 0);
+}
+
+static void loop_reset_layout(struct loop_device *lo)
+{
+	kvfree(lo->layout_map);
+	lo->layout_map = NULL;
+	lo->layout_state = LOOP_LAYOUT_UNKNOWN;
+	lo->layout_default_shards = 1;
+	lo->layout_frag_score = 0;
+	lo->layout_nr_extents = 0;
+	lo->layout_small_extents = 0;
+	lo->layout_scanned_bytes = 0;
+	lo->layout_avg_extent_bytes = 0;
+	lo->layout_max_extent_bytes = 0;
+	loop_reset_parallel_stats(lo);
+}
+
+static unsigned int loop_default_shards_for_layout(u8 layout_state)
+{
+	unsigned int shards = loop_clamp_parallel_shards(parallel_read_shards);
+
+	switch (layout_state) {
+	case LOOP_LAYOUT_GOOD:
+		return shards;
+	case LOOP_LAYOUT_FRAGMENTED:
+	case LOOP_LAYOUT_SEVERE:
+		return min(shards, 2U);
+	default:
+		return 1;
+	}
+}
+
+static int loop_refresh_backing_layout(struct loop_device *lo)
+{
+	struct file *file = lo->lo_backing_file;
+	struct address_space *mapping;
+	struct inode *inode;
+	struct loop_backing_extent *extents = NULL;
+	sector_t start_block, scan_blocks, block, phys, prev_phys = 0;
+	u64 size_bytes, scan_bytes, total_bytes = 0;
+	u64 bsize, max_extent = 0, density_per_gib, avg_extent;
+	u32 nr_extents = 0, small_extents = 0, frag_score = 0;
+	int ret = 0;
+
+	loop_reset_layout(lo);
+	atomic64_inc(&lo->stats_layout_refreshes);
+
+	if (!file)
+		return -ENODEV;
+
+	mapping = file->f_mapping;
+	inode = mapping->host;
+	size_bytes = (u64)get_loop_size(lo, file) << 9;
+	if (!size_bytes)
+		return 0;
+
+	if (S_ISBLK(inode->i_mode)) {
+		extents = kvcalloc(1, sizeof(*extents), GFP_KERNEL);
+		if (!extents) {
+			ret = -ENOMEM;
+			goto fail;
+		}
+		extents[0].logical = 0;
+		extents[0].len = size_bytes;
+		extents[0].extent_id = 0;
+		nr_extents = 1;
+		total_bytes = size_bytes;
+		max_extent = size_bytes;
+		avg_extent = size_bytes;
+		scan_bytes = size_bytes;
+		lo->layout_state = LOOP_LAYOUT_GOOD;
+		goto publish;
+	}
+
+	if (!mapping->a_ops || !mapping->a_ops->bmap) {
+		ret = -EOPNOTSUPP;
+		goto fail;
+	}
+
+	bsize = 1ULL << inode->i_blkbits;
+	if (!IS_ALIGNED(lo->lo_offset, bsize)) {
+		ret = -EINVAL;
+		goto fail;
+	}
+
+	scan_bytes = min_t(u64, size_bytes,
+			  (u64)max_t(unsigned int, layout_scan_limit_mb, 1) << 20);
+	scan_blocks = max_t(sector_t, 1, scan_bytes >> inode->i_blkbits);
+	extents = kvcalloc(scan_blocks, sizeof(*extents), GFP_KERNEL);
+	if (!extents) {
+		ret = -ENOMEM;
+		goto fail;
+	}
+
+	start_block = lo->lo_offset >> inode->i_blkbits;
+	for (block = 0; block < scan_blocks; block++) {
+		phys = mapping->a_ops->bmap(mapping, start_block + block);
+		if (!phys) {
+			prev_phys = 0;
+			continue;
+		}
+
+		if (!prev_phys || phys != prev_phys + 1) {
+			extents[nr_extents].logical = (u64)block << inode->i_blkbits;
+			extents[nr_extents].len = bsize;
+			extents[nr_extents].extent_id = nr_extents;
+			nr_extents++;
+		} else {
+			extents[nr_extents - 1].len += bsize;
+		}
+
+		prev_phys = phys;
+		cond_resched();
+	}
+
+	if (!nr_extents) {
+		ret = -ENODATA;
+		goto fail;
+	}
+
+	for (block = 0; block < nr_extents; block++) {
+		total_bytes += extents[block].len;
+		if (extents[block].len < LOOP_LAYOUT_SMALL_EXTENT_BYTES)
+			small_extents++;
+		if (extents[block].len > max_extent)
+			max_extent = extents[block].len;
+	}
+
+	avg_extent = div64_u64(total_bytes, nr_extents);
+	density_per_gib = div64_u64((u64)nr_extents << 30,
+					 max_t(u64, scan_bytes, 1));
+	frag_score = min_t(u32, 1000,
+			   (u32)min_t(u64, density_per_gib, 500ULL) +
+			   (u32)min_t(u64,
+				    div64_u64((u64)small_extents * 500,
+					      max_t(u32, nr_extents, 1)),
+				    500ULL));
+
+	if (avg_extent >= SZ_1M && density_per_gib <= 512)
+		lo->layout_state = LOOP_LAYOUT_GOOD;
+	else if (avg_extent < LOOP_LAYOUT_SMALL_EXTENT_BYTES ||
+		 density_per_gib > 4096 ||
+		 (max_extent < SZ_512K && size_bytes >= SZ_512M))
+		lo->layout_state = LOOP_LAYOUT_SEVERE;
+	else
+		lo->layout_state = LOOP_LAYOUT_FRAGMENTED;
+
+publish:
+	lo->layout_map = extents;
+	lo->layout_nr_extents = nr_extents;
+	lo->layout_small_extents = small_extents;
+	lo->layout_scanned_bytes = scan_bytes ?: size_bytes;
+	lo->layout_avg_extent_bytes = nr_extents ? avg_extent : size_bytes;
+	lo->layout_max_extent_bytes = max_extent ?: size_bytes;
+	lo->layout_frag_score = frag_score;
+	lo->layout_default_shards = loop_default_shards_for_layout(lo->layout_state);
+
+	if (lo->layout_state == LOOP_LAYOUT_SEVERE)
+		pr_warn("loop%d: backing layout=%s extents=%u small=%u avg=%lluKB max=%lluKB scanned=%lluMB default_shards=%u\n",
+			lo->lo_number,
+			loop_layout_state_name(lo->layout_state),
+			lo->layout_nr_extents,
+			lo->layout_small_extents,
+			(unsigned long long)(lo->layout_avg_extent_bytes >> 10),
+			(unsigned long long)(lo->layout_max_extent_bytes >> 10),
+			(unsigned long long)(lo->layout_scanned_bytes >> 20),
+			lo->layout_default_shards);
+	else
+		pr_info("loop%d: backing layout=%s extents=%u small=%u avg=%lluKB max=%lluKB scanned=%lluMB default_shards=%u\n",
+			lo->lo_number,
+			loop_layout_state_name(lo->layout_state),
+			lo->layout_nr_extents,
+			lo->layout_small_extents,
+			(unsigned long long)(lo->layout_avg_extent_bytes >> 10),
+			(unsigned long long)(lo->layout_max_extent_bytes >> 10),
+			(unsigned long long)(lo->layout_scanned_bytes >> 20),
+			lo->layout_default_shards);
+
+	return 0;
+
+fail:
+	kvfree(extents);
+	atomic64_inc(&lo->stats_layout_refresh_failures);
+	lo->layout_state = LOOP_LAYOUT_UNKNOWN;
+	lo->layout_default_shards = 1;
+	pr_info("loop%d: backing layout unavailable err=%d, using conservative dispatch\n",
+		lo->lo_number, ret);
+	return ret;
+}
+
+static int loop_find_extent_locked(struct loop_device *lo, u64 offset)
+{
+	int left = 0, right = lo->layout_nr_extents - 1;
+
+	while (left <= right) {
+		int mid = left + ((right - left) >> 1);
+		struct loop_backing_extent *extent = &lo->layout_map[mid];
+
+		if (offset < extent->logical)
+			right = mid - 1;
+		else if (offset >= extent->logical + extent->len)
+			left = mid + 1;
+		else
+			return mid;
+	}
+
+	return -ENOENT;
+}
+
+static unsigned int loop_effective_parallel_shards(struct loop_device *lo,
+		struct request *rq, const char **reason)
+{
+	unsigned int bytes = blk_rq_bytes(rq);
+
+	if (!parallel_read_enable) {
+		*reason = "feature_off";
+		return 1;
+	}
+
+	if (req_op(rq) != REQ_OP_READ) {
+		*reason = "non_read";
+		return 1;
+	}
+
+	if (!lo->use_dio) {
+		*reason = "dio_off";
+		return 1;
+	}
+
+	if (parallel_read_nonrot_only &&
+		!test_bit(QUEUE_FLAG_NONROT, &lo->lo_queue->queue_flags)) {
+		*reason = "rotational";
+		return 1;
+	}
+
+	if (bytes < max_t(unsigned int, parallel_read_min_kb, 1) << 10) {
+		*reason = "min_bytes";
+		return 1;
+	}
+
+	switch (lo->layout_state) {
+	case LOOP_LAYOUT_GOOD:
+		*reason = "good";
+		return max_t(unsigned int, lo->layout_default_shards, 1);
+	case LOOP_LAYOUT_FRAGMENTED:
+		*reason = "fragmented";
+		return max_t(unsigned int, lo->layout_default_shards, 1);
+	case LOOP_LAYOUT_SEVERE:
+		if (bytes < max_t(unsigned int, parallel_read_severe_min_kb, 1) << 10) {
+			*reason = "severe_small";
+			return 1;
+		}
+		*reason = "severe";
+		return max_t(unsigned int, lo->layout_default_shards, 1);
+	default:
+		*reason = "layout_unknown";
+		return 1;
+	}
+}
+
+static int loop_pick_parallel_shard_locked(struct loop_device *lo,
+		struct request *rq, unsigned int shards, bool *cross_extent,
+		bool *extent_based, const char **reason)
+{
+	u64 offset = (u64)blk_rq_pos(rq) << SECTOR_SHIFT;
+	u64 chunk_bytes = max_t(u64, PAGE_SIZE,
+			(u64)max_t(unsigned int, parallel_read_chunk_kb, 1) << 10);
+	int idx;
+
+	*cross_extent = false;
+	*extent_based = false;
+
+	if (shards <= 1)
+		return 0;
+
+	if (!lo->layout_map || !lo->layout_nr_extents) {
+		if (lo->layout_state == LOOP_LAYOUT_GOOD) {
+			*reason = "good_hash";
+			return div64_u64(offset, chunk_bytes) % shards;
+		}
+		*reason = "layout_miss";
+		return -ENOENT;
+	}
+
+	idx = loop_find_extent_locked(lo, offset);
+	if (idx < 0) {
+		if (lo->layout_state == LOOP_LAYOUT_GOOD) {
+			*reason = "good_hash_unscanned";
+			return div64_u64(offset, chunk_bytes) % shards;
+		}
+		*reason = "layout_miss";
+		return idx;
+	}
+
+	*cross_extent = offset + blk_rq_bytes(rq) >
+			lo->layout_map[idx].logical + lo->layout_map[idx].len;
+
+	if (lo->layout_state == LOOP_LAYOUT_GOOD) {
+		*reason = "good_hash";
+		return div64_u64(offset, chunk_bytes) % shards;
+	}
+
+	*extent_based = true;
+	*reason = (lo->layout_state == LOOP_LAYOUT_SEVERE) ?
+			  "severe_extent" : "fragmented_extent";
+	return lo->layout_map[idx].extent_id % shards;
+}
+
+static void loop_log_parallel_dispatch(struct loop_device *lo,
+		struct request *rq, bool parallel, unsigned int shard,
+		unsigned int shards, bool cross_extent, bool extent_based,
+		const char *reason)
+{
+	u64 count;
+
+	if (cross_extent)
+		atomic64_inc(&lo->stats_cross_extent_rqs);
+
+	if (parallel) {
+		count = atomic64_inc_return(&lo->stats_parallel_read_hits);
+		if (extent_based)
+			atomic64_inc(&lo->stats_extent_shard_hits);
+		else
+			atomic64_inc(&lo->stats_hash_shard_hits);
+		if (count <= 4 || !(count & 0x3ff))
+			pr_info("loop%d: parallel read active shard=%u/%u bytes=%u layout=%s reason=%s cross_extent=%d\n",
+				lo->lo_number, shard, shards, blk_rq_bytes(rq),
+				loop_layout_state_name(lo->layout_state), reason,
+				cross_extent ? 1 : 0);
+		return;
+	}
+
+	count = atomic64_inc_return(&lo->stats_parallel_read_fallbacks);
+	if (!strcmp(reason, "severe_small"))
+		atomic64_inc(&lo->stats_serialized_small_frag_reads);
+	if (count <= 4 || !(count & 0x3ff))
+		pr_info("loop%d: serial read fallback bytes=%u layout=%s reason=%s\n",
+			lo->lo_number, blk_rq_bytes(rq),
+			loop_layout_state_name(lo->layout_state), reason);
+}
 
 #ifdef CONFIG_BLK_CGROUP
 static inline int queue_on_root_worker(struct cgroup_subsys_state *css)
@@ -826,25 +1307,67 @@ static inline int queue_on_root_worker(struct cgroup_subsys_state *css)
 
 static void loop_queue_work(struct loop_device *lo, struct loop_cmd *cmd)
 {
+	struct request *rq = blk_mq_rq_from_pdu(cmd);
 	struct rb_node **node, *parent = NULL;
 	struct loop_worker *cur_worker, *worker = NULL;
 	struct work_struct *work;
 	struct list_head *cmd_list;
+	bool skip = false;
+	unsigned int shard_id = 0;
+	unsigned int shards = 1;
+	bool root_worker;
+	bool parallel = false;
+	bool cross_extent = false;
+	bool extent_based = false;
+	bool log_dispatch = false;
+	const char *reason = "serial";
 
 	spin_lock_irq(&lo->lo_work_lock);
+	trace_android_vh_loop_skip_queue_work(blk_mq_rq_from_pdu(cmd), &skip);
+	if (skip)
+		goto skip_queue_work;
+	root_worker = queue_on_root_worker(cmd->blkcg_css);
 
-	if (queue_on_root_worker(cmd->blkcg_css))
+	if (cmd->use_aio) {
+		shards = loop_effective_parallel_shards(lo, rq, &reason);
+		if (shards > 1) {
+			int picked = loop_pick_parallel_shard_locked(lo, rq, shards,
+							   &cross_extent,
+							   &extent_based,
+							   &reason);
+
+			if (picked >= 0) {
+				shard_id = picked;
+				parallel = true;
+				log_dispatch = true;
+			} else {
+				shards = 1;
+				log_dispatch = true;
+			}
+		} else if (!strcmp(reason, "severe_small") ||
+			   !strcmp(reason, "layout_unknown") ||
+			   !strcmp(reason, "layout_miss")) {
+			log_dispatch = true;
+		}
+	}
+
+	if (root_worker) {
+		worker = &lo->root_workers[shard_id];
 		goto queue_work;
+	}
 
 	node = &lo->worker_tree.rb_node;
 
 	while (*node) {
 		parent = *node;
 		cur_worker = container_of(*node, struct loop_worker, rb_node);
-		if (cur_worker->blkcg_css == cmd->blkcg_css) {
+		if (cur_worker->blkcg_css == cmd->blkcg_css &&
+		    cur_worker->shard_id == shard_id) {
 			worker = cur_worker;
 			break;
-		} else if ((long)cur_worker->blkcg_css < (long)cmd->blkcg_css) {
+		} else if ((long)cur_worker->blkcg_css < (long)cmd->blkcg_css ||
+			   (cur_worker->blkcg_css == cmd->blkcg_css &&
+			    cur_worker->shard_id < shard_id)) {
 			node = &(*node)->rb_left;
 		} else {
 			node = &(*node)->rb_right;
@@ -863,6 +1386,11 @@ static void loop_queue_work(struct loop_device *lo, struct loop_cmd *cmd)
 		if (cmd->memcg_css)
 			css_put(cmd->memcg_css);
 		cmd->memcg_css = NULL;
+		worker = &lo->root_workers[0];
+		parallel = false;
+		shard_id = 0;
+		reason = "worker_alloc_fail";
+		log_dispatch = true;
 		goto queue_work;
 	}
 
@@ -872,6 +1400,8 @@ static void loop_queue_work(struct loop_device *lo, struct loop_cmd *cmd)
 	INIT_LIST_HEAD(&worker->cmd_list);
 	INIT_LIST_HEAD(&worker->idle_list);
 	worker->lo = lo;
+	worker->shard_id = shard_id;
+	worker->root_worker = false;
 	rb_link_node(&worker->rb_node, parent, node);
 	rb_insert_color(&worker->rb_node, &lo->worker_tree);
 queue_work:
@@ -891,7 +1421,12 @@ queue_work:
 	}
 	list_add_tail(&cmd->list_entry, cmd_list);
 	queue_work(lo->workqueue, work);
+skip_queue_work:
 	spin_unlock_irq(&lo->lo_work_lock);
+
+	if (log_dispatch)
+		loop_log_parallel_dispatch(lo, rq, parallel, shard_id, shards,
+					   cross_extent, extent_based, reason);
 }
 
 static void loop_set_timer(struct loop_device *lo)
@@ -1090,6 +1625,7 @@ static int loop_configure(struct loop_device *lo, blk_mode_t mode,
 	loop_config_discard(lo);
 	loop_update_rotational(lo);
 	loop_update_dio(lo);
+	loop_refresh_backing_layout(lo);
 	loop_sysfs_init(lo);
 
 	size = get_loop_size(lo, file);
@@ -1149,6 +1685,7 @@ static void __loop_clr_fd(struct loop_device *lo, bool release)
 	filp = lo->lo_backing_file;
 	lo->lo_backing_file = NULL;
 	spin_unlock_irq(&lo->lo_lock);
+	loop_reset_layout(lo);
 
 	lo->lo_device = NULL;
 	lo->lo_offset = 0;
@@ -1315,6 +1852,7 @@ loop_set_status(struct loop_device *lo, blk_mode_t mode,
 
 	/* update dio if lo_offset or transfer is changed */
 	__loop_update_dio(lo, lo->use_dio);
+	loop_refresh_backing_layout(lo);
 
 out_unfreeze:
 	blk_mq_unfreeze_queue(lo->lo_queue);
@@ -1792,6 +2330,8 @@ static void lo_free_disk(struct gendisk *disk)
 	if (lo->workqueue)
 		destroy_workqueue(lo->workqueue);
 	loop_free_idle_workers(lo, true);
+	loop_reset_layout(lo);
+	kfree(lo->root_workers);
 	timer_shutdown_sync(&lo->timer);
 	mutex_destroy(&lo->lo_mutex);
 	kfree(lo);
@@ -1876,6 +2416,27 @@ static const struct kernel_param_ops loop_hw_qdepth_param_ops = {
 
 device_param_cb(hw_queue_depth, &loop_hw_qdepth_param_ops, &hw_queue_depth, 0444);
 MODULE_PARM_DESC(hw_queue_depth, "Queue depth for each hardware queue. Default: " __stringify(LOOP_DEFAULT_HW_Q_DEPTH));
+module_param(parallel_read_enable, bool, 0644);
+MODULE_PARM_DESC(parallel_read_enable,
+	"Enable layout-aware parallel loop read dispatch for DIO reads");
+module_param(parallel_read_shards, uint, 0644);
+MODULE_PARM_DESC(parallel_read_shards,
+	"Maximum shard count for layout-aware parallel loop reads");
+module_param(parallel_read_min_kb, uint, 0644);
+MODULE_PARM_DESC(parallel_read_min_kb,
+	"Minimum read size in KB to consider parallel loop dispatch");
+module_param(parallel_read_chunk_kb, uint, 0644);
+MODULE_PARM_DESC(parallel_read_chunk_kb,
+	"Chunk size in KB used by hash-based shard selection on good layouts");
+module_param(parallel_read_nonrot_only, bool, 0644);
+MODULE_PARM_DESC(parallel_read_nonrot_only,
+	"Allow parallel loop reads only when the backing queue is non-rotational");
+module_param(parallel_read_severe_min_kb, uint, 0644);
+MODULE_PARM_DESC(parallel_read_severe_min_kb,
+	"Minimum read size in KB to allow parallel dispatch on severely fragmented backings");
+module_param(layout_scan_limit_mb, uint, 0644);
+MODULE_PARM_DESC(layout_scan_limit_mb,
+	"Maximum MB of the loop backing file to scan when estimating fragmentation");
 
 MODULE_LICENSE("GPL");
 MODULE_ALIAS_BLOCKDEV_MAJOR(LOOP_MAJOR);
@@ -1998,7 +2559,7 @@ static void loop_process_work(struct loop_worker *worker,
 	 * *and* the worker will not run again which ensures that it
 	 * is safe to free any worker on the idle list
 	 */
-	if (worker && !work_pending(&worker->work)) {
+	if (worker && !worker->root_worker && !work_pending(&worker->work)) {
 		worker->last_ran_at = jiffies;
 		list_add_tail(&worker->idle_list, &lo->idle_worker_list);
 		loop_set_timer(lo);
@@ -2006,6 +2567,13 @@ static void loop_process_work(struct loop_worker *worker,
 	spin_unlock_irq(&lo->lo_work_lock);
 	current->flags = orig_flags;
 }
+
+void loop_process_cmd_list(struct list_head *cmd_list, struct gendisk *disk)
+{
+	struct loop_device *lo = disk->private_data;
+	loop_process_work(NULL, cmd_list, lo);
+}
+EXPORT_SYMBOL_GPL(loop_process_cmd_list);
 
 static void loop_workfn(struct work_struct *work)
 {
@@ -2036,6 +2604,10 @@ static int loop_add(int i)
 	lo = kzalloc(sizeof(*lo), GFP_KERNEL);
 	if (!lo)
 		goto out;
+	lo->root_workers = kcalloc(LOOP_PARALLEL_MAX_SHARDS,
+				  sizeof(*lo->root_workers), GFP_KERNEL);
+	if (!lo->root_workers)
+		goto out_free_dev;
 	lo->worker_tree = RB_ROOT;
 	INIT_LIST_HEAD(&lo->idle_worker_list);
 	timer_setup(&lo->timer, loop_free_idle_workers_timer, TIMER_DEFERRABLE);
@@ -2104,6 +2676,15 @@ static int loop_add(int i)
 	lo->lo_number		= i;
 	spin_lock_init(&lo->lo_lock);
 	spin_lock_init(&lo->lo_work_lock);
+	for (err = 0; err < LOOP_PARALLEL_MAX_SHARDS; err++) {
+		INIT_WORK(&lo->root_workers[err].work, loop_workfn);
+		INIT_LIST_HEAD(&lo->root_workers[err].cmd_list);
+		INIT_LIST_HEAD(&lo->root_workers[err].idle_list);
+		lo->root_workers[err].lo = lo;
+		lo->root_workers[err].shard_id = err;
+		lo->root_workers[err].root_worker = true;
+	}
+	err = 0;
 	INIT_WORK(&lo->rootcg_work, loop_rootcg_workfn);
 	INIT_LIST_HEAD(&lo->rootcg_cmd_list);
 	disk->major		= LOOP_MAJOR;
@@ -2136,6 +2717,7 @@ out_free_idr:
 	idr_remove(&loop_index_idr, i);
 	mutex_unlock(&loop_ctl_mutex);
 out_free_dev:
+	kfree(lo->root_workers);
 	kfree(lo);
 out:
 	return err;

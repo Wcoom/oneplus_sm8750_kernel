@@ -77,8 +77,8 @@ static const char *default_compressor = CONFIG_ZRAM_DEF_COMP;
 /* Module params (documentation at end) */
 static unsigned int num_devices = 1;
 #ifdef CONFIG_ZRAM_WRITEBACK
-static unsigned int wb_read_policy = ZRAM_WB_READ_POLICY_STRICT;
-static unsigned int wb_read_gap_pages = 1;
+static unsigned int wb_read_policy = ZRAM_WB_READ_POLICY_ADAPTIVE;
+static unsigned int wb_read_gap_pages = 3;
 static unsigned int wb_frag_mode = ZRAM_WB_FRAG_MODE_ON;
 #endif
 /*

@@ -40,7 +40,7 @@ struct address_space *swapper_spaces[MAX_SWAPFILES] __read_mostly;
 static unsigned int nr_swapper_spaces[MAX_SWAPFILES] __read_mostly;
 static bool enable_vma_readahead __read_mostly = true;
 int sysctl_zram_readahead_adaptive __read_mostly;
-int sysctl_zram_readahead_max_pages __read_mostly = 2;
+int sysctl_zram_readahead_max_pages __read_mostly = 8;
 
 #define SWAP_RA_WIN_SHIFT	(PAGE_SHIFT / 2)
 #define SWAP_RA_HITS_MASK	((1UL << SWAP_RA_WIN_SHIFT) - 1)

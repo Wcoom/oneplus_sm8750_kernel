@@ -148,7 +148,7 @@ do_gc:
 				gc_control.one_time;
 
 		/* foreground GC was been triggered via f2fs_balance_fs() */
-		if (foreground)
+		if (foreground && !f2fs_sb_has_blkzoned(sbi))
 			sync_mode = false;
 
 		gc_control.init_gc_type = sync_mode ? FG_GC : BG_GC;
@@ -397,14 +397,15 @@ static unsigned int get_cb_cost(struct f2fs_sb_info *sbi, unsigned int segno)
 }
 
 static inline unsigned int get_gc_cost(struct f2fs_sb_info *sbi,
-			unsigned int segno, struct victim_sel_policy *p)
+			unsigned int segno, struct victim_sel_policy *p,
+			unsigned int valid_thresh_ratio)
 {
 	if (p->alloc_mode == SSR)
 		return get_seg_entry(sbi, segno)->ckpt_valid_blocks;
 
-	if (p->one_time_gc && (get_valid_blocks(sbi, segno, true) >=
-		CAP_BLKS_PER_SEC(sbi) * sbi->gc_thread->valid_thresh_ratio /
-		100))
+	if (p->one_time_gc && (valid_thresh_ratio < 100) &&
+		(get_valid_blocks(sbi, segno, true) >=
+			CAP_BLKS_PER_SEC(sbi) * valid_thresh_ratio / 100))
 		return UINT_MAX;
 
 	/* alloc_mode == LFS */
@@ -785,6 +786,7 @@ int f2fs_get_victim(struct f2fs_sb_info *sbi, unsigned int *result,
 	unsigned int secno, last_victim;
 	unsigned int last_segment;
 	unsigned int nsearched;
+	unsigned int valid_thresh_ratio = 100;
 	bool is_atgc;
 	int ret = 0;
 
@@ -794,7 +796,11 @@ int f2fs_get_victim(struct f2fs_sb_info *sbi, unsigned int *result,
 	p.alloc_mode = alloc_mode;
 	p.age = age;
 	p.age_threshold = sbi->am.age_threshold;
-	p.one_time_gc = one_time;
+	if (one_time) {
+		p.one_time_gc = one_time;
+		if (has_enough_free_secs(sbi, 0, NR_PERSISTENT_LOG))
+			valid_thresh_ratio = sbi->gc_thread->valid_thresh_ratio;
+	}
 
 retry:
 	select_policy(sbi, gc_type, type, &p);
@@ -907,6 +913,9 @@ retry:
 				if (!f2fs_segment_has_free_slot(sbi, segno))
 					goto next;
 			}
+
+			if (!get_valid_blocks(sbi, segno, true))
+				goto next;
 		}
 
 		if (gc_type == BG_GC && test_bit(secno, dirty_i->victim_secmap))
@@ -920,7 +929,7 @@ retry:
 			goto next;
 		}
 
-		cost = get_gc_cost(sbi, segno, &p);
+		cost = get_gc_cost(sbi, segno, &p, valid_thresh_ratio);
 
 		if (p.min_cost > cost) {
 			p.min_segno = segno;
@@ -1849,7 +1858,11 @@ freed:
 					segno + 1 : NULL_SEGNO;
 skip:
 		f2fs_put_page(sum_page, 0);
+		if (unlikely(freezing(current)))
+			goto stop;
 	}
+
+stop:
 
 	if (submitted)
 		f2fs_submit_merged_write(sbi, data_type);
@@ -1901,6 +1914,7 @@ gc_more:
 	/* Let's run FG_GC, if we don't have enough space. */
 	if (has_not_enough_free_secs(sbi, 0, 0)) {
 		gc_type = FG_GC;
+		gc_control->one_time = false;
 
 		/*
 		 * For example, if there are many prefree_segments below given
@@ -1923,6 +1937,10 @@ gc_more:
 		goto stop;
 	}
 retry:
+	if (unlikely(freezing(current))) {
+		ret = 0;
+		goto stop;
+	}
 	ret = __get_victim(sbi, &segno, gc_type, gc_control->one_time);
 	if (ret) {
 		/* allow to search victim from sections has pinned data */

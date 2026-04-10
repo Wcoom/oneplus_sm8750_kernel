@@ -4302,30 +4302,33 @@ static int monitor_func(void *data)
 		mutex_unlock(&zram_index_mutex);
 
 		for (i = 0; i < num_devs; i++) {
+			struct gendisk *disk;
+
 			rcu_read_lock();
 			zram = idr_find(&zram_index_idr, zram_ids[i]);
 			if (!zram || !zram->disk || !get_device(disk_to_dev(zram->disk))) {
 				rcu_read_unlock();
 				continue;
 			}
+			disk = zram->disk;
 			rcu_read_unlock();
 
-				down_read(&zram->init_lock);
-				if (init_done(zram) && dynamic_adjustment_active) {
-					mark_idle(zram, cutoff_time, current_max_scan);
-					WRITE_ONCE(zram->current_shrinker_window_ms,
-						   current_shrinker_window_ms);
+			down_read(&zram->init_lock);
+			if (init_done(zram) && dynamic_adjustment_active) {
+				mark_idle(zram, cutoff_time, current_max_scan);
+				WRITE_ONCE(zram->current_shrinker_window_ms,
+					   current_shrinker_window_ms);
 
-					atomic_set(&zram->shrinker_in_active_period, 1);
-					zram->shrinker_active_start = 0;
-				} else if (init_done(zram)) {
-					WRITE_ONCE(zram->current_shrinker_window_ms,
-						   READ_ONCE(sysctl_zram_shrinker_active_window_ms));
-				}
-				up_read(&zram->init_lock);
+				atomic_set(&zram->shrinker_in_active_period, 1);
+				zram->shrinker_active_start = 0;
+			} else if (init_done(zram)) {
+				WRITE_ONCE(zram->current_shrinker_window_ms,
+					   READ_ONCE(sysctl_zram_shrinker_active_window_ms));
+			}
+			up_read(&zram->init_lock);
 			
-			/* 释放磁盘引用 */
-			put_device(disk_to_dev(zram->disk));
+			/* 对释放沿用已固定的 disk 指针，避免并发 remove/reset 后解引用悬空 zram->disk */
+			put_device(disk_to_dev(disk));
 
 			/* 处理完一个设备后让出 CPU，防止连续处理占用太多时间 */
 			cond_resched();
@@ -4342,19 +4345,22 @@ static int monitor_func(void *data)
 				medium_pressure_count = 0;
 			} else {
 				for (i = 0; i < num_devs; i++) {
+					struct gendisk *disk;
+
 					rcu_read_lock();
 					zram = idr_find(&zram_index_idr, zram_ids[i]);
 					if (!zram || !zram->disk || !get_device(disk_to_dev(zram->disk))) {
 						rcu_read_unlock();
 						continue;
 					}
+					disk = zram->disk;
 					rcu_read_unlock();
 
 					if (zram->backing_dev)
 						zram_proactive_writeback(zram, 5000,
 									 proactive_writeback_max_pages);
 
-					put_device(disk_to_dev(zram->disk));
+					put_device(disk_to_dev(disk));
 					cond_resched();
 				}
 				high_pressure_count = 0;

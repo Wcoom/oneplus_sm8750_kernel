@@ -428,6 +428,9 @@ int ip_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 	struct net_device *dev, *indev = skb->dev;
 	int ret_val;
 
+	rcu_read_lock();
+	dev = skb_dst_dev_rcu(skb);
+
 	skb->dev = dev;
 	skb->protocol = htons(ETH_P_IP);
 

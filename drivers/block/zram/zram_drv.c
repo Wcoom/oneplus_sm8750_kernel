@@ -20,6 +20,7 @@
 #include <linux/bio.h>
 #include <linux/bitops.h>
 #include <linux/blkdev.h>
+#include <linux/sched.h>
 #include <linux/blk-mq.h>
 #include <linux/device.h>
 #include <linux/highmem.h>
@@ -1446,6 +1447,9 @@ static int zram_writeback_slots(struct zram *zram, struct zram_pp_ctl *ctl, bool
 		struct zcomp_strm *zstrm;
 		struct zram_zspool_read_ctx read_ctx;
 		unsigned long current_blk_idx;
+		unsigned long expected_handle;
+		unsigned long expected_flags;
+		u32 expected_size;
 		u32 index;
 
 		tmp_page = NULL;
@@ -1698,6 +1702,12 @@ static int zram_writeback_slots(struct zram *zram, struct zram_pp_ctl *ctl, bool
 			goto retry_read;
 		}
 
+		expected_flags = zram->table[index].flags;
+		expected_handle = zram_get_handle(zram, index);
+		expected_size = 0;
+		if (!(expected_flags & BIT(ZRAM_SAME)))
+			expected_size = zram_get_obj_size(zram, index);
+
 		ret = zram_prepare_read_from_zspool(zram, index, tmp_page, &read_ctx);
 		zram_slot_unlock(zram, index);
 
@@ -1759,6 +1769,9 @@ static int zram_writeback_slots(struct zram *zram, struct zram_pp_ctl *ctl, bool
 		active_req->sub_reqs[idx].pps = pps;
 		active_req->sub_reqs[idx].blk_idx = current_blk_idx;
 		active_req->sub_reqs[idx].index = index;
+		active_req->sub_reqs[idx].expected_handle = expected_handle;
+		active_req->sub_reqs[idx].expected_flags = expected_flags;
+		active_req->sub_reqs[idx].expected_size = expected_size;
 		batch_cursor++;
 		if (batch_credit_units >= wb_units_per_page) {
 			batch_credit_units -= wb_units_per_page;
@@ -2088,6 +2101,9 @@ static int read_from_bdev_sync(struct zram *zram, struct page **pages,
 	unsigned int i;
 	int err;
 
+	if (unlikely(zram_is_quiescing(zram) || (current->flags & PF_MEMALLOC)))
+		return -EAGAIN;
+
 	bio = bio_alloc_bioset(zram->bdev, nr_pages, REQ_OP_READ, GFP_NOIO,
 				&zram->zram_bio_set);
 	if (!bio)
@@ -2100,6 +2116,11 @@ static int read_from_bdev_sync(struct zram *zram, struct page **pages,
 			bio_put(bio);
 			return -EIO;
 		}
+	}
+
+	if (unlikely(zram_is_quiescing(zram))) {
+		bio_put(bio);
+		return -EBUSY;
 	}
 
 	err = submit_bio_wait(bio);

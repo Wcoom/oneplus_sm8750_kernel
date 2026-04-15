@@ -17,6 +17,9 @@ struct zram_wb_sub_req {
 	struct zram_pp_slot *pps;
 	unsigned long blk_idx;  /* 物理块索引 */
 	unsigned long index;    /* ZRAM 逻辑索引 (table index) */
+	unsigned long expected_handle;
+	unsigned long expected_flags;
+	u32 expected_size;
 };
 
 /* 

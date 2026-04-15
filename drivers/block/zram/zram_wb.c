@@ -7,7 +7,6 @@
 #include <linux/kernel.h>
 #include <linux/kthread.h>
 #include <linux/wait.h>
-#include <linux/freezer.h>
 #include <linux/blkdev.h>
 #include <linux/bitops.h>
 
@@ -184,6 +183,34 @@ void free_block_bdev(struct zram *zram, unsigned long blk_idx)
  * 处理完成的 BIO 批次
  * 这是一个核心函数，负责批量释放资源
  */
+static bool wb_slot_can_commit(struct zram *zram,
+			      struct zram_wb_sub_req *sub)
+{
+	unsigned long flags = zram->table[sub->index].flags;
+
+	if (!(flags & BIT(ZRAM_PP_SLOT)))
+		return false;
+
+	if (flags & BIT(ZRAM_WB))
+		return false;
+
+	if (!!(flags & BIT(ZRAM_SAME)) != !!(sub->expected_flags & BIT(ZRAM_SAME)))
+		return false;
+
+	if (!!(flags & BIT(ZRAM_HUGE)) != !!(sub->expected_flags & BIT(ZRAM_HUGE)))
+		return false;
+
+	if (zram->table[sub->index].handle != sub->expected_handle)
+		return false;
+
+	if (!(sub->expected_flags & BIT(ZRAM_SAME)) &&
+	    (zram->table[sub->index].flags & (BIT(ZRAM_FLAG_SHIFT) - 1)) !=
+	    sub->expected_size)
+		return false;
+
+	return true;
+}
+
 static void complete_wb_batch(struct zram_wb_batch_request *req)
 {
 	struct zram *zram = req->zram;
@@ -232,7 +259,7 @@ static void complete_wb_batch(struct zram_wb_batch_request *req)
 
 		/* 锁定槽位进行状态变更 */
 		zram_slot_lock(zram, index);
-		if (!zram_test_flag(zram, index, ZRAM_PP_SLOT)) {
+		if (!wb_slot_can_commit(zram, sub)) {
 			zram_slot_unlock(zram, index);
 			goto handle_err;
 		}
@@ -371,11 +398,10 @@ static int wb_thread_func(void *data)
 {
 	unsigned int nofs_flags;
 
-	set_freezable();
 	nofs_flags = memalloc_noreclaim_save();
 
 	while (!kthread_should_stop()) {
-		wait_event_freezable(wb_wq, wb_ready_to_run() || kthread_should_stop());
+		wait_event(wb_wq, wb_ready_to_run() || kthread_should_stop());
 
 		while (1) {
 			struct llist_node *head;

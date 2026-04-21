@@ -40,7 +40,7 @@ struct address_space *swapper_spaces[MAX_SWAPFILES] __read_mostly;
 static unsigned int nr_swapper_spaces[MAX_SWAPFILES] __read_mostly;
 static bool enable_vma_readahead __read_mostly = true;
 int sysctl_zram_readahead_adaptive __read_mostly;
-int sysctl_zram_readahead_max_pages __read_mostly = 8;
+int sysctl_zram_readahead_max_pages __read_mostly = 1;
 
 #define SWAP_RA_WIN_SHIFT	(PAGE_SHIFT / 2)
 #define SWAP_RA_HITS_MASK	((1UL << SWAP_RA_WIN_SHIFT) - 1)
@@ -710,10 +710,6 @@ struct page *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 		nr_pages = zram_swapin_nr_pages(offset);
 	else
 		nr_pages = swapin_nr_pages(offset);
-
-	if (zram_entry && !READ_ONCE(sysctl_zram_readahead_adaptive) &&
-	    max_pages > 1 && nr_pages == 1)
-		nr_pages = min_t(unsigned long, max_pages, 8);
 
 	mask = nr_pages - 1;
 	if (!mask)

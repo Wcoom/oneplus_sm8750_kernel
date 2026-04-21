@@ -4267,32 +4267,16 @@ static int monitor_func(void *data)
 		}
 
 		/* 压力自适应逻辑 */
-		if (mem_usage > 80) {
-			current_check_interval = 90 * HZ;
-			current_idle_threshold_sec = 180;
-			current_max_scan = 600000;
-			current_shrinker_window_ms = 10000;
-			dynamic_adjustment_active = true;
-			medium_pressure_count = 0;
-
-			if (!do_proactive_writeback) {
-				high_pressure_count++;
-				if (high_pressure_count >= 3) {
-					proactive_writeback_pending = true;
-					pending_writeback_max_pages = 98304; /* 384MB / 4KB */
-				}
-			}
-
-		} else if (mem_usage > 73) {
-			current_check_interval = 120 * HZ;
-			current_idle_threshold_sec = 360;
-			current_max_scan = 400000;
+		if (mem_usage > 74) {
+			current_check_interval = 180 * HZ;
+			current_idle_threshold_sec = 420;
+			current_max_scan = 300000;
 			dynamic_adjustment_active = true;
 
 			high_pressure_count = 0;
 			if (!do_proactive_writeback) {
 				medium_pressure_count++;
-				if (medium_pressure_count >= 4) {
+				if (medium_pressure_count >= 3) {
 					proactive_writeback_pending = true;
 					pending_writeback_max_pages = 16384; /* 64MB / 4KB */
 				}

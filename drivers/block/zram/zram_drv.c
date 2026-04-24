@@ -19,13 +19,12 @@
 #include <linux/kernel.h>
 #include <linux/bio.h>
 #include <linux/bitops.h>
+#include <linux/cpu.h>
 #include <linux/blkdev.h>
-#include <linux/sched.h>
-#include <linux/blk-mq.h>
+#include <linux/buffer_head.h>
 #include <linux/device.h>
 #include <linux/highmem.h>
 #include <linux/slab.h>
-#include <linux/sort.h>
 #include <linux/backing-dev.h>
 #include <linux/string.h>
 #include <linux/vmalloc.h>
@@ -37,51 +36,75 @@
 #include <linux/part_stat.h>
 #include <linux/mm.h>
 #include <linux/kthread.h>
+#include <linux/wait.h>
 #include <linux/sysms_finder.h>
 #include <linux/suspend.h>
-#include <linux/spinlock.h>
 
 #ifdef CONFIG_ZRAM_AUTO_SIZE
 #include <linux/math64.h>
-#include <linux/cpu.h>
-#include <linux/minmax.h>
-#include <linux/intfp.h>
+	#include <linux/reciprocal_div.h>
+	#include <linux/minmax.h>
+	#include <linux/intfp.h>
+
+	#ifndef FP_BITS
+	#define FP_BITS 16
+	#endif
+
 #endif
 
 #include "zram_drv.h"
 #include "zram_wb.h"
-#define CHECK_INTERVAL (150 * HZ) // 每150秒检查一次
 
-/* 定义每次持有锁处理的页面数量，用于 mark_idle 分片式锁持有 */
-#define MARK_IDLE_BATCH_SIZE 64
-
-#define ZRAM_WB_MIN_OBJ_SIZE 256
-#define ZRAM_BDEV_READ_BATCH_MAX 16
-#define ZRAM_WB_READ_EWMA_WEIGHT 7
-#define ZRAM_BDEV_READ_RUN_MAX 4
-
-struct zram_wb_read_run {
-	unsigned long start_handle;
-	unsigned int page_start;
-	unsigned int nr_pages;
-};
+#define CHECK_INTERVAL (180 * HZ) // 每180秒检查一次
+#define ZRAM_AUTO_WRITEBACK_LIMIT_PAGES (64UL * 1024 * 1024 / PAGE_SIZE)
 
 static struct task_struct *monitor_thread;
+static struct task_struct *auto_writeback_thread;
 
 static DEFINE_IDR(zram_index_idr);
 /* idr index must be protected */
 static DEFINE_MUTEX(zram_index_mutex);
+
+static bool zram_get_single_device(struct zram **out_zram, struct device **out_dev)
+{
+	struct zram *zram;
+	struct zram *single = NULL;
+	struct device *dev = NULL;
+	int id;
+
+	mutex_lock(&zram_index_mutex);
+	idr_for_each_entry(&zram_index_idr, zram, id) {
+		if (single) {
+			single = NULL;
+			break;
+		}
+		single = zram;
+	}
+
+	if (single && single->disk) {
+		dev = disk_to_dev(single->disk);
+		if (!get_device(dev)) {
+			single = NULL;
+			dev = NULL;
+		}
+	} else {
+		single = NULL;
+	}
+	mutex_unlock(&zram_index_mutex);
+
+	if (!single)
+		return false;
+
+	*out_zram = single;
+	*out_dev = dev;
+	return true;
+}
 
 static int zram_major;
 static const char *default_compressor = CONFIG_ZRAM_DEF_COMP;
 
 /* Module params (documentation at end) */
 static unsigned int num_devices = 1;
-#ifdef CONFIG_ZRAM_WRITEBACK
-static unsigned int wb_read_policy = ZRAM_WB_READ_POLICY_ADAPTIVE;
-static unsigned int wb_read_gap_pages = 3;
-static unsigned int wb_frag_mode = ZRAM_WB_FRAG_MODE_ON;
-#endif
 /*
  * Pages that compress to sizes equals or greater than this are stored
  * uncompressed in memory.
@@ -92,47 +115,32 @@ static const struct block_device_operations zram_devops;
 
 static int zram_read_page(struct zram *zram, struct page *page, u32 index,
 			  struct bio *parent);
-enum zram_zspool_read_mode {
-	ZRAM_ZS_READ_SAME,
-	ZRAM_ZS_READ_HUGE,
-	ZRAM_ZS_READ_COMPRESSED,
-};
+static unsigned long zram_auto_writeback(struct zram *zram,
+					 unsigned long max_pages);
+static int auto_writeback_func(void *data);
+static int monitor_func(void *data);
+static void zram_debugfs_create(void) {}
+static void zram_debugfs_destroy(void) {}
+static void zram_debugfs_register(struct zram *zram) {}
+static void zram_debugfs_unregister(struct zram *zram) {}
 
-struct zram_zspool_read_ctx {
-	enum zram_zspool_read_mode mode;
-	unsigned long element;
-	unsigned int size;
-};
-
-static int zram_prepare_read_from_zspool(struct zram *zram, u32 index,
-					 struct page *tmp_page,
-					 struct zram_zspool_read_ctx *ctx);
-static int zram_finish_read_from_zspool(struct page *page,
-					struct page *tmp_page,
-					const struct zram_zspool_read_ctx *ctx,
-					struct zcomp_strm *zstrm);
-#ifdef CONFIG_ZRAM_WRITEBACK
-static void zram_init_shrinker(struct zram *zram);
-#endif
-
-#ifdef CONFIG_ZRAM_WRITEBACK
-unsigned int __read_mostly sysctl_zram_shrinker_active_window_ms = 5000;
-#endif
+#ifdef CONFIG_ZRAM_MULTI_COMP
+u8 __read_mostly sysctl_zram_recomp_immediate = 1;
 
 static struct ctl_table zram_sysctl_table[] = {
-#ifdef CONFIG_ZRAM_WRITEBACK
 	{
-		.procname	= "zram_shrinker_active_window_ms",
-		.data		= &sysctl_zram_shrinker_active_window_ms,
-		.maxlen		= sizeof(unsigned int),
+		.procname	= "zram_recomp_immediate",
+		.data		= &sysctl_zram_recomp_immediate,
+		.maxlen		= sizeof(u8),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
+		.proc_handler	= proc_dou8vec_minmax,
 		.extra1		= SYSCTL_ZERO,
-		.extra2		= (void *)&(unsigned int){10000}, /* 最大 10 秒 */
+		.extra2		= SYSCTL_THREE,
 	},
-#endif
 };
 static struct ctl_table_header *zram_sysctl_table_header;
+#endif //CONFIG_ZRAM_MULTI_COMP
+
 
 static int zram_slot_trylock(struct zram *zram, u32 index)
 {
@@ -149,124 +157,6 @@ void zram_slot_unlock(struct zram *zram, u32 index)
 	bit_spin_unlock(ZRAM_LOCK, &zram->table[index].flags);
 }
 
-#ifdef CONFIG_ZRAM_WRITEBACK
-static inline u32 zram_wb_ewma_update(u32 prev, u32 sample)
-{
-	return (prev * ZRAM_WB_READ_EWMA_WEIGHT + sample) /
-		(ZRAM_WB_READ_EWMA_WEIGHT + 1);
-}
-
-static inline bool zram_is_quiescing(struct zram *zram)
-{
-	return atomic_read(&zram->quiescing);
-}
-
-static int zram_try_begin_pp(struct zram *zram)
-{
-	if (unlikely(zram_is_quiescing(zram)))
-		return -EBUSY;
-
-	if (atomic_cmpxchg(&zram->pp_in_progress, 0, 1))
-		return -EAGAIN;
-
-	smp_mb__after_atomic();
-	if (unlikely(zram_is_quiescing(zram))) {
-		atomic_set(&zram->pp_in_progress, 0);
-		wake_up_all(&zram->pp_done_wait);
-		return -EBUSY;
-	}
-
-	return 0;
-}
-
-static void zram_end_pp(struct zram *zram)
-{
-	if (atomic_xchg(&zram->pp_in_progress, 0))
-		wake_up_all(&zram->pp_done_wait);
-}
-
-static void zram_wait_for_pp_idle(struct zram *zram)
-{
-	wait_event(zram->pp_done_wait, !atomic_read(&zram->pp_in_progress));
-}
-
-static void zram_begin_quiesce(struct zram *zram)
-{
-	atomic_set(&zram->quiescing, 1);
-	smp_mb__after_atomic();
-	wake_up_all(&zram->pp_done_wait);
-}
-
-static void zram_end_quiesce(struct zram *zram)
-{
-	atomic_set(&zram->quiescing, 0);
-	wake_up_all(&zram->pp_done_wait);
-}
-
-static void zram_quiesce_device(struct zram *zram)
-{
-	zram_begin_quiesce(zram);
-	blk_mq_freeze_queue(zram->disk->queue);
-	blk_mq_quiesce_queue(zram->disk->queue);
-	sync_blockdev(zram->disk->part0);
-	zram_wait_for_pp_idle(zram);
-	zram_wb_wait_for_idle(zram);
-	invalidate_bdev(zram->disk->part0);
-}
-
-static void zram_unquiesce_device(struct zram *zram)
-{
-	zram_end_quiesce(zram);
-	blk_mq_unquiesce_queue(zram->disk->queue);
-	blk_mq_unfreeze_queue(zram->disk->queue);
-}
-
-static inline u8 zram_pick_wb_read_policy(struct zram *zram)
-{
-	if (zram->wb_read_policy != ZRAM_WB_READ_POLICY_ADAPTIVE)
-		return zram->wb_read_policy;
-
-	/*
-	 * Adaptive policy:
-	 * 1) fallback ratio high -> strict (avoid useless split bios)
-	 * 2) fallback ratio low  -> relaxed (favor batching)
-	 */
-	if (READ_ONCE(zram->wb_read_fallback_ewma) >= 50)
-		return ZRAM_WB_READ_POLICY_STRICT;
-
-	return ZRAM_WB_READ_POLICY_RELAXED;
-}
-#else
-static inline bool zram_is_quiescing(struct zram *zram)
-{
-	return false;
-}
-
-static inline int zram_try_begin_pp(struct zram *zram)
-{
-	return 0;
-}
-
-static inline void zram_end_pp(struct zram *zram) {}
-static inline void zram_wait_for_pp_idle(struct zram *zram) {}
-static inline void zram_begin_quiesce(struct zram *zram) {}
-static inline void zram_end_quiesce(struct zram *zram) {}
-
-static void zram_quiesce_device(struct zram *zram)
-{
-	blk_mq_freeze_queue(zram->disk->queue);
-	blk_mq_quiesce_queue(zram->disk->queue);
-	sync_blockdev(zram->disk->part0);
-	invalidate_bdev(zram->disk->part0);
-}
-
-static void zram_unquiesce_device(struct zram *zram)
-{
-	blk_mq_unquiesce_queue(zram->disk->queue);
-	blk_mq_unfreeze_queue(zram->disk->queue);
-}
-#endif
-
 static inline bool init_done(struct zram *zram)
 {
 	return zram->disksize;
@@ -275,12 +165,6 @@ static inline bool init_done(struct zram *zram)
 static inline struct zram *dev_to_zram(struct device *dev)
 {
 	return (struct zram *)dev_to_disk(dev)->private_data;
-}
-
-static inline struct zram_table_entry *zram_table_entry(struct zram *zram,
-						 u32 index)
-{
-	return &zram->table[index];
 }
 
 static unsigned long zram_get_handle(struct zram *zram, u32 index)
@@ -299,39 +183,15 @@ bool zram_test_flag(struct zram *zram, u32 index, enum zram_pageflags flag)
 	return zram->table[index].flags & BIT(flag);
 }
 
-static inline void zram_clear_flags(struct zram *zram, u32 index,
-				    unsigned long mask)
-{
-	zram->table[index].flags &= ~mask;
-}
-
 void zram_set_flag(struct zram *zram, u32 index, enum zram_pageflags flag)
 {
 	zram->table[index].flags |= BIT(flag);
 }
 
-void zram_clear_flag(struct zram *zram, u32 index,
+static void zram_clear_flag(struct zram *zram, u32 index,
 			enum zram_pageflags flag)
 {
 	zram->table[index].flags &= ~BIT(flag);
-}
-
-static inline bool zram_test_flag_atomic(struct zram *zram, u32 index,
-					 enum zram_pageflags flag)
-{
-	return test_bit(flag, &zram->table[index].flags);
-}
-
-static inline void zram_set_flag_atomic(struct zram *zram, u32 index,
-					enum zram_pageflags flag)
-{
-	set_bit(flag, &zram->table[index].flags);
-}
-
-static inline void zram_clear_flag_atomic(struct zram *zram, u32 index,
-					  enum zram_pageflags flag)
-{
-	clear_bit(flag, &zram->table[index].flags);
 }
 
 #define ZRAM_TEMP_BITS_MASK \
@@ -344,20 +204,6 @@ static inline unsigned int zram_get_temp_from_flags(unsigned long flags)
 	return ((flags & BIT(ZRAM_TEMP_0)) ? 1U : 0U) |
 	       ((flags & BIT(ZRAM_TEMP_1)) ? 2U : 0U) |
 	       ((flags & BIT(ZRAM_TEMP_2)) ? 4U : 0U);
-}
-
-static inline unsigned long zram_temp_to_flags(unsigned int temp)
-{
-	unsigned long bits = 0;
-
-	if (temp & 1U)
-		bits |= BIT(ZRAM_TEMP_0);
-	if (temp & 2U)
-		bits |= BIT(ZRAM_TEMP_1);
-	if (temp & 4U)
-		bits |= BIT(ZRAM_TEMP_2);
-
-	return bits;
 }
 
 static inline unsigned int zram_get_temp_locked(struct zram *zram, u32 index)
@@ -374,12 +220,17 @@ static inline void zram_set_temp_locked(struct zram *zram, u32 index,
 		temp = ZRAM_TEMP_MAX;
 
 	flags &= ~ZRAM_TEMP_BITS_MASK;
-	flags |= zram_temp_to_flags(temp);
+	if (temp & 1U)
+		flags |= BIT(ZRAM_TEMP_0);
+	if (temp & 2U)
+		flags |= BIT(ZRAM_TEMP_1);
+	if (temp & 4U)
+		flags |= BIT(ZRAM_TEMP_2);
 	zram->table[index].flags = flags;
 }
 
 static inline void zram_raise_temp_locked(struct zram *zram, u32 index,
-				      unsigned int delta)
+					unsigned int delta)
 {
 	unsigned int temp = zram_get_temp_locked(zram, index);
 
@@ -389,6 +240,28 @@ static inline void zram_raise_temp_locked(struct zram *zram, u32 index,
 		temp += delta;
 
 	zram_set_temp_locked(zram, index, temp);
+}
+
+static inline void zram_promote_accessed(struct zram *zram, u32 index,
+					 bool from_wb)
+{
+	unsigned int old_temp;
+	unsigned int new_temp;
+	const char *source = from_wb ? "wb" : "read";
+
+	zram_slot_lock(zram, index);
+	old_temp = zram_get_temp_locked(zram, index);
+	if (from_wb)
+		zram_set_temp_locked(zram, index, ZRAM_TEMP_MAX);
+	else
+		zram_raise_temp_locked(zram, index, ZRAM_TEMP_INC_READ);
+	new_temp = zram_get_temp_locked(zram, index);
+	zram_slot_unlock(zram, index);
+
+	if (from_wb || old_temp == 0 || new_temp == ZRAM_TEMP_MAX)
+		pr_info_ratelimited("zram %s promote index=%u source=%s temp=%u->%u\n",
+				    zram->disk->disk_name, index, source,
+				    old_temp, new_temp);
 }
 
 static size_t zram_get_obj_size(struct zram *zram, u32 index)
@@ -433,97 +306,6 @@ static bool zram_can_store_page(struct zram *zram)
 	return !zram->limit_pages || alloced_pages <= zram->limit_pages;
 }
 
-static void zram_set_active(struct zram *zram, u32 index);
-
-#ifdef CONFIG_ZRAM_WRITEBACK
-static int zram_wb_resources_init(struct zram *zram)
-{
-	zram->wb_page_pool = mempool_create_page_pool(1024, 0);
-	if (!zram->wb_page_pool)
-		goto err_pool;
-
-	zram_init_shrinker(zram);
-	if (!zram->zram_shrinker)
-		goto err_shrinker;
-
-	return 0;
-
-err_shrinker:
-	mempool_destroy(zram->wb_page_pool);
-	zram->wb_page_pool = NULL;
-err_pool:
-	return -ENOMEM;
-}
-
-static void zram_wb_resources_free(struct zram *zram)
-{
-	if (zram->zram_shrinker) {
-		unregister_shrinker(zram->zram_shrinker);
-		shrinker_free(zram->zram_shrinker);
-		zram->zram_shrinker = NULL;
-	}
-	if (zram->wb_page_pool) {
-		mempool_destroy(zram->wb_page_pool);
-		zram->wb_page_pool = NULL;
-	}
-}
-#else
-static inline int zram_wb_resources_init(struct zram *zram) { return 0; }
-static inline void zram_wb_resources_free(struct zram *zram) { }
-#endif
-
-static void zram_commit_write(struct zram *zram, u32 index,
-			      unsigned long handle, unsigned int size,
-			      enum zram_pageflags new_flag,
-			      unsigned long extra_flags)
-{
-	zram_slot_lock(zram, index);
-
-	zram_free_page(zram, index);
-
-	if (handle) {
-		zram_set_handle(zram, index, handle);
-		zram_set_obj_size(zram, index, size);
-	}
-
-	if (new_flag != 0)
-		zram_set_flag(zram, index, new_flag);
-	if (extra_flags)
-		zram->table[index].flags |= extra_flags;
-
-	zram_slot_unlock(zram, index);
-
-	percpu_counter_inc(&zram->stats.pages_stored);
-	if (size)
-		percpu_counter_add(&zram->stats.compr_data_size, size);
-
-	if (new_flag == ZRAM_HUGE) {
-		percpu_counter_inc(&zram->stats.huge_pages);
-		percpu_counter_inc(&zram->stats.huge_pages_since);
-	} else if (new_flag == ZRAM_SAME) {
-		percpu_counter_inc(&zram->stats.same_pages);
-	}
-
-#ifdef CONFIG_ZRAM_WRITEBACK
-	zram_set_active(zram, index);
-#endif
-}
-
-static unsigned long zram_page_flags(struct page *page)
-{
-	unsigned long flags = 0;
-
-	if (PageAnon(page)) {
-		flags |= BIT(ZRAM_PAGE_ANON);
-	} else {
-		flags |= BIT(ZRAM_PAGE_FILE);
-		if (PageDirty(page) || PageWriteback(page))
-			flags |= BIT(ZRAM_PAGE_DIRTY);
-	}
-
-	return flags;
-}
-
 
 #if PAGE_SIZE != 4096
 static inline bool is_partial_io(struct bio_vec *bvec)
@@ -538,153 +320,63 @@ static inline bool is_partial_io(struct bio_vec *bvec)
 }
 #endif
 
+#define PAGE_WRITEBACK			0
+#define HUGE_WRITEBACK			(1 << 0)
+#define IDLE_WRITEBACK			(1 << 1)
+#define INCOMPRESSIBLE_WRITEBACK	(1 << 2)
+
 #ifdef	CONFIG_ZRAM_WRITEBACK
+#define ZRAM_IDLE_WRITEBACK_BATCH	256
+
 static void zram_lru_add(struct zram *zram, struct zram_table_entry *entry)
 {
-	zram_set_flag_atomic(zram, entry - zram->table, ZRAM_REFERENCED);
-	list_lru_add(&zram->zram_list_lru,
-			     zram_wb_lru(zram, entry - zram->table));
+	entry->referenced = true;
+	list_lru_add(&zram->zram_list_lru, &entry->lru);
 }
 
 static void zram_lru_del(struct zram *zram, struct zram_table_entry *entry)
 {
-	list_lru_del(&zram->zram_list_lru,
-		     zram_wb_lru(zram, entry - zram->table));
-}
-
-static void zram_active_drain(struct zram *zram, struct zram_pagevec *pvec)
-{
-	int i;
-	unsigned long flags;
-	
-	if (!pvec->nr)
-		return;
-
-	spin_lock_irqsave(&zram->active_list_lock, flags);
-	for (i = 0; i < pvec->nr; i++) {
-		unsigned long index = pvec->indices[i];
-		struct list_head *lru = zram_wb_lru(zram, index);
-
-		if (zram_test_flag_atomic(zram, index, ZRAM_ACTIVE)) {
-			if (list_empty(lru)) {
-				list_add_tail(lru, &zram->active_list);
-				atomic_long_inc(&zram->active_pages);
-			} else {
-				list_move_tail(lru, &zram->active_list);
-			}
-
-			zram_clear_flag_atomic(zram, index, ZRAM_REFERENCED);
-		}
-	}
-	spin_unlock_irqrestore(&zram->active_list_lock, flags);
-	pvec->nr = 0;
-}
-
-static void zram_queue_active(struct zram *zram, u32 index)
-{
-	struct zram_pagevec *pvec;
-	unsigned long flags;
-
-	pvec = get_cpu_ptr(zram->active_pagevecs);
-	spin_lock_irqsave(&pvec->lock, flags);
-
-	if (pvec->nr < ZRAM_PAGEVEC_SIZE)
-		pvec->indices[pvec->nr++] = index;
-
-	if (pvec->nr >= ZRAM_PAGEVEC_SIZE)
-		zram_active_drain(zram, pvec);
-
-	spin_unlock_irqrestore(&pvec->lock, flags);
-	put_cpu_ptr(zram->active_pagevecs);
-}
-
-static void zram_drain_all_pages(struct zram *zram)
-{
-	int cpu;
-	
-	for_each_possible_cpu(cpu) {
-		struct zram_pagevec *pvec = per_cpu_ptr(zram->active_pagevecs, cpu);
-		spin_lock_irq(&pvec->lock);
-		zram_active_drain(zram, pvec);
-		spin_unlock_irq(&pvec->lock);
-	}
-}
-
-static void zram_set_active(struct zram *zram, u32 index)
-{
-	zram_slot_lock(zram, index);
-
-	/* 3-bit saturating temperature (0..7). */
-	zram_raise_temp_locked(zram, index, ZRAM_TEMP_INC_READ);
-	
-	/* 如果已经在活跃状态或 IDLE 状态，只设置 REFERENCED 标志 */
-	if (zram_test_flag(zram, index, ZRAM_ACTIVE) ||
-	    zram_test_flag(zram, index, ZRAM_IDLE)) {
-		zram_set_flag(zram, index, ZRAM_REFERENCED);
-		zram_slot_unlock(zram, index);
-		return;
-	}
-
-	/* 标记为活跃，准备加入 active_list */
-	zram_set_flag(zram, index, ZRAM_ACTIVE);
-	zram_slot_unlock(zram, index);
-
-	zram_queue_active(zram, index);
-}
-
-static void zram_promote_accessed(struct zram *zram, u32 index, bool from_wb)
-{
-	bool need_enqueue = false;
-	bool count_readback = false;
-
-	zram_slot_lock(zram, index);
-
-	/* 普通访问 +2；从 backing device 读回直接回到最高温。 */
-	if (from_wb)
-		zram_set_temp_locked(zram, index, ZRAM_TEMP_MAX);
-	else
-		zram_raise_temp_locked(zram, index, ZRAM_TEMP_INC_READ);
-
-	if (from_wb && zram_test_flag(zram, index, ZRAM_WB_READ_ONCE)) {
-		zram_clear_flag(zram, index, ZRAM_WB_READ_ONCE);
-		count_readback = true;
-	}
-
-	if (zram_test_flag(zram, index, ZRAM_IDLE)) {
-		zram_clear_flag(zram, index, ZRAM_IDLE);
-		zram_lru_del(zram, &zram->table[index]);
-	}
-
-	if (zram_test_flag(zram, index, ZRAM_PP_SLOT))
-		zram_clear_flag(zram, index, ZRAM_PP_SLOT);
-
-	if (zram_test_flag(zram, index, ZRAM_WB_SECOND_CHANCE))
-		zram_clear_flag(zram, index, ZRAM_WB_SECOND_CHANCE);
-
-	zram_set_flag(zram, index, ZRAM_REFERENCED);
-
-	if (!zram_test_flag(zram, index, ZRAM_ACTIVE)) {
-		zram_set_flag(zram, index, ZRAM_ACTIVE);
-		need_enqueue = true;
-	}
-
-	zram_slot_unlock(zram, index);
-
-	if (count_readback)
-		atomic64_inc(&zram->stats.bd_reads);
-
-	if (need_enqueue)
-		zram_queue_active(zram, index);
+	list_lru_del(&zram->zram_list_lru, &entry->lru);
 }
 #endif
 
-#if defined CONFIG_ZRAM_WRITEBACK
-static struct zram_pp_ctl *init_pp_ctl_timeout(unsigned long timeout_ms, gfp_t gfp_mask)
+static inline void zram_set_priority(struct zram *zram, u32 index, u32 prio)
+{
+	prio &= ZRAM_COMP_PRIORITY_MASK;
+	/*
+	 * Clear previous priority value first, in case if we recompress
+	 * further an already recompressed page
+	 */
+	zram->table[index].flags &= ~(ZRAM_COMP_PRIORITY_MASK <<
+				      ZRAM_COMP_PRIORITY_BIT1);
+	zram->table[index].flags |= (prio << ZRAM_COMP_PRIORITY_BIT1);
+}
+
+static inline u32 zram_get_priority(struct zram *zram, u32 index)
+{
+	u32 prio = zram->table[index].flags >> ZRAM_COMP_PRIORITY_BIT1;
+
+	return prio & ZRAM_COMP_PRIORITY_MASK;
+}
+
+static void zram_accessed(struct zram *zram, u32 index)
+{
+	/* Remove from LRU list if present */
+	zram_lru_del(zram, &zram->table[index]);
+	zram_clear_flag(zram, index, ZRAM_IDLE);
+	zram_clear_flag(zram, index, ZRAM_PP_SLOT);
+#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
+	zram->table[index].ac_time = ktime_get_boottime();
+#endif
+}
+
+#if defined CONFIG_ZRAM_WRITEBACK || defined CONFIG_ZRAM_MULTI_COMP
+static struct zram_pp_ctl *init_pp_ctl(void)
 {
 	struct zram_pp_ctl *ctl;
 	u32 idx;
 
-	ctl = kmalloc(sizeof(*ctl), gfp_mask);
+	ctl = kmalloc(sizeof(*ctl), GFP_KERNEL);
 	if (!ctl)
 		return NULL;
 
@@ -692,18 +384,7 @@ static struct zram_pp_ctl *init_pp_ctl_timeout(unsigned long timeout_ms, gfp_t g
 	atomic_set(&ctl->num_pp_slots, 0);
 	for (idx = 0; idx < NUM_PP_BUCKETS; idx++)
 		INIT_LIST_HEAD(&ctl->pp_buckets[idx]);
-	
-	if (timeout_ms > 0)
-		ctl->deadline_jiffies = jiffies + msecs_to_jiffies(timeout_ms);
-	else
-		ctl->deadline_jiffies = 0;  /* 无时间限制 */
-	
 	return ctl;
-}
-
-static struct zram_pp_ctl *init_pp_ctl(void)
-{
-	return init_pp_ctl_timeout(0, GFP_KERNEL);
 }
 
 static void remove_pp_slot_from_ctl(struct zram_pp_slot *pps)
@@ -748,12 +429,12 @@ static void release_pp_ctl(struct zram *zram, struct zram_pp_ctl *ctl)
 }
 
 static bool place_pp_slot(struct zram *zram, struct zram_pp_ctl *ctl,
-			  u32 index, gfp_t gfp_mask)
+			  u32 index)
 {
 	struct zram_pp_slot *pps;
 	u32 bid;
 
-	pps = kmalloc(sizeof(*pps), gfp_mask);
+	pps = kmalloc(sizeof(*pps), GFP_NOIO | __GFP_NOWARN);
 	if (!pps)
 		return false;
 
@@ -764,46 +445,206 @@ static bool place_pp_slot(struct zram *zram, struct zram_pp_ctl *ctl,
 	list_add(&pps->entry, &ctl->pp_buckets[bid]);
 
 	zram_set_flag(zram, pps->index, ZRAM_PP_SLOT);
+	atomic_inc(&ctl->num_pp_slots);
 	return true;
 }
 
-static int compare_pp_slot_index(const void *a, const void *b)
+static bool zram_writeback_candidate_locked(struct zram *zram, u32 index,
+					    u32 mode)
 {
-	const struct zram_pp_slot * const *pa = a;
-	const struct zram_pp_slot * const *pb = b;
+	unsigned int temp;
 
-	if ((*pa)->index < (*pb)->index)
-		return -1;
-	if ((*pa)->index > (*pb)->index)
-		return 1;
-	return 0;
+	if (!zram_allocated(zram, index))
+		return false;
+
+	if (zram_test_flag(zram, index, ZRAM_PP_SLOT) ||
+	    zram_test_flag(zram, index, ZRAM_WB) ||
+	    zram_test_flag(zram, index, ZRAM_SAME))
+		return false;
+
+	temp = zram_get_temp_locked(zram, index);
+	if (temp > 0) {
+		pr_info_ratelimited("zram %s writeback scan skip hot page index=%u temp=%u->%u\n",
+				    zram->disk->disk_name, index, temp, temp - 1);
+		zram_set_temp_locked(zram, index, temp - 1);
+		return false;
+	}
+
+	if (mode & IDLE_WRITEBACK) {
+		if (!zram_test_flag(zram, index, ZRAM_IDLE))
+			return false;
+		if (!zram_test_flag(zram, index, ZRAM_PAGE_ANON)) {
+			pr_info_ratelimited("zram %s writeback scan skip non-anon page index=%u\n",
+					    zram->disk->disk_name, index);
+			return false;
+		}
+	}
+
+	if ((mode & HUGE_WRITEBACK) &&
+	    !zram_test_flag(zram, index, ZRAM_HUGE))
+		return false;
+	if ((mode & INCOMPRESSIBLE_WRITEBACK) &&
+	    !zram_test_flag(zram, index, ZRAM_INCOMPRESSIBLE))
+		return false;
+
+	return true;
 }
 
-static int compare_pp_slot_frag_aware(const void *a, const void *b)
+static bool zram_writeback_mode_match_locked(struct zram *zram, u32 index,
+					     u32 mode)
 {
-	const struct zram_pp_slot *sa = *(const struct zram_pp_slot * const *)a;
-	const struct zram_pp_slot *sb = *(const struct zram_pp_slot * const *)b;
-	unsigned long ia = sa->index;
-	unsigned long ib = sb->index;
 
-	/*
-	 * Low bits encode a tiny pseudo-fragmentation score. Lower score first.
-	 * This is intentionally lightweight and deterministic for reclaim path.
-	 */
-	unsigned int fa = (unsigned int)(ia & 0x3UL);
-	unsigned int fb = (unsigned int)(ib & 0x3UL);
+	if (mode & IDLE_WRITEBACK) {
+		if (!zram_test_flag(zram, index, ZRAM_IDLE))
+			return false;
+		if (!zram_test_flag(zram, index, ZRAM_PAGE_ANON)) {
+			pr_info_ratelimited("zram %s writeback scan skip non-anon page index=%u\n",
+					    zram->disk->disk_name, index);
+			return false;
+		}
+	}
 
-	if (fa < fb)
-		return -1;
-	if (fa > fb)
-		return 1;
+	if ((mode & HUGE_WRITEBACK) &&
+	    !zram_test_flag(zram, index, ZRAM_HUGE))
+		return false;
+	if ((mode & INCOMPRESSIBLE_WRITEBACK) &&
+	    !zram_test_flag(zram, index, ZRAM_INCOMPRESSIBLE))
+		return false;
 
-	if (ia < ib)
-		return -1;
-	if (ia > ib)
-		return 1;
+	return true;
+}
+
+#ifdef CONFIG_ZRAM_WRITEBACK
+struct zram_idle_wb_ctx {
+	struct zram *zram;
+	u32 mode;
+	unsigned long lo;
+	unsigned long hi;
+	unsigned int nr_collected;
+	unsigned long indexes[ZRAM_IDLE_WRITEBACK_BATCH];
+	bool stopped;
+};
+
+static enum lru_status zram_idle_wb_lru_cb(struct list_head *item,
+					  struct list_lru_one *lru,
+					  spinlock_t *lock, void *cb_arg)
+{
+	struct zram_idle_wb_ctx *ctx = cb_arg;
+	struct zram_table_entry *entry;
+	unsigned long index;
+	(void)lock;
+
+	entry = container_of(item, struct zram_table_entry, lru);
+	index = entry - ctx->zram->table;
+
+	if (ctx->nr_collected >= ARRAY_SIZE(ctx->indexes)) {
+		ctx->stopped = true;
+		return LRU_STOP;
+	}
+
+	if (index < ctx->lo || index >= ctx->hi)
+		return LRU_SKIP;
+
+	if (!zram_slot_trylock(ctx->zram, index))
+		return LRU_SKIP;
+
+	if (!zram_writeback_candidate_locked(ctx->zram, index, ctx->mode)) {
+		zram_slot_unlock(ctx->zram, index);
+		return LRU_ROTATE;
+	}
+
+	zram_set_flag(ctx->zram, index, ZRAM_PP_SLOT);
+	ctx->indexes[ctx->nr_collected++] = index;
+	zram_slot_unlock(ctx->zram, index);
+
+	return LRU_ROTATE;
+}
+
+static bool place_marked_pp_slot(struct zram *zram, struct zram_pp_ctl *ctl,
+					 u32 index, u32 mode)
+{
+	struct zram_pp_slot *pps;
+	u32 bid;
+
+	pps = kmalloc(sizeof(*pps), GFP_NOIO | __GFP_NOWARN);
+	if (!pps) {
+		zram_slot_lock(zram, index);
+		if (zram_test_flag(zram, index, ZRAM_PP_SLOT))
+			zram_clear_flag(zram, index, ZRAM_PP_SLOT);
+		zram_slot_unlock(zram, index);
+		return false;
+	}
+
+	zram_slot_lock(zram, index);
+	if (!zram_allocated(zram, index) ||
+	    zram_test_flag(zram, index, ZRAM_WB) ||
+	    zram_test_flag(zram, index, ZRAM_SAME) ||
+	    !zram_writeback_mode_match_locked(zram, index, mode) ||
+	    !zram_test_flag(zram, index, ZRAM_PP_SLOT)) {
+		zram_clear_flag(zram, index, ZRAM_PP_SLOT);
+		zram_slot_unlock(zram, index);
+		kfree(pps);
+		return true;
+	}
+
+	bid = zram_get_obj_size(zram, index) / PP_BUCKET_SIZE_RANGE;
+	zram_slot_unlock(zram, index);
+
+	INIT_LIST_HEAD(&pps->entry);
+	pps->index = index;
+	list_add(&pps->entry, &ctl->pp_buckets[bid]);
+	atomic_inc(&ctl->num_pp_slots);
+	return true;
+}
+
+static void clear_marked_pp_slot(struct zram *zram, u32 index)
+{
+	zram_slot_lock(zram, index);
+	if (zram_test_flag(zram, index, ZRAM_PP_SLOT))
+		zram_clear_flag(zram, index, ZRAM_PP_SLOT);
+	zram_slot_unlock(zram, index);
+}
+
+static int scan_slots_for_writeback_lru(struct zram *zram, u32 mode,
+					unsigned long lo, unsigned long hi,
+					struct zram_pp_ctl *ctl)
+{
+	struct zram_idle_wb_ctx ctx = {
+		.zram = zram,
+		.mode = mode,
+		.lo = lo,
+		.hi = hi,
+	};
+	unsigned long nr_to_walk;
+	unsigned int i;
+
+	for (;;) {
+		nr_to_walk = list_lru_count(&zram->zram_list_lru);
+		if (!nr_to_walk)
+			break;
+
+		ctx.nr_collected = 0;
+		ctx.stopped = false;
+		list_lru_walk(&zram->zram_list_lru, zram_idle_wb_lru_cb,
+			      &ctx, nr_to_walk);
+
+		for (i = 0; i < ctx.nr_collected; i++) {
+			if (!place_marked_pp_slot(zram, ctl, ctx.indexes[i], mode)) {
+				while (++i < ctx.nr_collected)
+					clear_marked_pp_slot(zram, ctx.indexes[i]);
+				return 0;
+			}
+		}
+
+		if (!ctx.stopped)
+			break;
+
+		cond_resched();
+	}
+
 	return 0;
 }
+#endif
 
 static struct zram_pp_slot *select_pp_slot(struct zram_pp_ctl *ctl)
 {
@@ -828,19 +669,7 @@ static inline void zram_fill_page(void *ptr, unsigned long len,
 					unsigned long value)
 {
 	WARN_ON_ONCE(!IS_ALIGNED(len, sizeof(unsigned long)));
-
-	/*
-	 * 【优化】使用 clear_page 处理全 0 页面清零。
-	 * 现代 CPU 架构（如 ARM64 的 dc zva, x86 的 rep stos）对页面级清零有专门优化，
-	 * 比通用 memset 更能压榨内存带宽。全 0 页面在 ZRAM 中占比很高（通常 >60%）。
-	 */
-	if (likely(value == 0 && len == PAGE_SIZE)) {
-		clear_page(ptr);
-	} else if (value == 0) {
-		memset(ptr, 0, len);
-	} else {
-		memset_l(ptr, value, len / sizeof(unsigned long));
-	}
+	memset_l(ptr, value, len / sizeof(unsigned long));
 }
 
 static bool page_same_filled(void *ptr, unsigned long *element)
@@ -927,112 +756,135 @@ static ssize_t mem_used_max_store(struct device *dev,
 
 /*
  * Mark all pages which are older than or equal to cutoff as IDLE.
- * Uses atomic counter to track active list length and scan only once.
- * @max_scan: maximum number of pages to scan, 0 means unlimited
+ * Callers should hold the zram init lock in read mode
  */
-
-static void mark_idle(struct zram *zram, ktime_t cutoff, int max_scan)
+static void mark_idle(struct zram *zram, ktime_t cutoff)
 {
-	unsigned long index_array[MARK_IDLE_BATCH_SIZE];
-	unsigned long flags;
-	int nr_indices = 0;
-	int scanned = 0;
-	int marked_idle = 0;
-	unsigned long active_total;
-	int target_scan;
-	int batch_count = 0;
-	int i;
+	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
+	int index;
 
-	zram_drain_all_pages(zram);
-
-	active_total = atomic_long_read(&zram->active_pages);
-	
-	target_scan = active_total;
-	if (max_scan > 0 && target_scan > max_scan)
-		target_scan = max_scan;
-	
-	/* 没有任何活跃页面，直接返回 */
-	if (target_scan <= 0)
-		return;
-
-	spin_lock_irqsave(&zram->active_list_lock, flags);
-	
-	while (!list_empty(&zram->active_list) && scanned < target_scan) {
-		unsigned long index;
-		struct zram_wb_table_entry *wb_entry;
-		
-		wb_entry = list_first_entry(&zram->active_list,
-					    struct zram_wb_table_entry, lru);
-		index = wb_entry - zram->wb_table;
-		
-		scanned++;
-		batch_count++;
-		
-		if (zram_test_flag_atomic(zram, index, ZRAM_REFERENCED)) {
-			zram_clear_flag_atomic(zram, index, ZRAM_REFERENCED);
-			list_move_tail(&wb_entry->lru, &zram->active_list);
-			goto check_batch;
-		}
-		
-#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
-		if (cutoff) {
-			ktime_t ac_time = zram_read_ac_time(zram, index);
-			if (ktime_after(ac_time, cutoff)) {
-				list_move_tail(&wb_entry->lru, &zram->active_list);
-				goto check_batch;
-			}
-		}
-#endif
-
-		if (!zram_slot_trylock(zram, index)) {
-			list_move_tail(&wb_entry->lru, &zram->active_list);
-			goto check_batch;
-		}
-		
-		if (zram_test_flag(zram, index, ZRAM_WB) ||
-		    !zram_allocated(zram, index)) {
+	for (index = 0; index < nr_pages; index++) {
+		/*
+		 * Do not mark ZRAM_SAME slots as ZRAM_IDLE, because no
+		 * post-processing (recompress, writeback) happens to the
+		 * ZRAM_SAME slot.
+		 *
+		 * And ZRAM_WB slots simply cannot be ZRAM_IDLE.
+		 */
+		zram_slot_lock(zram, index);
+		if (!zram_allocated(zram, index) ||
+		    zram_test_flag(zram, index, ZRAM_WB) ||
+		    zram_test_flag(zram, index, ZRAM_SAME)) {
 			zram_slot_unlock(zram, index);
-			list_del_init(&wb_entry->lru);
-			zram_clear_flag_atomic(zram, index, ZRAM_ACTIVE);
-			atomic_long_dec(&zram->active_pages);
 			continue;
 		}
-		
-		zram_clear_flag(zram, index, ZRAM_ACTIVE);
-		zram_set_flag(zram, index, ZRAM_IDLE);
-		atomic_long_dec(&zram->active_pages);
-		marked_idle++;
-		
-		/* 保存 index 而不是移动到临时链表 */
-		index_array[nr_indices++] = index;
-		list_del_init(&wb_entry->lru);
-		
-		zram_slot_unlock(zram, index);
-		
-	check_batch:
-		if (batch_count >= MARK_IDLE_BATCH_SIZE || need_resched()) {
-			spin_unlock_irqrestore(&zram->active_list_lock, flags);
-			
-			/* 在不持锁期间处理已移出的页面 */
-			for (i = 0; i < nr_indices; i++) {
-				zram_lru_add(zram, zram_table_entry(zram, index_array[i]));
+
+#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
+		if (!cutoff || ktime_after(cutoff, zram->table[index].ac_time)) {
+			if (!zram_test_flag(zram, index, ZRAM_IDLE)) {
+				zram_set_flag(zram, index, ZRAM_IDLE);
+				/* Add to LRU list for shrinker */
+				zram_lru_add(zram, &zram->table[index]);
 			}
-			nr_indices = 0;
-			
-			cond_resched();
-			batch_count = 0;
-			spin_lock_irqsave(&zram->active_list_lock, flags);
+		} else {
+			/* Page was accessed recently, make sure it's not marked as IDLE */
+			if (zram_test_flag(zram, index, ZRAM_IDLE)) {
+				zram_clear_flag(zram, index, ZRAM_IDLE);
+				zram_lru_del(zram, &zram->table[index]);
+			}
 		}
+#else
+		/* When access time tracking is disabled, we only mark pages as IDLE
+		 * if they are not already marked. This prevents re-adding pages
+		 * to the LRU list unnecessarily.
+		 */
+		if (!zram_test_flag(zram, index, ZRAM_IDLE)) {
+			zram_set_flag(zram, index, ZRAM_IDLE);
+			/* Add to LRU list for shrinker */
+			zram_lru_add(zram, &zram->table[index]);
+		}
+#endif
+		zram_slot_unlock(zram, index);
 	}
-	
-	spin_unlock_irqrestore(&zram->active_list_lock, flags);
-	
-	/* 批量将冷页面移入 zram_list_lru */
-	for (i = 0; i < nr_indices; i++) {
-		zram_lru_add(zram, zram_table_entry(zram, index_array[i]));
+}
+
+static void mark_idle_range(struct zram *zram, ktime_t cutoff,
+			    unsigned long start, unsigned long nr_scan)
+{
+	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
+	unsigned long i;
+	unsigned long scanned = 0;
+	unsigned long idle_set = 0;
+	unsigned long idle_cleared = 0;
+	unsigned long skipped_unallocated = 0;
+	unsigned long skipped_wb = 0;
+	unsigned long skipped_same = 0;
+
+	if (!nr_pages || !nr_scan)
+		return;
+
+	for (i = 0; i < nr_scan; i++) {
+		unsigned long index = (start + i) % nr_pages;
+
+		/*
+		 * Do not mark ZRAM_SAME slots as ZRAM_IDLE, because no
+		 * post-processing (recompress, writeback) happens to the
+		 * ZRAM_SAME slot.
+		 *
+		 * And ZRAM_WB slots simply cannot be ZRAM_IDLE.
+		 */
+		scanned++;
+		zram_slot_lock(zram, index);
+		if (!zram_allocated(zram, index) ||
+		    zram_test_flag(zram, index, ZRAM_WB) ||
+		    zram_test_flag(zram, index, ZRAM_SAME)) {
+			if (!zram_allocated(zram, index))
+				skipped_unallocated++;
+			else if (zram_test_flag(zram, index, ZRAM_WB))
+				skipped_wb++;
+			else
+				skipped_same++;
+			zram_slot_unlock(zram, index);
+			continue;
+		}
+
+#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
+		if (!cutoff || ktime_after(cutoff, zram->table[index].ac_time)) {
+			if (!zram_test_flag(zram, index, ZRAM_IDLE)) {
+				zram_set_flag(zram, index, ZRAM_IDLE);
+				/* Add to LRU list for shrinker */
+				zram_lru_add(zram, &zram->table[index]);
+				idle_set++;
+			}
+		} else {
+			/* Page was accessed recently, make sure it's not marked as IDLE */
+			if (zram_test_flag(zram, index, ZRAM_IDLE)) {
+				zram_clear_flag(zram, index, ZRAM_IDLE);
+				zram_lru_del(zram, &zram->table[index]);
+				idle_cleared++;
+			}
+		}
+#else
+		/* When access time tracking is disabled, we only mark pages as IDLE
+		 * if they are not already marked. This prevents re-adding pages
+		 * to the LRU list unnecessarily.
+		 */
+		if (!zram_test_flag(zram, index, ZRAM_IDLE)) {
+			zram_set_flag(zram, index, ZRAM_IDLE);
+			/* Add to LRU list for shrinker */
+			zram_lru_add(zram, &zram->table[index]);
+			idle_set++;
+		}
+#endif
+		zram_slot_unlock(zram, index);
 	}
-	pr_debug("zram: mark_idle scanned=%d, marked_idle=%d, active_total=%ld\n",
-		 scanned, marked_idle, active_total);
+
+	pr_info("zram %s idle-scan range=%lu/%lu start=%lu next=%lu cutoff=%s scanned=%lu idle_set=%lu idle_cleared=%lu skip_unalloc=%lu skip_wb=%lu skip_same=%lu\n",
+		zram->disk->disk_name, nr_scan, nr_pages, start,
+		(start + nr_scan) % nr_pages,
+		cutoff ? "age-filtered" : "all",
+		scanned, idle_set, idle_cleared,
+		skipped_unallocated, skipped_wb, skipped_same);
 }
 
 static ssize_t idle_store(struct device *dev,
@@ -1043,6 +895,10 @@ static ssize_t idle_store(struct device *dev,
 	ssize_t rv = -EINVAL;
 
 	if (!sysfs_streq(buf, "all")) {
+		/*
+		 * If it did not parse as 'all' try to treat it as an integer
+		 * when we have memory tracking enabled.
+		 */
 		u64 age_sec;
 
 		if (IS_ENABLED(CONFIG_ZRAM_TRACK_ENTRY_ACTIME) && !kstrtoull(buf, 0, &age_sec))
@@ -1051,15 +907,20 @@ static ssize_t idle_store(struct device *dev,
 		else
 			goto out;
 	}
+
 	down_read(&zram->init_lock);
-	if (!init_done(zram)) {
-		up_read(&zram->init_lock);
-		goto out;
-	}
-	mark_idle(zram, cutoff_time, 0);  /* 0 = unlimited for sysfs interface */
-	up_read(&zram->init_lock);
+	if (!init_done(zram))
+		goto out_unlock;
+
+	/*
+	 * A cutoff_time of 0 marks everything as idle, this is the
+	 * "all" behavior.
+	 */
+	mark_idle(zram, cutoff_time);
 	rv = len;
 
+out_unlock:
+	up_read(&zram->init_lock);
 out:
 	return rv;
 }
@@ -1143,8 +1004,6 @@ static void reset_bdev(struct zram *zram)
 		return;
 
 	bdev = zram->bdev;
-	sync_blockdev(bdev);
-	invalidate_bdev(bdev);
 	blkdev_put(bdev, zram);
 	/* hope filp_close flush all of IO */
 	filp_close(zram->backing_dev, NULL);
@@ -1282,547 +1141,110 @@ out:
 	return err;
 }
 
-static int read_from_bdev_batch(struct zram *zram, struct page **pages,
-				unsigned int nr_pages, unsigned long entry,
-				struct bio *parent);
-
-static unsigned int zram_collect_bdev_read_runs(struct zram *zram,
-					struct bio *bio,
-					struct bvec_iter iter,
-					unsigned long start_handle,
-					struct page **pages,
-					struct zram_wb_read_run *runs,
-					unsigned int max_runs,
-					unsigned int *run_count,
-					unsigned int *bytes,
-					u8 policy,
-					u8 gap_pages)
-{
-	unsigned int nr_pages = 0;
-	unsigned int nr_runs = 0;
-	unsigned long next_handle = start_handle;
-	struct zram_wb_read_run *cur_run = NULL;
-	unsigned int page_cap = ZRAM_BDEV_READ_BATCH_MAX;
-
-	if (!max_runs || !runs || !run_count || !bytes)
-		goto out;
-
-	while (iter.bi_size && nr_pages < page_cap &&
-	       nr_runs < max_runs) {
-		u32 index = iter.bi_sector >> SECTORS_PER_PAGE_SHIFT;
-		u32 offset = (iter.bi_sector & (SECTORS_PER_PAGE - 1)) <<
-				SECTOR_SHIFT;
-		struct bio_vec bv = bio_iter_iovec(bio, iter);
-		unsigned long flags;
-		unsigned long handle;
-
-		bv.bv_len = min_t(u32, bv.bv_len, PAGE_SIZE - offset);
-		if (offset || is_partial_io(&bv))
-			break;
-
-		flags = READ_ONCE(zram->table[index].flags);
-		if (!(flags & BIT(ZRAM_WB)))
-			break;
-
-		if (flags & (BIT(ZRAM_PP_SLOT) | BIT(ZRAM_LOCK)))
-			break;
-
-		handle = READ_ONCE(zram->table[index].handle);
-		if (!handle)
-			break;
-
-		if (likely(handle == next_handle)) {
-			if (!cur_run) {
-				cur_run = &runs[nr_runs++];
-				cur_run->start_handle = handle;
-				cur_run->page_start = nr_pages;
-				cur_run->nr_pages = 0;
-			}
-		} else {
-			unsigned long gap;
-
-			if (policy == ZRAM_WB_READ_POLICY_STRICT)
-				break;
-
-			if (handle < next_handle)
-				break;
-
-			gap = handle - next_handle;
-			if (gap > gap_pages || nr_runs >= max_runs)
-				break;
-
-			cur_run = &runs[nr_runs++];
-			cur_run->start_handle = handle;
-			cur_run->page_start = nr_pages;
-			cur_run->nr_pages = 0;
-		}
-
-		pages[nr_pages++] = bv.bv_page;
-		cur_run->nr_pages++;
-		next_handle++;
-		bio_advance_iter(bio, &iter, bv.bv_len);
-	}
-
-out:
-	*run_count = nr_runs;
-	*bytes = nr_pages * PAGE_SIZE;
-	return nr_pages;
-}
-
-static int read_from_bdev_runs(struct zram *zram,
-			      struct page **pages,
-			      struct zram_wb_read_run *runs,
-			      unsigned int run_count,
-			      struct bio *parent)
-{
-	unsigned int i;
-	int ret;
-
-	for (i = 0; i < run_count; i++) {
-		ret = read_from_bdev_batch(zram,
-					   &pages[runs[i].page_start],
-					   runs[i].nr_pages,
-					   runs[i].start_handle,
-					   parent);
-		if (ret)
-			return ret;
-	}
-
-	return 0;
-}
-
-static int read_from_bdev_async(struct zram *zram, struct page **pages,
-				unsigned int nr_pages, unsigned long entry,
-				struct bio *parent)
+static void read_from_bdev_async(struct zram *zram, struct page *page,
+			unsigned long entry, struct bio *parent)
 {
 	struct bio *bio;
-	unsigned int i;
 
-	bio = bio_alloc_bioset(zram->bdev, nr_pages, parent->bi_opf, GFP_NOIO,
-				&zram->zram_bio_set);
-	if (!bio)
-		return -ENOMEM;
-
+	bio = bio_alloc(zram->bdev, 1, parent->bi_opf, GFP_NOIO);
 	bio->bi_iter.bi_sector = entry * (PAGE_SIZE >> 9);
-	for (i = 0; i < nr_pages; i++) {
-		flush_dcache_page(pages[i]);
-		if (bio_add_page(bio, pages[i], PAGE_SIZE, 0) < PAGE_SIZE) {
-			bio_put(bio);
-			return -EIO;
-		}
-	}
-
+	__bio_add_page(bio, page, PAGE_SIZE, 0);
 	bio_chain(bio, parent);
 	submit_bio(bio);
-
-	return 0;
 }
 
-static int zram_writeback_slots(struct zram *zram, struct zram_pp_ctl *ctl, bool async)
+static int zram_writeback_slots(struct zram *zram, struct zram_pp_ctl *ctl,
+				 unsigned long max_pages,
+				 unsigned long *pages_written)
 {
-	unsigned long batch_base_idx = 0;
-	int batch_count = 0;
-	int batch_cursor = 0;
-	int sorted_nr = 0;
-	int sorted_pos = 0;
-	struct zram_wb_batch_request *active_req = NULL;
-	struct zram_pp_slot *sorted_pps[ZRAM_WB_MAX_BATCH_SIZE];
+	unsigned long blk_idx = 0;
 	struct zram_pp_slot *pps;
 	int ret = 0;
-	gfp_t page_gfp_mask;
-	u64 batch_credit_units = 0;
-	const u64 wb_units_per_page = 1ULL << (PAGE_SHIFT - 12);
+	unsigned long written = 0;
+	u32 index;
+	int nr_pps = atomic_read(&ctl->num_pp_slots);
 
-	if (async)
-		page_gfp_mask = GFP_ATOMIC | __GFP_NOWARN | __GFP_MOVABLE;
-	else
-		page_gfp_mask = GFP_NOIO | __GFP_NOWARN | __GFP_MOVABLE;
+	if (!nr_pps)
+		return 0;
 
-	if (!async)
-		atomic_set(&ctl->num_pp_slots, 1);
+	if (pages_written)
+		*pages_written = 0;
 
-	while (1) {
+	while ((pps = select_pp_slot(ctl))) {
+		struct zram_wb_request *req;
 		struct page *page;
-		struct page *tmp_page;
-		struct zcomp_strm *zstrm;
-		struct zram_zspool_read_ctx read_ctx;
-		unsigned long current_blk_idx;
-		unsigned long expected_handle;
-		unsigned long expected_flags;
-		u32 expected_size;
-		u32 index;
 
-		tmp_page = NULL;
-		zstrm = NULL;
+		if (max_pages && written >= max_pages)
+			break;
 
-		if (sorted_pos >= sorted_nr) {
-			sorted_nr = 0;
-			sorted_pos = 0;
-
-			while (sorted_nr < ZRAM_WB_MAX_BATCH_SIZE &&
-			       (pps = select_pp_slot(ctl))) {
-				if (ctl->deadline_jiffies &&
-				    time_after(jiffies, ctl->deadline_jiffies)) {
-					release_pp_slot(zram, pps);
-					break;
-				}
-
-				remove_pp_slot_from_ctl(pps);
-				sorted_pps[sorted_nr++] = pps;
-			}
-
-			if (sorted_nr > 1) {
-				int (*cmp)(const void *a, const void *b) =
-					compare_pp_slot_index;
-
-				if (zram->wb_frag_mode == ZRAM_WB_FRAG_MODE_ON)
-					cmp = compare_pp_slot_frag_aware;
-
-				sort(sorted_pps, sorted_nr, sizeof(sorted_pps[0]), cmp,
-				     NULL);
-			}
-
-			if (sorted_nr > 1) {
-				struct zram_pp_slot *run_priority[ZRAM_WB_MAX_BATCH_SIZE];
-				int out = 0;
-				int i = 0;
-
-				/* Prefer longer contiguous index runs first. */
-				while (i < sorted_nr) {
-					int j = i + 1;
-
-					while (j < sorted_nr &&
-					       sorted_pps[j]->index == sorted_pps[j - 1]->index + 1)
-						j++;
-
-					if (j - i >= 4) {
-						int k;
-
-						for (k = i; k < j; k++)
-							run_priority[out++] = sorted_pps[k];
-					}
-
-					i = j;
-				}
-
-				i = 0;
-				while (i < sorted_nr) {
-					int j = i + 1;
-
-					while (j < sorted_nr &&
-					       sorted_pps[j]->index == sorted_pps[j - 1]->index + 1)
-						j++;
-
-					if (j - i < 4) {
-						int k;
-
-						for (k = i; k < j; k++)
-							run_priority[out++] = sorted_pps[k];
-					}
-
-					i = j;
-				}
-
-				memcpy(sorted_pps, run_priority,
-				       out * sizeof(run_priority[0]));
-			}
-
-			if (!sorted_nr)
-				break;
-		}
-
-		pps = sorted_pps[sorted_pos++];
-		index = pps->index;
-
-		if (unlikely(zram_is_quiescing(zram))) {
-			release_pp_slot(zram, pps);
-			ret = -EBUSY;
+		spin_lock(&zram->wb_limit_lock);
+		if (zram->wb_limit_enable && !zram->bd_wb_limit) {
+			spin_unlock(&zram->wb_limit_lock);
+			ret = -EIO;
 			break;
 		}
+		spin_unlock(&zram->wb_limit_lock);
 
-		{
-			int run_len = 1;
-			bool run_start;
-
-			run_start = (sorted_pos == 1) ||
-				(sorted_pps[sorted_pos - 2]->index + 1 != index);
-
-			while (sorted_pos - 1 + run_len < sorted_nr &&
-			       sorted_pps[sorted_pos - 1 + run_len]->index ==
-			       index + run_len)
-				run_len++;
-
-			/*
-			 * Keep a contiguous run mapped into a single reserved extent
-			 * whenever possible.
-			 */
-			if (run_start && run_len > 1 && batch_count > batch_cursor &&
-			    (batch_count - batch_cursor) < run_len) {
-				if (active_req) {
-					zram_wb_submit_batch(active_req);
-					active_req = NULL;
-				}
-
-				if (batch_credit_units) {
-					spin_lock(&zram->wb_limit_lock);
-					zram->bd_wb_limit += batch_credit_units;
-					spin_unlock(&zram->wb_limit_lock);
-					batch_credit_units = 0;
-				}
-
-				if (batch_base_idx && batch_count > batch_cursor) {
-					free_block_bdev_range(zram,
-							      batch_base_idx + batch_cursor,
-							      batch_count - batch_cursor);
-				}
-
-				batch_cursor = batch_count;
-			}
-		}
-
-		/* --- 1. 物理块管理（按 batch 预取配额，降低锁竞争） --- */
-		if (batch_cursor >= batch_count) {
-			bool wb_limit_enable;
-
-			if (active_req) {
-				zram_wb_submit_batch(active_req);
-				active_req = NULL;
-			}
-
-			if (batch_credit_units) {
-				spin_lock(&zram->wb_limit_lock);
-				zram->bd_wb_limit += batch_credit_units;
-				spin_unlock(&zram->wb_limit_lock);
-				batch_credit_units = 0;
-			}
-
-			if (batch_base_idx && batch_count > batch_cursor) {
-				free_block_bdev_range(zram,
-						      batch_base_idx + batch_cursor,
-						      batch_count - batch_cursor);
-			}
-
-			int want_count = ZRAM_WB_MAX_BATCH_SIZE;
-			u64 max_wb_units = (u64)want_count * wb_units_per_page;
-
-			batch_cursor = 0;
-			batch_count = 0;
-			wb_limit_enable = READ_ONCE(zram->wb_limit_enable);
-
-			spin_lock(&zram->wb_limit_lock);
-			if (wb_limit_enable) {
-				u64 max_allowed_pages;
-
-				if (!zram->bd_wb_limit) {
-					spin_unlock(&zram->wb_limit_lock);
-					release_pp_slot(zram, pps);
-					ret = -EIO;
-					break;
-				}
-
-				batch_credit_units = min(zram->bd_wb_limit, max_wb_units);
-				zram->bd_wb_limit -= batch_credit_units;
-				max_allowed_pages = div_u64(batch_credit_units, wb_units_per_page);
-				want_count = min_t(int, want_count, (int)max_allowed_pages);
-			}
-			spin_unlock(&zram->wb_limit_lock);
-
-			batch_base_idx = alloc_block_bdev_batch(zram, want_count, &batch_count);
-
-			if (!batch_base_idx) {
-				if (batch_credit_units) {
-					spin_lock(&zram->wb_limit_lock);
-					zram->bd_wb_limit += batch_credit_units;
-					spin_unlock(&zram->wb_limit_lock);
-					batch_credit_units = 0;
-				}
-				release_pp_slot(zram, pps);
+		if (!blk_idx) {
+			blk_idx = alloc_block_bdev(zram);
+			if (!blk_idx) {
 				ret = -ENOSPC;
 				break;
 			}
 		}
 
-		current_blk_idx = batch_base_idx + batch_cursor;
-
-		/* --- 2. BIO 请求管理 --- */
-		if (!active_req) {
-			active_req = alloc_wb_batch_request(zram, async ? NULL : ctl,
-							    current_blk_idx, page_gfp_mask);
-			if (!active_req) {
-				release_pp_slot(zram, pps);
-				if (async) {
-					ret = 0;
-					break;
-				}
-				ret = -ENOMEM;
-				break;
-			}
-		}
-
-		/* --- 3. 准备数据页 --- */
-		page = mempool_alloc(zram->wb_page_pool, async ? GFP_NOWAIT : GFP_NOIO);
-		if (!page) {
-			if (active_req && active_req->count > 0) {
-				zram_wb_submit_batch(active_req);
-				active_req = NULL;
-			} else if (active_req) {
-				bio_put(active_req->bio);
-				active_req = NULL;
-			}
-			release_pp_slot(zram, pps);
-			ret = -ENOMEM;
+		req = alloc_wb_request(zram, pps, ctl, blk_idx);
+		if (IS_ERR(req)) {
+			ret = PTR_ERR(req);
 			break;
 		}
-		/* --- 4. 读取 ZRAM 数据 --- */
-	retry_read:
+		page = bio_first_page_all(req->bio);
+
+		index = pps->index;
 		zram_slot_lock(zram, index);
-		if (!zram_test_flag(zram, index, ZRAM_PP_SLOT) ||
-		    zram_test_flag(zram, index, ZRAM_WB)) {
-			zram_slot_unlock(zram, index);
-			mempool_free(page, zram->wb_page_pool);
-			release_pp_slot(zram, pps);
-			if (tmp_page)
-				mempool_free(tmp_page, zram->io_page_pool);
-			continue;
-		}
-
-		if (!tmp_page &&
-		    !zram_test_flag(zram, index, ZRAM_SAME) &&
-		    zram_get_handle(zram, index)) {
-			zram_slot_unlock(zram, index);
-			tmp_page = mempool_alloc(zram->io_page_pool,
-						 async ? GFP_NOWAIT | __GFP_NOWARN :
-						 GFP_NOIO | __GFP_NOWARN);
-			if (!tmp_page) {
-				mempool_free(page, zram->wb_page_pool);
-				release_pp_slot(zram, pps);
-				ret = -ENOMEM;
-				break;
-			}
-			goto retry_read;
-		}
-
-		expected_flags = zram->table[index].flags;
-		expected_handle = zram_get_handle(zram, index);
-		expected_size = 0;
-		if (!(expected_flags & BIT(ZRAM_SAME)))
-			expected_size = zram_get_obj_size(zram, index);
-
-		ret = zram_prepare_read_from_zspool(zram, index, tmp_page, &read_ctx);
+		/*
+		 * scan_slots() sets ZRAM_PP_SLOT and relases slot lock, so
+		 * slots can change in the meantime. If slots are accessed or
+		 * freed they lose ZRAM_PP_SLOT flag and hence we don't
+		 * post-process them.
+		 */
+		if (!zram_test_flag(zram, index, ZRAM_PP_SLOT))
+			goto next;
 		zram_slot_unlock(zram, index);
 
-		if (!ret) {
-			if (read_ctx.mode == ZRAM_ZS_READ_COMPRESSED)
-				zstrm = zcomp_stream_get(zram->comp);
-
-			ret = zram_finish_read_from_zspool(page, tmp_page, &read_ctx,
-							   zstrm);
-
-			if (zstrm)
-				zcomp_stream_put(zram->comp);
-		}
-
-		if (tmp_page)
-			mempool_free(tmp_page, zram->io_page_pool);
-
-		if (ret) {
-			mempool_free(page, zram->wb_page_pool);
+		if (zram_read_page(zram, page, index, NULL)) {
 			release_pp_slot(zram, pps);
 			continue;
 		}
 
-#ifdef CONFIG_ZRAM_WRITEBACK
-		zram_set_active(zram, index);
-#endif
+		nr_pps--;
+		written++;
+		if (pages_written)
+			(*pages_written)++;
+		remove_pp_slot_from_ctl(pps);
+		blk_idx = 0;
+		submit_bio(req->bio);
+		continue;
 
-		/* --- 5. 将页面加入 BIO --- */
-		if (bio_add_page(active_req->bio, page, PAGE_SIZE, 0) < PAGE_SIZE) {
-			/* BIO 满了，提交旧的，开新的 */
-			zram_wb_submit_batch(active_req);
-			active_req = alloc_wb_batch_request(zram, async ? NULL : ctl,
-						    current_blk_idx, page_gfp_mask);
-			if (!active_req) {
-				mempool_free(page, zram->wb_page_pool);
-				release_pp_slot(zram, pps);
-				if (async) {
-					ret = 0;
-					break;
-				}
-				ret = -ENOMEM;
-				break;
-			}
-			if (bio_add_page(active_req->bio, page, PAGE_SIZE, 0) < PAGE_SIZE) {
-				bio_put(active_req->bio);
-				active_req = NULL;
-				mempool_free(page, zram->wb_page_pool);
-				release_pp_slot(zram, pps);
-				ret = -EIO;
-				break;
-			}
-		}
+next:
+		zram_slot_unlock(zram, index);
+		release_pp_slot(zram, pps);
+		free_wb_request(req);
 
-		/* --- 6. 成功添加 --- */
-		if (!async)
-			atomic_inc(&ctl->num_pp_slots);
-
-		int idx = active_req->count++;
-		active_req->sub_reqs[idx].pps = pps;
-		active_req->sub_reqs[idx].blk_idx = current_blk_idx;
-		active_req->sub_reqs[idx].index = index;
-		active_req->sub_reqs[idx].expected_handle = expected_handle;
-		active_req->sub_reqs[idx].expected_flags = expected_flags;
-		active_req->sub_reqs[idx].expected_size = expected_size;
-		batch_cursor++;
-		if (batch_credit_units >= wb_units_per_page) {
-			batch_credit_units -= wb_units_per_page;
-			active_req->reserved_wb_units += wb_units_per_page;
-		}
-
-		if (active_req->count >= ZRAM_WB_MAX_BATCH_SIZE) {
-			zram_wb_submit_batch(active_req);
-			active_req = NULL;
-		}
+		cond_resched();
 	}
 
-	while (sorted_pos < sorted_nr)
-		release_pp_slot(zram, sorted_pps[sorted_pos++]);
+	if (blk_idx)
+		free_block_bdev(zram, blk_idx);
 
-	/* 循环结束，提交残留的 BIO */
-	if (active_req) {
-		if (active_req->count > 0) {
-			zram_wb_submit_batch(active_req);
-		} else {
-			bio_put(active_req->bio);
-		}
-		active_req = NULL;
-	}
+	if (nr_pps && atomic_sub_and_test(nr_pps, &ctl->num_pp_slots))
+		complete(&ctl->all_done);
 
-	/* --- 8. 清理 --- */
-	if (batch_base_idx && batch_count > batch_cursor) {
-		free_block_bdev_range(zram,
-				      batch_base_idx + batch_cursor,
-				      batch_count - batch_cursor);
-	}
-	if (batch_credit_units) {
-		spin_lock(&zram->wb_limit_lock);
-		zram->bd_wb_limit += batch_credit_units;
-		spin_unlock(&zram->wb_limit_lock);
-	}
-
-	if (!async) {
-		if (atomic_dec_and_test(&ctl->num_pp_slots))
-			complete(&ctl->all_done);
-		wait_for_completion(&ctl->all_done);
-	}
+	/* wait until all async bios completed */
+	wait_for_completion(&ctl->all_done);
 
 	return ret;
 }
-
-#define PAGE_WRITEBACK			0
-#define HUGE_WRITEBACK			(1 << 0)
-#define IDLE_WRITEBACK			(1 << 1)
-#define INCOMPRESSIBLE_WRITEBACK	(1 << 2)
-
 static int parse_page_index(char *val, unsigned long nr_pages,
 			    unsigned long *lo, unsigned long *hi)
 {
@@ -1883,89 +1305,23 @@ static int parse_mode(char *val, u32 *mode)
 
 static int scan_slots_for_writeback(struct zram *zram, u32 mode,
 				    unsigned long lo, unsigned long hi,
-				    struct zram_pp_ctl *ctl,
-				    int nr_limit, gfp_t gfp_mask)
+				    struct zram_pp_ctl *ctl)
 {
+	#ifdef CONFIG_ZRAM_WRITEBACK
+	if (mode & IDLE_WRITEBACK)
+		return scan_slots_for_writeback_lru(zram, mode, lo, hi, ctl);
+	#endif
+
 	u32 index = lo;
-	int pages_found = 0;
 
 	while (index < hi) {
 		bool ok = true;
 
-		if (nr_limit > 0 && pages_found >= nr_limit)
-			break;
-
-		/* 检查时间限制 */
-		if (ctl->deadline_jiffies && time_after(jiffies, ctl->deadline_jiffies)) {
-			pr_info("zram: writeback scan timeout after %d pages\n", pages_found);
-			break;
-		}
-
-		/* 每 64MB (16384 页) 让出 CPU，防止长时间占用 */
-		if ((index & 0x3FFF) == 0)
-			cond_resched();
-
 		zram_slot_lock(zram, index);
-		if (!zram_allocated(zram, index))
+		if (!zram_writeback_candidate_locked(zram, index, mode))
 			goto next;
 
-		if (zram_test_flag(zram, index, ZRAM_WB) ||
-		    zram_test_flag(zram, index, ZRAM_SAME))
-			goto next;
-
-		if (zram_test_flag(zram, index, ZRAM_PAGE_FILE)) {
-			atomic64_inc(&zram->stats.wb_pages_skipped);
-			if (zram_test_flag(zram, index, ZRAM_IDLE)) {
-				zram_clear_flag(zram, index, ZRAM_IDLE);
-				zram_lru_del(zram, &zram->table[index]);
-			}
-			goto next;
-		}
-
-		if (!zram_test_flag(zram, index, ZRAM_PAGE_ANON)) {
-			atomic64_inc(&zram->stats.wb_pages_skipped);
-			goto next;
-		}
-
-		if (mode & IDLE_WRITEBACK &&
-		    !zram_test_flag(zram, index, ZRAM_IDLE))
-			goto next;
-		if (mode & HUGE_WRITEBACK &&
-		    !zram_test_flag(zram, index, ZRAM_HUGE))
-			goto next;
-		if (mode & INCOMPRESSIBLE_WRITEBACK &&
-		    !zram_test_flag(zram, index, ZRAM_INCOMPRESSIBLE))
-			goto next;
-
-		/* ROI filter for idle writeback: skip tiny compressed objects */
-		if (mode == IDLE_WRITEBACK) {
-			size_t obj_size = zram_get_obj_size(zram, index);
-			unsigned int temp = zram_get_temp_locked(zram, index);
-
-			if (temp > 0) {
-				zram_set_temp_locked(zram, index, temp - 1);
-				atomic64_inc(&zram->stats.wb_pages_skipped);
-				goto next;
-			}
-
-			if (obj_size > 0 && obj_size < ZRAM_WB_MIN_OBJ_SIZE) {
-				zram_clear_flag(zram, index, ZRAM_IDLE);
-				zram_lru_del(zram, &zram->table[index]);
-				goto next;
-			}
-
-			/* First hit gets a pass; write back only if it survives next cycle. */
-			if (!zram_test_flag(zram, index, ZRAM_WB_SECOND_CHANCE)) {
-				zram_set_flag(zram, index, ZRAM_WB_SECOND_CHANCE);
-				atomic64_inc(&zram->stats.wb_pages_skipped);
-				goto next;
-			}
-			zram_clear_flag(zram, index, ZRAM_WB_SECOND_CHANCE);
-		}
-
-		ok = place_pp_slot(zram, ctl, index, gfp_mask);
-		if (ok)
-			pages_found++;
+		ok = place_pp_slot(zram, ctl, index);
 next:
 		zram_slot_unlock(zram, index);
 		if (!ok)
@@ -1973,7 +1329,7 @@ next:
 		index++;
 	}
 
-	return pages_found;
+	return 0;
 }
 
 static ssize_t writeback_store(struct device *dev,
@@ -1995,10 +1351,9 @@ static ssize_t writeback_store(struct device *dev,
 	}
 
 	/* Do not permit concurrent post-processing actions. */
-	err = zram_try_begin_pp(zram);
-	if (err) {
+	if (atomic_xchg(&zram->pp_in_progress, 1)) {
 		up_read(&zram->init_lock);
-		return err;
+		return -EAGAIN;
 	}
 
 	if (!zram->backing_dev) {
@@ -2036,9 +1391,8 @@ static ssize_t writeback_store(struct device *dev,
 				goto release_init_lock;
 			}
 
-				scan_slots_for_writeback(zram, mode, lo, hi, ctl, 0,
-						 GFP_KERNEL);
-				break;
+			scan_slots_for_writeback(zram, mode, lo, hi, ctl);
+			break;
 		}
 
 		if (!strcmp(param, "type")) {
@@ -2048,9 +1402,8 @@ static ssize_t writeback_store(struct device *dev,
 				goto release_init_lock;
 			}
 
-				scan_slots_for_writeback(zram, mode, lo, hi, ctl, 0,
-						 GFP_KERNEL);
-				break;
+			scan_slots_for_writeback(zram, mode, lo, hi, ctl);
+			break;
 		}
 
 		if (!strcmp(param, "page_index")) {
@@ -2060,9 +1413,8 @@ static ssize_t writeback_store(struct device *dev,
 				goto release_init_lock;
 			}
 
-				scan_slots_for_writeback(zram, mode, lo, hi, ctl, 0,
-						 GFP_KERNEL);
-				continue;
+			scan_slots_for_writeback(zram, mode, lo, hi, ctl);
+			continue;
 		}
 
 		if (!strcmp(param, "page_indexes")) {
@@ -2072,93 +1424,76 @@ static ssize_t writeback_store(struct device *dev,
 				goto release_init_lock;
 			}
 
-				scan_slots_for_writeback(zram, mode, lo, hi, ctl, 0,
-						 GFP_KERNEL);
-				continue;
+			scan_slots_for_writeback(zram, mode, lo, hi, ctl);
+			continue;
 		}
 	}
 
-	/*
-	 * 修改点：Sysfs 路径使用同步模式 (async = false)
-	 * 这样用户态触发回写时可以等待完成，避免误导用户
-	 */
-	err = zram_writeback_slots(zram, ctl, false);
+	err = zram_writeback_slots(zram, ctl, 0, NULL);
 	if (err)
 		ret = err;
 
 release_init_lock:
 	release_pp_ctl(zram, ctl);
-	zram_end_pp(zram);
+	atomic_set(&zram->pp_in_progress, 0);
 	up_read(&zram->init_lock);
 
 	return ret;
 }
 
-static int read_from_bdev_sync(struct zram *zram, struct page **pages,
-			       unsigned int nr_pages, unsigned long entry)
+struct zram_work {
+	struct work_struct work;
+	struct zram *zram;
+	unsigned long entry;
+	struct page *page;
+	int error;
+};
+
+static void zram_sync_read(struct work_struct *work)
 {
-	struct bio *bio;
-	unsigned int i;
-	int err;
+	struct zram_work *zw = container_of(work, struct zram_work, work);
+	struct bio_vec bv;
+	struct bio bio;
 
-	if (unlikely(zram_is_quiescing(zram) || (current->flags & PF_MEMALLOC)))
-		return -EAGAIN;
+	bio_init(&bio, zw->zram->bdev, &bv, 1, REQ_OP_READ);
+	bio.bi_iter.bi_sector = zw->entry * (PAGE_SIZE >> 9);
+	__bio_add_page(&bio, zw->page, PAGE_SIZE, 0);
+	zw->error = submit_bio_wait(&bio);
+}
 
-	bio = bio_alloc_bioset(zram->bdev, nr_pages, REQ_OP_READ, GFP_NOIO,
-				&zram->zram_bio_set);
-	if (!bio)
-		return -ENOMEM;
+/*
+ * Block layer want one ->submit_bio to be active at a time, so if we use
+ * chained IO with parent IO in same context, it's a deadlock. To avoid that,
+ * use a worker thread context.
+ */
+static int read_from_bdev_sync(struct zram *zram, struct page *page,
+				unsigned long entry)
+{
+	struct zram_work work;
 
-	bio->bi_iter.bi_sector = entry * (PAGE_SIZE >> 9);
-	for (i = 0; i < nr_pages; i++) {
-		flush_dcache_page(pages[i]);
-		if (bio_add_page(bio, pages[i], PAGE_SIZE, 0) < PAGE_SIZE) {
-			bio_put(bio);
-			return -EIO;
-		}
-	}
+	work.page = page;
+	work.zram = zram;
+	work.entry = entry;
 
-	if (unlikely(zram_is_quiescing(zram))) {
-		bio_put(bio);
-		return -EBUSY;
-	}
+	INIT_WORK_ONSTACK(&work.work, zram_sync_read);
+	queue_work(system_unbound_wq, &work.work);
+	flush_work(&work.work);
+	destroy_work_on_stack(&work.work);
 
-	err = submit_bio_wait(bio);
-	bio_put(bio);
-
-	return err;
+	return work.error;
 }
 
 static int read_from_bdev(struct zram *zram, struct page *page,
 			unsigned long entry, struct bio *parent)
 {
-	struct page *pages[1] = { page };
-	int ret;
-
+	atomic64_inc(&zram->stats.bd_reads);
 	if (!parent) {
 		if (WARN_ON_ONCE(!IS_ENABLED(ZRAM_PARTIAL_IO)))
 			return -EIO;
-		ret = read_from_bdev_sync(zram, pages, ARRAY_SIZE(pages), entry);
-	} else {
-		ret = read_from_bdev_async(zram, pages, ARRAY_SIZE(pages), entry,
-					    parent);
+		return read_from_bdev_sync(zram, page, entry);
 	}
-
-	return ret;
-	}
-
-static int read_from_bdev_batch(struct zram *zram, struct page **pages,
-				unsigned int nr_pages, unsigned long entry,
-				struct bio *parent)
-{
-	int ret;
-
-	if (!parent)
-		ret = read_from_bdev_sync(zram, pages, nr_pages, entry);
-	else
-		ret = read_from_bdev_async(zram, pages, nr_pages, entry, parent);
-
-	return ret;
+	read_from_bdev_async(zram, page, entry, parent);
+	return 0;
 }
 #else
 static inline void reset_bdev(struct zram *zram) {};
@@ -2169,115 +1504,6 @@ static int read_from_bdev(struct zram *zram, struct page *page,
 }
 #endif
 
-#ifdef CONFIG_ZRAM_MEMORY_TRACKING
-
-static struct dentry *zram_debugfs_root;
-
-static void zram_debugfs_create(void)
-{
-	zram_debugfs_root = debugfs_create_dir("zram", NULL);
-}
-
-static void zram_debugfs_destroy(void)
-{
-	debugfs_remove_recursive(zram_debugfs_root);
-}
-
-static ssize_t read_block_state(struct file *file, char __user *buf,
-				size_t count, loff_t *ppos)
-{
-	char *kbuf;
-	ssize_t index, written = 0;
-	struct zram *zram = file->private_data;
-	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
-	struct timespec64 ts;
-
-	kbuf = kvmalloc(count, GFP_KERNEL);
-	if (!kbuf)
-		return -ENOMEM;
-
-	down_read(&zram->init_lock);
-	if (!init_done(zram)) {
-		up_read(&zram->init_lock);
-		kvfree(kbuf);
-		return -EINVAL;
-	}
-
-	for (index = *ppos; index < nr_pages; index++) {
-		int copied;
-
-		zram_slot_lock(zram, index);
-		if (!zram_allocated(zram, index))
-			goto next;
-
-		ts = ktime_to_timespec64(zram_read_ac_time(zram, index));
-		copied = snprintf(kbuf + written, count,
-			"%12zd %12lld.%06lu %c%c%c%c%c\n",
-			index, (s64)ts.tv_sec,
-			ts.tv_nsec / NSEC_PER_USEC,
-			zram_test_flag(zram, index, ZRAM_SAME) ? 's' : '.',
-			zram_test_flag(zram, index, ZRAM_WB) ? 'w' : '.',
-			zram_test_flag(zram, index, ZRAM_HUGE) ? 'h' : '.',
-			zram_test_flag(zram, index, ZRAM_IDLE) ? 'i' : '.',
-			zram_test_flag(zram, index,
-				       ZRAM_INCOMPRESSIBLE) ? 'n' : '.');
-
-		if (count <= copied) {
-			zram_slot_unlock(zram, index);
-			break;
-		}
-		written += copied;
-		count -= copied;
-next:
-		zram_slot_unlock(zram, index);
-		*ppos += 1;
-	}
-
-	up_read(&zram->init_lock);
-	if (copy_to_user(buf, kbuf, written))
-		written = -EFAULT;
-	kvfree(kbuf);
-
-	return written;
-}
-
-static const struct file_operations proc_zram_block_state_op = {
-	.open = simple_open,
-	.read = read_block_state,
-	.llseek = default_llseek,
-};
-
-static void zram_debugfs_register(struct zram *zram)
-{
-	if (!zram_debugfs_root)
-		return;
-
-	zram->debugfs_dir = debugfs_create_dir(zram->disk->disk_name,
-						zram_debugfs_root);
-	debugfs_create_file("block_state", 0400, zram->debugfs_dir,
-				zram, &proc_zram_block_state_op);
-}
-
-static void zram_debugfs_unregister(struct zram *zram)
-{
-	debugfs_remove_recursive(zram->debugfs_dir);
-}
-#else
-static void zram_debugfs_create(void) {};
-static void zram_debugfs_destroy(void) {};
-static void zram_debugfs_register(struct zram *zram) {};
-static void zram_debugfs_unregister(struct zram *zram) {};
-#endif
-
-/*
- * We switched to per-cpu streams and this attr is not needed anymore.
- * However, we will keep it around for some time, because:
- * a) we may revert per-cpu streams in the future
- * b) it's visible to user space and we need to follow our 2 years
- *    retirement rule; but we already have a number of 'soon to be
- *    altered' attrs, so max_comp_streams need to wait for the next
- *    layoff cycle.
- */
 static ssize_t max_comp_streams_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
@@ -2290,41 +1516,26 @@ static ssize_t max_comp_streams_store(struct device *dev,
 	return len;
 }
 
-static void comp_algorithm_set(struct zram *zram, const char *alg)
+static void comp_algorithm_set(struct zram *zram, u32 prio, const char *alg)
 {
-	if (zram->comp_alg && zram->comp_alg != default_compressor)
-		kfree(zram->comp_alg);
-	zram->comp_alg = alg;
+	if (zram->comp_algs[prio] && zram->comp_algs[prio] != default_compressor)
+		kfree(zram->comp_algs[prio]);
+	zram->comp_algs[prio] = alg;
 }
 
-static ssize_t comp_algorithm_show(struct device *dev,
-				   struct device_attribute *attr,
-				   char *buf)
+static int __comp_algorithm_store(struct zram *zram, u32 prio, const char *alg)
 {
-	struct zram *zram = dev_to_zram(dev);
-	ssize_t sz;
-
-	down_read(&zram->init_lock);
-	sz = zcomp_available_show(zram->comp_alg, buf);
-	up_read(&zram->init_lock);
-
-	return sz;
-}
-
-static ssize_t comp_algorithm_store(struct device *dev,
-				    struct device_attribute *attr,
-				    const char *buf,
-				    size_t len)
-{
-	struct zram *zram = dev_to_zram(dev);
 	char *compressor;
 	size_t sz;
 
-	sz = strlen(buf);
+	if (!alg)
+		return -EINVAL;
+
+	sz = strlen(alg);
 	if (sz >= CRYPTO_MAX_ALG_NAME)
 		return -E2BIG;
 
-	compressor = kstrdup(buf, GFP_KERNEL);
+	compressor = kstrdup(alg, GFP_KERNEL);
 	if (!compressor)
 		return -ENOMEM;
 
@@ -2344,10 +1555,104 @@ static ssize_t comp_algorithm_store(struct device *dev,
 		return -EBUSY;
 	}
 
-	comp_algorithm_set(zram, compressor);
+	comp_algorithm_set(zram, prio, compressor);
 	up_write(&zram->init_lock);
-	return len;
+	return 0;
 }
+
+static ssize_t __comp_algorithm_show(struct zram *zram, u32 prio, char *buf)
+{
+	ssize_t sz;
+	const char *alg;
+
+	down_read(&zram->init_lock);
+	alg = zram->comp_algs[prio] ? zram->comp_algs[prio] : default_compressor;
+	sz = zcomp_available_show(alg, buf);
+	up_read(&zram->init_lock);
+
+	return sz;
+}
+
+static ssize_t comp_algorithm_show(struct device *dev,
+				   struct device_attribute *attr,
+				   char *buf)
+{
+	struct zram *zram = dev_to_zram(dev);
+
+	return __comp_algorithm_show(zram, ZRAM_PRIMARY_COMP, buf);
+}
+
+static ssize_t comp_algorithm_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t len)
+{
+	struct zram *zram = dev_to_zram(dev);
+	int ret;
+
+	ret = __comp_algorithm_store(zram, ZRAM_PRIMARY_COMP, buf);
+	return ret ? ret : len;
+}
+
+#ifdef CONFIG_ZRAM_MULTI_COMP
+static ssize_t recomp_algorithm_show(struct device *dev,
+				     struct device_attribute *attr,
+				     char *buf)
+{
+	struct zram *zram = dev_to_zram(dev);
+	ssize_t sz = 0;
+	u32 prio;
+
+	for (prio = ZRAM_SECONDARY_COMP; prio < ZRAM_MAX_COMPS; prio++) {
+		if (!zram->comp_algs[prio])
+			continue;
+
+		sz += scnprintf(buf + sz, PAGE_SIZE - sz - 2, "#%d: ", prio);
+		sz += __comp_algorithm_show(zram, prio, buf + sz);
+	}
+
+	return sz;
+}
+
+static ssize_t recomp_algorithm_store(struct device *dev,
+				      struct device_attribute *attr,
+				      const char *buf, size_t len)
+{
+	struct zram *zram = dev_to_zram(dev);
+	int prio = ZRAM_SECONDARY_COMP;
+	char *args, *param, *val;
+	char *alg = NULL;
+	int ret;
+
+	args = skip_spaces(buf);
+	while (*args) {
+		args = next_arg(args, &param, &val);
+
+		if (!val || !*val)
+			return -EINVAL;
+
+		if (!strcmp(param, "algo")) {
+			alg = val;
+			continue;
+		}
+
+		if (!strcmp(param, "priority")) {
+			ret = kstrtoint(val, 10, &prio);
+			if (ret)
+				return ret;
+			continue;
+		}
+	}
+
+	if (!alg)
+		return -EINVAL;
+
+	if (prio < ZRAM_SECONDARY_COMP || prio >= ZRAM_MAX_COMPS)
+		return -EINVAL;
+
+	ret = __comp_algorithm_store(zram, prio, alg);
+	return ret ? ret : len;
+}
+#endif
 
 static ssize_t compact_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t len)
@@ -2377,8 +1682,7 @@ static ssize_t io_stat_show(struct device *dev,
 			"%8llu %8llu 0 %8llu\n",
 			(u64)atomic64_read(&zram->stats.failed_reads),
 			(u64)atomic64_read(&zram->stats.failed_writes),
-			/* 用户态读取使用 read 获取当前 CPU 值，避免遍历所有 CPU */
-			(u64)percpu_counter_read(&zram->stats.notify_free));
+			(u64)atomic64_read(&zram->stats.notify_free));
 	up_read(&zram->init_lock);
 
 	return ret;
@@ -2401,20 +1705,20 @@ static ssize_t mm_stat_show(struct device *dev,
 		zs_pool_stats(zram->mem_pool, &pool_stats);
 	}
 
-	orig_size = percpu_counter_read(&zram->stats.pages_stored);
+	orig_size = atomic64_read(&zram->stats.pages_stored);
 	max_used = atomic_long_read(&zram->stats.max_used_pages);
 
 	ret = scnprintf(buf, PAGE_SIZE,
 			"%8llu %8llu %8llu %8lu %8ld %8llu %8lu %8llu %8llu\n",
 			orig_size << PAGE_SHIFT,
-			(u64)percpu_counter_read(&zram->stats.compr_data_size),
+			(u64)atomic64_read(&zram->stats.compr_data_size),
 			mem_used << PAGE_SHIFT,
 			zram->limit_pages << PAGE_SHIFT,
 			max_used << PAGE_SHIFT,
-			(u64)percpu_counter_read(&zram->stats.same_pages),
+			(u64)atomic64_read(&zram->stats.same_pages),
 			atomic_long_read(&pool_stats.pages_compacted),
-			(u64)percpu_counter_read(&zram->stats.huge_pages),
-			(u64)percpu_counter_read(&zram->stats.huge_pages_since));
+			(u64)atomic64_read(&zram->stats.huge_pages),
+			(u64)atomic64_read(&zram->stats.huge_pages_since));
 	up_read(&zram->init_lock);
 
 	return ret;
@@ -2426,34 +1730,14 @@ static ssize_t bd_stat_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	struct zram *zram = dev_to_zram(dev);
-	u64 bd_count;
-	u64 bd_reads;
-	u64 bd_writes;
 	ssize_t ret;
 
 	down_read(&zram->init_lock);
-	bd_count = max_t(s64, atomic64_read(&zram->stats.bd_count), 0);
-	bd_reads = max_t(s64, atomic64_read(&zram->stats.bd_reads), 0);
-	bd_writes = max_t(s64, atomic64_read(&zram->stats.bd_writes), 0);
 	ret = scnprintf(buf, PAGE_SIZE,
 		"%8llu %8llu %8llu\n",
-			FOUR_K(bd_count),
-			FOUR_K(bd_reads),
-			FOUR_K(bd_writes));
-	up_read(&zram->init_lock);
-
-	return ret;
-}
-
-static ssize_t writeback_skip_pages_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	struct zram *zram = dev_to_zram(dev);
-	ssize_t ret;
-
-	down_read(&zram->init_lock);
-	ret = scnprintf(buf, PAGE_SIZE, "%llu\n",
-			(u64)atomic64_read(&zram->stats.wb_pages_skipped));
+			FOUR_K((u64)atomic64_read(&zram->stats.bd_count)),
+			FOUR_K((u64)atomic64_read(&zram->stats.bd_reads)),
+			FOUR_K((u64)atomic64_read(&zram->stats.bd_writes)));
 	up_read(&zram->init_lock);
 
 	return ret;
@@ -2482,7 +1766,6 @@ static DEVICE_ATTR_RO(io_stat);
 static DEVICE_ATTR_RO(mm_stat);
 #ifdef CONFIG_ZRAM_WRITEBACK
 static DEVICE_ATTR_RO(bd_stat);
-static DEVICE_ATTR_RO(writeback_skip_pages);
 #endif
 static DEVICE_ATTR_RO(debug_stat);
 
@@ -2494,34 +1777,17 @@ static void zram_meta_free(struct zram *zram, u64 disksize)
 	if (!zram->table)
 		return;
 
+	destroy_device_zram_writeback(zram);
+
 	/* Free all pages that are still in this zram device */
 	for (index = 0; index < num_pages; index++)
 		zram_free_page(zram, index);
 
 	zs_destroy_pool(zram->mem_pool);
-
-	if (zram->io_page_pool) {
-		mempool_destroy(zram->io_page_pool);
-		zram->io_page_pool = NULL;
-	}
-
-#ifdef CONFIG_ZRAM_WRITEBACK
-	/* Destroy the per-device idle LRU and cold writeback metadata. */
+	zram->mem_pool = NULL;
+	
+	/* Destroy the per-device idle LRU */
 	list_lru_destroy(&zram->zram_list_lru);
-
-	if (zram->active_pagevecs) {
-		zram_drain_all_pages(zram);
-		free_percpu(zram->active_pagevecs);
-		zram->active_pagevecs = NULL;
-	}
-	vfree(zram->wb_table);
-	zram->wb_table = NULL;
-#endif
-
-#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
-	vfree(zram->ac_time_table);
-	zram->ac_time_table = NULL;
-#endif
 	
 	vfree(zram->table);
 	zram->table = NULL;
@@ -2537,86 +1803,39 @@ static bool zram_meta_alloc(struct zram *zram, u64 disksize)
 	if (!zram->table)
 		return false;
 
-#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
-	zram->ac_time_table = vzalloc(array_size(num_pages,
-						 sizeof(*zram->ac_time_table)));
-	if (!zram->ac_time_table)
-		goto err_table;
-#endif
-
-#ifdef CONFIG_ZRAM_WRITEBACK
-	zram->wb_table = vzalloc(array_size(num_pages, sizeof(*zram->wb_table)));
-	if (!zram->wb_table)
-		goto err_actime_table;
-
-	/* Initialize the LRU list heads for each cold writeback slot. */
+	/* Initialize the LRU list heads for each table entry */
 	for (index = 0; index < num_pages; index++)
-		INIT_LIST_HEAD(zram_wb_lru(zram, index));
-#endif
+		INIT_LIST_HEAD(&zram->table[index].lru);
 
 	zram->mem_pool = zs_create_pool(zram->disk->disk_name);
-	if (!zram->mem_pool)
-		goto err_wb_table;
+	if (!zram->mem_pool) {
+		vfree(zram->table);
+		zram->table = NULL;
+		return false;
+	}
 
 	if (!huge_class_size)
 		huge_class_size = zs_huge_class_size(zram->mem_pool);
-
-	zram->io_page_pool = mempool_create_page_pool(64, 0);
-	if (!zram->io_page_pool)
-		goto err_pool;
-
-	#ifdef CONFIG_ZRAM_WRITEBACK
-	/* Initialize the per-device idle LRU */
-	if (list_lru_init(&zram->zram_list_lru))
-		goto err_io_pool;
-	#endif
-
-#ifdef CONFIG_ZRAM_WRITEBACK
-	zram->active_pagevecs = alloc_percpu(struct zram_pagevec);
-	if (!zram->active_pagevecs)
-		goto err_lru;
 	
-	{
-		int cpu;
-		for_each_possible_cpu(cpu) {
-			struct zram_pagevec *pvec = per_cpu_ptr(zram->active_pagevecs, cpu);
-			pvec->nr = 0;
-			spin_lock_init(&pvec->lock);
-		}
+	/* Initialize the per-device idle LRU */
+	if (list_lru_init(&zram->zram_list_lru)) {
+		zs_destroy_pool(zram->mem_pool);
+		zram->mem_pool = NULL;
+		vfree(zram->table);
+		zram->table = NULL;
+		return false;
+	}
+
+	if (init_device_zram_writeback(zram)) {
+		list_lru_destroy(&zram->zram_list_lru);
+		zs_destroy_pool(zram->mem_pool);
+		zram->mem_pool = NULL;
+		vfree(zram->table);
+		zram->table = NULL;
+		return false;
 	}
 	
-	INIT_LIST_HEAD(&zram->active_list);
-	spin_lock_init(&zram->active_list_lock);
-	atomic_long_set(&zram->active_pages, 0);
-#endif
-	
 	return true;
-
-#ifdef CONFIG_ZRAM_WRITEBACK
-err_lru:
-	list_lru_destroy(&zram->zram_list_lru);
-#endif
-err_io_pool:
-	mempool_destroy(zram->io_page_pool);
-	zram->io_page_pool = NULL;
-err_pool:
-	zs_destroy_pool(zram->mem_pool);
-	zram->mem_pool = NULL;
-err_wb_table:
-
-#ifdef CONFIG_ZRAM_WRITEBACK
-	vfree(zram->wb_table);
-	zram->wb_table = NULL;
-err_actime_table:
-#endif
-#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
-	vfree(zram->ac_time_table);
-	zram->ac_time_table = NULL;
-#endif
-err_table:
-	vfree(zram->table);
-	zram->table = NULL;
-	return false;
 }
 
 /*
@@ -2627,48 +1846,33 @@ err_table:
 void zram_free_page(struct zram *zram, size_t index)
 {
 	unsigned long handle;
-	unsigned long flags;
-	unsigned long clear_mask;
 
 #ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
-	zram_clear_ac_time(zram, index);
+	zram->table[index].ac_time = 0;
 #endif
 	/* Remove from LRU list if present */
 	if (zram_test_flag(zram, index, ZRAM_IDLE))
 		zram_lru_del(zram, &zram->table[index]);
 
-	clear_mask = BIT(ZRAM_IDLE) | BIT(ZRAM_INCOMPRESSIBLE) |
-		     BIT(ZRAM_PAGE_ANON) | BIT(ZRAM_PAGE_FILE) |
-		     BIT(ZRAM_PAGE_DIRTY) | BIT(ZRAM_WB_SECOND_CHANCE) |
-		     BIT(ZRAM_REFERENCED) | BIT(ZRAM_TEMP_0) |
-		     BIT(ZRAM_TEMP_1) | BIT(ZRAM_TEMP_2) |
-		     BIT(ZRAM_PP_SLOT);
-	zram_clear_flags(zram, index, clear_mask);
-	
-#ifdef CONFIG_ZRAM_WRITEBACK
-	if (zram_test_flag(zram, index, ZRAM_ACTIVE)) {
-		spin_lock_irqsave(&zram->active_list_lock, flags);
-		if (!list_empty(zram_wb_lru(zram, index))) {
-			list_del_init(zram_wb_lru(zram, index));
-			atomic_long_dec(&zram->active_pages);
-		}
-		zram_clear_flag(zram, index, ZRAM_ACTIVE);
-		spin_unlock_irqrestore(&zram->active_list_lock, flags);
-	}
-#endif
+	zram_clear_flag(zram, index, ZRAM_IDLE);
+	zram_clear_flag(zram, index, ZRAM_INCOMPRESSIBLE);
+	zram_clear_flag(zram, index, ZRAM_TEMP_0);
+	zram_clear_flag(zram, index, ZRAM_TEMP_1);
+	zram_clear_flag(zram, index, ZRAM_TEMP_2);
+	zram_clear_flag(zram, index, ZRAM_PP_SLOT);
+	zram_clear_flag(zram, index, ZRAM_PAGE_ANON);
+	zram_clear_flag(zram, index, ZRAM_PAGE_FILE);
+	zram_clear_flag(zram, index, ZRAM_PAGE_DIRTY);
+	zram_set_priority(zram, index, 0);
 
 	if (zram_test_flag(zram, index, ZRAM_HUGE)) {
 		zram_clear_flag(zram, index, ZRAM_HUGE);
-		percpu_counter_dec(&zram->stats.huge_pages);
+		atomic64_dec(&zram->stats.huge_pages);
 	}
 
 	if (zram_test_flag(zram, index, ZRAM_WB)) {
-		handle = zram_get_handle(zram, index);
-
 		zram_clear_flag(zram, index, ZRAM_WB);
-		if (zram_test_flag(zram, index, ZRAM_WB_READ_ONCE))
-			zram_clear_flag(zram, index, ZRAM_WB_READ_ONCE);
-		free_block_bdev(zram, handle);
+		free_block_bdev(zram, zram_get_handle(zram, index));
 		goto out;
 	}
 
@@ -2678,7 +1882,7 @@ void zram_free_page(struct zram *zram, size_t index)
 	 */
 	if (zram_test_flag(zram, index, ZRAM_SAME)) {
 		zram_clear_flag(zram, index, ZRAM_SAME);
-		percpu_counter_dec(&zram->stats.same_pages);
+		atomic64_dec(&zram->stats.same_pages);
 		goto out;
 	}
 
@@ -2688,10 +1892,10 @@ void zram_free_page(struct zram *zram, size_t index)
 
 	zs_free(zram->mem_pool, handle);
 
-	percpu_counter_sub(&zram->stats.compr_data_size,
-			 zram_get_obj_size(zram, index));
+	atomic64_sub(zram_get_obj_size(zram, index),
+			 &zram->stats.compr_data_size);
 out:
-	percpu_counter_dec(&zram->stats.pages_stored);
+	atomic64_dec(&zram->stats.pages_stored);
 	zram_set_handle(zram, index, 0);
 	zram_set_obj_size(zram, index, 0);
 	WARN_ON_ONCE(zram->table[index].flags & ~(1UL << ZRAM_LOCK));
@@ -2700,222 +1904,99 @@ out:
 static int read_same_filled_page(struct zram *zram, struct page *page,
 				 u32 index)
 {
-	unsigned long element = zram_get_handle(zram, index);
-	void *mem = kmap_local_page(page);
+	void *mem;
 
-	zram_fill_page(mem, PAGE_SIZE, element);
+	mem = kmap_local_page(page);
+	zram_fill_page(mem, PAGE_SIZE, zram_get_handle(zram, index));
 	kunmap_local(mem);
 	return 0;
 }
 
-static int zram_copy_obj_to_page(struct zram *zram, unsigned long handle,
-				 unsigned int size, struct page *page)
+static int read_incompressible_page(struct zram *zram, struct page *page,
+				    u32 index)
 {
-	void *mem = kmap_local_page(page);
-	void *src;
+	unsigned long handle;
+	void *src, *dst;
 
-	src = zs_obj_read_begin(zram->mem_pool, handle, mem);
-	if (src != mem)
-		memcpy(mem, src, size);
-	zs_obj_read_end(zram->mem_pool, handle, src);
-	kunmap_local(mem);
-
-	return 0;
-}
-
-static int zram_prepare_read_from_zspool(struct zram *zram, u32 index,
-					 struct page *tmp_page,
-					 struct zram_zspool_read_ctx *ctx)
-{
-	unsigned long handle = zram_get_handle(zram, index);
-
-	if (zram_test_flag(zram, index, ZRAM_SAME) || !handle) {
-		ctx->mode = ZRAM_ZS_READ_SAME;
-		ctx->element = handle;
-		ctx->size = 0;
-		return 0;
-	}
-
-	if (zram_test_flag(zram, index, ZRAM_HUGE)) {
-		ctx->mode = ZRAM_ZS_READ_HUGE;
-		ctx->size = PAGE_SIZE;
-	} else {
-		ctx->mode = ZRAM_ZS_READ_COMPRESSED;
-		ctx->size = zram_get_obj_size(zram, index);
-	}
-
-	return zram_copy_obj_to_page(zram, handle, ctx->size, tmp_page);
-}
-
-static void zram_copy_page_from_page(struct page *dst_page, struct page *src_page)
-{
-	void *src = kmap_local_page(src_page);
-	void *dst = kmap_local_page(dst_page);
-
+	handle = zram_get_handle(zram, index);
+	src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
+	dst = kmap_local_page(page);
 	copy_page(dst, src);
 	kunmap_local(dst);
-	kunmap_local(src);
+	zs_unmap_object(zram->mem_pool, handle);
+
+	return 0;
 }
 
-static int zram_decompress_from_page(struct page *dst_page, struct page *src_page,
-				     unsigned int size,
-				     struct zcomp_strm *zstrm)
+static int read_compressed_page(struct zram *zram, struct page *page, u32 index)
 {
-	void *src = kmap_local_page(src_page);
-	void *dst = kmap_local_page(dst_page);
-	int ret;
+	struct zcomp_strm *zstrm;
+	unsigned long handle;
+	unsigned int size;
+	void *src, *dst;
+	int ret, prio;
 
-	prefetchw(dst);
+	handle = zram_get_handle(zram, index);
+	size = zram_get_obj_size(zram, index);
+	prio = zram_get_priority(zram, index);
+
+	zstrm = zcomp_stream_get(zram->comps[prio]);
+	src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
+	dst = kmap_local_page(page);
 	ret = zcomp_decompress(zstrm, src, size, dst);
 	kunmap_local(dst);
-	kunmap_local(src);
+	zs_unmap_object(zram->mem_pool, handle);
+	zcomp_stream_put(zram->comps[prio]);
 
 	return ret;
 }
 
-static int zram_finish_read_from_zspool(struct page *page, struct page *tmp_page,
-					const struct zram_zspool_read_ctx *ctx,
-					struct zcomp_strm *zstrm)
+/*
+ * Reads (decompresses if needed) a page from zspool (zsmalloc).
+ * Corresponding ZRAM slot should be locked.
+ */
+static int zram_read_from_zspool(struct zram *zram, struct page *page,
+				 u32 index)
 {
-	switch (ctx->mode) {
-	case ZRAM_ZS_READ_SAME:
-		{
-			void *mem = kmap_local_page(page);
+	if (zram_test_flag(zram, index, ZRAM_SAME) ||
+	    !zram_get_handle(zram, index))
+		return read_same_filled_page(zram, page, index);
 
-			zram_fill_page(mem, PAGE_SIZE, ctx->element);
-			kunmap_local(mem);
-		}
-		return 0;
-	case ZRAM_ZS_READ_HUGE:
-		zram_copy_page_from_page(page, tmp_page);
-		return 0;
-	case ZRAM_ZS_READ_COMPRESSED:
-		return zram_decompress_from_page(page, tmp_page, ctx->size, zstrm);
-	}
-
-	return -EINVAL;
+	if (!zram_test_flag(zram, index, ZRAM_HUGE))
+		return read_compressed_page(zram, page, index);
+	else
+		return read_incompressible_page(zram, page, index);
 }
-
-#ifdef CONFIG_ZRAM_WRITEBACK
-static void zram_wb_update_batch_stats(struct zram *zram,
-				       unsigned int nr_pages,
-				       unsigned int run_count)
-{
-	u32 prev_batch;
-	u32 prev_fallback;
-
-	atomic64_add(nr_pages, &zram->stats.wb_read_batch_pages);
-	atomic64_add(run_count, &zram->stats.wb_read_batch_bios);
-	if (nr_pages <= 1)
-		atomic64_inc(&zram->stats.wb_read_batch_fallbacks);
-
-	prev_batch = READ_ONCE(zram->wb_read_batch_ewma);
-	WRITE_ONCE(zram->wb_read_batch_ewma,
-		   zram_wb_ewma_update(prev_batch, nr_pages));
-
-	prev_fallback = READ_ONCE(zram->wb_read_fallback_ewma);
-	WRITE_ONCE(zram->wb_read_fallback_ewma,
-		   zram_wb_ewma_update(prev_fallback,
-				      (nr_pages <= 1) ? 100 : 0));
-}
-
-static int zram_read_from_wb(struct zram *zram, struct bio *bio,
-			     struct bvec_iter iter, u32 index,
-			     unsigned long handle,
-			     struct page **bdev_pages,
-			     struct zram_wb_read_run *bdev_runs,
-			     unsigned int *processed,
-			     unsigned int *bdev_nr_pages)
-{
-	unsigned int run_count = 0;
-	unsigned int nr_pages;
-	u8 policy = zram_pick_wb_read_policy(zram);
-	int ret;
-
-	nr_pages = zram_collect_bdev_read_runs(zram, bio, iter, handle,
-					      bdev_pages, bdev_runs,
-					      ZRAM_BDEV_READ_RUN_MAX,
-					      &run_count, processed,
-					      policy,
-					      zram->wb_read_gap_pages);
-	if (!nr_pages) {
-		struct bio_vec bv = bio_iter_iovec(bio, iter);
-
-		bdev_pages[0] = bv.bv_page;
-		bdev_runs[0].start_handle = handle;
-		bdev_runs[0].page_start = 0;
-		bdev_runs[0].nr_pages = 1;
-		run_count = 1;
-		nr_pages = 1;
-		*processed = PAGE_SIZE;
-	}
-
-	ret = read_from_bdev_runs(zram, bdev_pages, bdev_runs, run_count, bio);
-	if (!ret) {
-		*bdev_nr_pages = nr_pages;
-		zram_wb_update_batch_stats(zram, nr_pages, run_count);
-	}
-
-	return ret;
-}
-#endif
 
 static int zram_read_page(struct zram *zram, struct page *page, u32 index,
 			  struct bio *parent)
 {
-	struct page *tmp_page = NULL;
-	struct zram_zspool_read_ctx read_ctx;
-	struct zcomp_strm *zstrm = NULL;
-	bool from_wb = false;
 	int ret;
-
-retry:
+	bool from_wb;
 
 	zram_slot_lock(zram, index);
-	if (!zram_test_flag(zram, index, ZRAM_WB)) {
-		if (!tmp_page &&
-		    !zram_test_flag(zram, index, ZRAM_SAME) &&
-		    zram_get_handle(zram, index)) {
-			zram_slot_unlock(zram, index);
-			tmp_page = mempool_alloc(zram->io_page_pool,
-						 GFP_NOIO | __GFP_NOWARN);
-			if (!tmp_page)
-				return -ENOMEM;
-			goto retry;
-		}
-
-		ret = zram_prepare_read_from_zspool(zram, index, tmp_page, &read_ctx);
+	from_wb = zram_test_flag(zram, index, ZRAM_WB);
+	if (!from_wb) {
+		/* Slot should be locked through out the function call */
+		ret = zram_read_from_zspool(zram, page, index);
 		zram_slot_unlock(zram, index);
-
-		if (!ret) {
-			if (read_ctx.mode == ZRAM_ZS_READ_COMPRESSED)
-				zstrm = zcomp_stream_get(zram->comp);
-
-			ret = zram_finish_read_from_zspool(page, tmp_page,
-							   &read_ctx, zstrm);
-
-			if (zstrm)
-				zcomp_stream_put(zram->comp);
-		}
 	} else {
-		unsigned long handle = zram_get_handle(zram, index);
-
+		/*
+		 * The slot should be unlocked before reading from the backing
+		 * device.
+		 */
 		zram_slot_unlock(zram, index);
-		from_wb = true;
-		ret = read_from_bdev(zram, page, handle, parent);
+
+		ret = read_from_bdev(zram, page, zram_get_handle(zram, index),
+				     parent);
 	}
 
-	if (tmp_page)
-		mempool_free(tmp_page, zram->io_page_pool);
+	if (!ret)
+		zram_promote_accessed(zram, index, from_wb);
 
 	/* Should NEVER happen. Return bio error if it does. */
 	if (WARN_ON(ret < 0))
 		pr_err("Decompression failed! err=%d, page=%u\n", ret, index);
-
-#ifdef CONFIG_ZRAM_WRITEBACK
-	if (likely(!ret))
-		zram_promote_accessed(zram, index, from_wb);
-#endif
 
 	return ret;
 }
@@ -2927,50 +2008,98 @@ retry:
 static int zram_bvec_read_partial(struct zram *zram, struct bio_vec *bvec,
 				  u32 index, int offset)
 {
-	struct page *page;
+	struct page *page = alloc_page(GFP_NOIO);
 	int ret;
 
-	page = mempool_alloc(zram->io_page_pool, GFP_NOIO | __GFP_NOWARN);
 	if (!page)
 		return -ENOMEM;
 	ret = zram_read_page(zram, page, index, NULL);
 	if (likely(!ret))
 		memcpy_to_bvec(bvec, page_address(page) + offset);
-	mempool_free(page, zram->io_page_pool);
+	__free_page(page);
 	return ret;
 }
 
+static int zram_bvec_read(struct zram *zram, struct bio_vec *bvec,
+			  u32 index, int offset, struct bio *bio)
+{
+	if (is_partial_io(bvec))
+		return zram_bvec_read_partial(zram, bvec, index, offset);
+	return zram_read_page(zram, bvec->bv_page, index, bio);
+}
 
 static int write_same_filled_page(struct zram *zram, unsigned long fill,
-				  u32 index, unsigned long page_flags)
+				  u32 index, struct page *page)
 {
-	zram_commit_write(zram, index, fill, 0, ZRAM_SAME, page_flags);
+	zram_slot_lock(zram, index);
+	zram_set_flag(zram, index, ZRAM_SAME);
+	zram_set_handle(zram, index, fill);
+
+	if (PageAnon(page)) {
+		zram_set_flag(zram, index, ZRAM_PAGE_ANON);
+	} else {
+		zram_set_flag(zram, index, ZRAM_PAGE_FILE);
+		/* 块层写入时常设 Writeback，因此两者需一并判断 */
+		if (PageDirty(page) || PageWriteback(page))
+			zram_set_flag(zram, index, ZRAM_PAGE_DIRTY);
+	}
+
+	zram_slot_unlock(zram, index);
+
+	atomic64_inc(&zram->stats.same_pages);
+	atomic64_inc(&zram->stats.pages_stored);
 
 	return 0;
 }
 
-static int write_incompressible_page(struct zram *zram, const void *src,
-				     u32 index, unsigned long page_flags)
+static int write_incompressible_page(struct zram *zram, struct page *page,
+				     u32 index, u8 prio)
 {
 	unsigned long handle;
-	void *dst;
+	void *src, *dst;
 
+	/*
+	 * This function is called from preemptible context so we don't need
+	 * to do optimistic and fallback to pessimistic handle allocation,
+	 * like we do for compressible pages.
+	 */
 	handle = zs_malloc(zram->mem_pool, PAGE_SIZE,
-			   GFP_NOWAIT | __GFP_HIGHMEM | __GFP_MOVABLE);
+			   GFP_NOIO | __GFP_HIGHMEM | __GFP_MOVABLE);
 	if (IS_ERR_VALUE(handle))
 		return PTR_ERR((void *)handle);
 
 	if (!zram_can_store_page(zram)) {
+		zcomp_stream_put(zram->comps[ZRAM_PRIMARY_COMP]);
 		zs_free(zram->mem_pool, handle);
 		return -ENOMEM;
 	}
 
 	dst = zs_map_object(zram->mem_pool, handle, ZS_MM_WO);
-	copy_page(dst, src);
+	src = kmap_local_page(page);
+	memcpy(dst, src, PAGE_SIZE);
+	kunmap_local(src);
 	zs_unmap_object(zram->mem_pool, handle);
 
-	zram_commit_write(zram, index, handle, PAGE_SIZE, ZRAM_HUGE,
-			 page_flags | BIT(ZRAM_INCOMPRESSIBLE));
+	zram_slot_lock(zram, index);
+	zram_set_flag(zram, index, ZRAM_HUGE);
+	zram_set_handle(zram, index, handle);
+	zram_set_obj_size(zram, index, PAGE_SIZE);
+	zram_set_priority(zram, index, prio);
+
+	if (PageAnon(page)) {
+		zram_set_flag(zram, index, ZRAM_PAGE_ANON);
+	} else {
+		zram_set_flag(zram, index, ZRAM_PAGE_FILE);
+		if (PageDirty(page) || PageWriteback(page))
+			zram_set_flag(zram, index, ZRAM_PAGE_DIRTY);
+	}
+
+	zram_slot_unlock(zram, index);
+
+	atomic64_add(PAGE_SIZE, &zram->stats.compr_data_size);
+	atomic64_inc(&zram->stats.huge_pages);
+	atomic64_inc(&zram->stats.huge_pages_since);
+	atomic64_inc(&zram->stats.pages_stored);
 
 	return 0;
 }
@@ -2981,34 +2110,57 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
 	unsigned long handle;
 	unsigned int comp_len;
 	void *dst, *mem;
-	struct zcomp_strm *zstrm;
+	struct zcomp_strm *zstrm = NULL;
 	unsigned long element;
-	unsigned long page_flags;
 	bool same_filled;
+	u8 prio, prio_max = zram->num_active_comps;
+#ifdef CONFIG_ZRAM_MULTI_COMP
+	prio_max = min(prio_max, sysctl_zram_recomp_immediate + 1);
+#endif //CONFIG_ZRAM_MULTI_COMP
 
-	page_flags = zram_page_flags(page);
-	mem = kmap_local_page(page);
+	/* First, free memory allocated to this slot (if any) */
+	zram_slot_lock(zram, index);
+	zram_free_page(zram, index);
+	zram_slot_unlock(zram, index);
+
+
+	mem = kmap_atomic(page);
 	same_filled = page_same_filled(mem, &element);
+	kunmap_atomic(mem);
 	if (same_filled)
-		goto write_same;
+		return write_same_filled_page(zram, element, index, page);
 
-	zstrm = zcomp_stream_get(zram->comp);
-	ret = zcomp_compress(zstrm, mem, &comp_len);
+	for (prio = ZRAM_PRIMARY_COMP; prio < prio_max; prio++) {
+		if (!zram->comps[prio])
+			continue;
 
-	if (unlikely(ret)) {
+		zstrm = zcomp_stream_get(zram->comps[prio]);
+		mem = kmap_local_page(page);
+		ret = zcomp_compress(zstrm, mem, &comp_len);
 		kunmap_local(mem);
-		pr_err("Compression failed! err=%d\n", ret);
-		zcomp_stream_put(zram->comp);
-		return ret;
+
+		if (unlikely(ret)) {
+			pr_err("Compression failed! err=%d\n", ret);
+			goto out;
+		}
+
+		if (comp_len < huge_class_size)
+			break;
+
+		zcomp_stream_put(zram->comps[prio]);
+		zstrm = NULL;
 	}
 
-	if (comp_len >= huge_class_size) {
-		zcomp_stream_put(zram->comp);
-		ret = write_incompressible_page(zram, mem, index, page_flags);
-		kunmap_local(mem);
-		return ret;
+	if (!zstrm) {
+		if (prio >= zram->num_active_comps) {
+			zram_slot_lock(zram, index);
+			zram_set_flag(zram, index, ZRAM_INCOMPRESSIBLE);
+			zram_slot_unlock(zram, index);
+		}
+
+		ret = write_incompressible_page(zram, page, index, prio - 1);
+		goto out;
 	}
-	kunmap_local(mem);
 
 	handle = zs_malloc(zram->mem_pool, comp_len,
 			__GFP_KSWAPD_RECLAIM |
@@ -3017,28 +2169,44 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
 			__GFP_MOVABLE |
 			__GFP_CMA);
 	if (IS_ERR_VALUE(handle)) {
-		zcomp_stream_put(zram->comp);
-		return PTR_ERR((void *)handle);
+		ret = PTR_ERR((void *)handle);
+		goto out;
 	}
 
 	if (!zram_can_store_page(zram)) {
 		zs_free(zram->mem_pool, handle);
-		zcomp_stream_put(zram->comp);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto out;
 	}
 
 	dst = zs_map_object(zram->mem_pool, handle, ZS_MM_WO);
+
 	memcpy(dst, zstrm->buffer, comp_len);
 	zs_unmap_object(zram->mem_pool, handle);
-	zcomp_stream_put(zram->comp);
 
-	zram_commit_write(zram, index, handle, comp_len, 0, page_flags);
+	zram_slot_lock(zram, index);
+	zram_set_handle(zram, index, handle);
+	zram_set_obj_size(zram, index, comp_len);
+	zram_set_priority(zram, index, prio);
 
-	return 0;
+	if (PageAnon(page)) {
+		zram_set_flag(zram, index, ZRAM_PAGE_ANON);
+	} else {
+		zram_set_flag(zram, index, ZRAM_PAGE_FILE);
+		if (PageDirty(page) || PageWriteback(page))
+			zram_set_flag(zram, index, ZRAM_PAGE_DIRTY);
+	}
 
-write_same:
-	kunmap_local(mem);
-	return write_same_filled_page(zram, element, index, page_flags);
+	zram_slot_unlock(zram, index);
+
+	/* Update stats */
+	atomic64_inc(&zram->stats.pages_stored);
+	atomic64_add(comp_len, &zram->stats.compr_data_size);
+
+out:
+	if (zstrm)
+		zcomp_stream_put(zram->comps[prio]);
+	return ret;
 }
 
 /*
@@ -3047,10 +2215,9 @@ write_same:
 static int zram_bvec_write_partial(struct zram *zram, struct bio_vec *bvec,
 				   u32 index, int offset, struct bio *bio)
 {
-	struct page *page;
+	struct page *page = alloc_page(GFP_NOIO);
 	int ret;
 
-	page = mempool_alloc(zram->io_page_pool, GFP_NOIO | __GFP_NOWARN);
 	if (!page)
 		return -ENOMEM;
 
@@ -3059,7 +2226,7 @@ static int zram_bvec_write_partial(struct zram *zram, struct bio_vec *bvec,
 		memcpy_from_bvec(page_address(page) + offset, bvec);
 		ret = zram_write_page(zram, page, index);
 	}
-	mempool_free(page, zram->io_page_pool);
+	__free_page(page);
 	return ret;
 }
 
@@ -3071,12 +2238,381 @@ static int zram_bvec_write(struct zram *zram, struct bio_vec *bvec,
 	return zram_write_page(zram, bvec->bv_page, index);
 }
 
+#ifdef CONFIG_ZRAM_MULTI_COMP
+#define RECOMPRESS_IDLE		(1 << 0)
+#define RECOMPRESS_HUGE		(1 << 1)
+
+static int scan_slots_for_recompress(struct zram *zram, u32 mode, u32 prio_max,
+				     struct zram_pp_ctl *ctl)
+{
+	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
+	unsigned long index;
+
+	for (index = 0; index < nr_pages; index++) {
+		bool ok = true;
+
+		zram_slot_lock(zram, index);
+		if (!zram_allocated(zram, index))
+			goto next;
+
+		{
+			unsigned int temp = zram_get_temp_locked(zram, index);
+
+			if (temp > 0) {
+				pr_info_ratelimited("zram %s recompress scan skip hot page index=%lu temp=%u->%u\n",
+						    zram->disk->disk_name, index, temp, temp - 1);
+				zram_set_temp_locked(zram, index, temp - 1);
+				goto next;
+			}
+		}
+
+		if (mode & RECOMPRESS_IDLE &&
+		    !zram_test_flag(zram, index, ZRAM_IDLE))
+			goto next;
+
+		if (mode & RECOMPRESS_HUGE &&
+		    !zram_test_flag(zram, index, ZRAM_HUGE))
+			goto next;
+
+		if (zram_test_flag(zram, index, ZRAM_WB) ||
+		    zram_test_flag(zram, index, ZRAM_SAME) ||
+		    zram_test_flag(zram, index, ZRAM_INCOMPRESSIBLE))
+			goto next;
+
+		/* Already compressed with same of higher priority */
+		if (zram_get_priority(zram, index) + 1 >= prio_max)
+			goto next;
+
+		ok = place_pp_slot(zram, ctl, index);
+next:
+		zram_slot_unlock(zram, index);
+		if (!ok)
+			break;
+	}
+
+	return 0;
+}
+
+/*
+ * This function will decompress (unless it's ZRAM_HUGE) the page and then
+ * attempt to compress it using provided compression algorithm priority
+ * (which is potentially more effective).
+ *
+ * Corresponding ZRAM slot should be locked.
+ */
+static int recompress_slot(struct zram *zram, u32 index, struct page *page,
+			   u64 *num_recomp_pages, u32 threshold, u32 prio,
+			   u32 prio_max)
+{
+	struct zcomp_strm *zstrm = NULL;
+	unsigned long handle_old;
+	unsigned long handle_new;
+	unsigned int comp_len_old;
+	unsigned int comp_len_new;
+	unsigned int class_index_old;
+	unsigned int class_index_new;
+	u32 num_recomps = 0;
+	void *src, *dst;
+	int ret;
+
+	handle_old = zram_get_handle(zram, index);
+	if (!handle_old)
+		return -EINVAL;
+
+	comp_len_old = zram_get_obj_size(zram, index);
+	/*
+	 * Do not recompress objects that are already "small enough".
+	 */
+	if (comp_len_old < threshold)
+		return 0;
+
+	ret = zram_read_from_zspool(zram, page, index);
+	if (ret)
+		return ret;
+
+	/*
+	 * We touched this entry so mark it as non-IDLE. This makes sure that
+	 * we don't preserve IDLE flag and don't incorrectly pick this entry
+	 * for different post-processing type (e.g. writeback).
+	 */
+	zram_clear_flag(zram, index, ZRAM_IDLE);
+
+	class_index_old = zs_lookup_class_index(zram->mem_pool, comp_len_old);
+
+	prio = max(prio, zram_get_priority(zram, index) + 1);
+	/*
+	 * Recompression slots scan should not select slots that are
+	 * already compressed with a higher priority algorithm, but
+	 * just in case
+	 */
+	if (prio >= prio_max)
+		return 0;
+
+	/*
+	 * Iterate the secondary comp algorithms list (in order of priority)
+	 * and try to recompress the page.
+	 */
+	for (; prio < prio_max; prio++) {
+		if (!zram->comps[prio])
+			continue;
+
+		num_recomps++;
+		zstrm = zcomp_stream_get(zram->comps[prio]);
+		src = kmap_atomic(page);
+		ret = zcomp_compress(zstrm, src, &comp_len_new);
+		kunmap_atomic(src);
+
+		if (ret) {
+			zcomp_stream_put(zram->comps[prio]);
+			return ret;
+		}
+
+		class_index_new = zs_lookup_class_index(zram->mem_pool,
+							comp_len_new);
+
+		/* Continue until we make progress */
+		if (class_index_new >= class_index_old ||
+		    (threshold && comp_len_new >= threshold)) {
+			zcomp_stream_put(zram->comps[prio]);
+			continue;
+		}
+
+		/* Recompression was successful so break out */
+		break;
+	}
+
+	/*
+	 * We did not try to recompress, e.g. when we have only one
+	 * secondary algorithm and the page is already recompressed
+	 * using that algorithm
+	 */
+	if (!zstrm)
+		return 0;
+
+	/*
+	 * Decrement the limit (if set) on pages we can recompress, even
+	 * when current recompression was unsuccessful or did not compress
+	 * the page below the threshold, because we still spent resources
+	 * on it.
+	 */
+	if (*num_recomp_pages)
+		*num_recomp_pages -= 1;
+
+	if (class_index_new >= class_index_old) {
+		/*
+		 * Secondary algorithms failed to re-compress the page
+		 * in a way that would save memory, mark the object as
+		 * incompressible so that we will not try to compress
+		 * it again.
+		 *
+		 * We need to make sure that all secondary algorithms have
+		 * failed, so we test if the number of recompressions matches
+		 * the number of active secondary algorithms.
+		 */
+		if (num_recomps == zram->num_active_comps - 1)
+			zram_set_flag(zram, index, ZRAM_INCOMPRESSIBLE);
+		return 0;
+	}
+
+	/* Successful recompression but above threshold */
+	if (threshold && comp_len_new >= threshold)
+		return 0;
+
+	/*
+	 * No direct reclaim (slow path) for handle allocation and no
+	 * re-compression attempt (unlike in zram_write_bvec()) since
+	 * we already have stored that object in zsmalloc. If we cannot
+	 * alloc memory for recompressed object then we bail out and
+	 * simply keep the old (existing) object in zsmalloc.
+	 */
+	handle_new = zs_malloc(zram->mem_pool, comp_len_new,
+			       __GFP_KSWAPD_RECLAIM |
+			       __GFP_NOWARN |
+			       __GFP_HIGHMEM |
+			       __GFP_MOVABLE);
+	if (IS_ERR_VALUE(handle_new)) {
+		zcomp_stream_put(zram->comps[prio]);
+		return PTR_ERR((void *)handle_new);
+	}
+
+	dst = zs_map_object(zram->mem_pool, handle_new, ZS_MM_WO);
+	memcpy(dst, zstrm->buffer, comp_len_new);
+	zcomp_stream_put(zram->comps[prio]);
+
+	zs_unmap_object(zram->mem_pool, handle_new);
+
+	zram_free_page(zram, index);
+	zram_set_handle(zram, index, handle_new);
+	zram_set_obj_size(zram, index, comp_len_new);
+	zram_set_priority(zram, index, prio);
+
+	atomic64_add(comp_len_new, &zram->stats.compr_data_size);
+	atomic64_inc(&zram->stats.pages_stored);
+
+	return 0;
+}
+
+static ssize_t recompress_store(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t len)
+{
+	u32 prio = ZRAM_SECONDARY_COMP, prio_max = ZRAM_MAX_COMPS;
+	struct zram *zram = dev_to_zram(dev);
+	char *args, *param, *val, *algo = NULL;
+	u64 num_recomp_pages = ULLONG_MAX;
+	struct zram_pp_ctl *ctl = NULL;
+	struct zram_pp_slot *pps;
+	u32 mode = 0, threshold = 0;
+	struct page *page = NULL;
+	ssize_t ret;
+
+	args = skip_spaces(buf);
+	while (*args) {
+		args = next_arg(args, &param, &val);
+
+		if (!val || !*val)
+			return -EINVAL;
+
+		if (!strcmp(param, "type")) {
+			if (!strcmp(val, "idle"))
+				mode = RECOMPRESS_IDLE;
+			if (!strcmp(val, "huge"))
+				mode = RECOMPRESS_HUGE;
+			if (!strcmp(val, "huge_idle"))
+				mode = RECOMPRESS_IDLE | RECOMPRESS_HUGE;
+			continue;
+		}
+
+		if (!strcmp(param, "max_pages")) {
+			/*
+			 * Limit the number of entries (pages) we attempt to
+			 * recompress.
+			 */
+			ret = kstrtoull(val, 10, &num_recomp_pages);
+			if (ret)
+				return ret;
+			continue;
+		}
+
+		if (!strcmp(param, "threshold")) {
+			/*
+			 * We will re-compress only idle objects equal or
+			 * greater in size than watermark.
+			 */
+			ret = kstrtouint(val, 10, &threshold);
+			if (ret)
+				return ret;
+			continue;
+		}
+
+		if (!strcmp(param, "algo")) {
+			algo = val;
+			continue;
+		}
+	}
+
+	if (threshold >= huge_class_size)
+		return -EINVAL;
+
+	down_read(&zram->init_lock);
+	if (!init_done(zram)) {
+		ret = -EINVAL;
+		goto release_init_lock;
+	}
+
+	/* Do not permit concurrent post-processing actions. */
+	if (atomic_xchg(&zram->pp_in_progress, 1)) {
+		up_read(&zram->init_lock);
+		return -EAGAIN;
+	}
+
+	if (algo) {
+		bool found = false;
+
+		for (; prio < ZRAM_MAX_COMPS; prio++) {
+			if (!zram->comp_algs[prio])
+				continue;
+
+			if (!strcmp(zram->comp_algs[prio], algo)) {
+				prio_max = min(prio + 1, ZRAM_MAX_COMPS);
+				found = true;
+				break;
+			}
+		}
+
+		if (!found) {
+			ret = -EINVAL;
+			goto release_init_lock;
+		}
+	}
+
+	page = alloc_page(GFP_KERNEL);
+	if (!page) {
+		ret = -ENOMEM;
+		goto release_init_lock;
+	}
+
+	ctl = init_pp_ctl();
+	if (!ctl) {
+		ret = -ENOMEM;
+		goto release_init_lock;
+	}
+
+	scan_slots_for_recompress(zram, mode, prio_max, ctl);
+
+	ret = len;
+	while ((pps = select_pp_slot(ctl))) {
+		int err = 0;
+
+		if (!num_recomp_pages)
+			break;
+
+		zram_slot_lock(zram, pps->index);
+		if (!zram_test_flag(zram, pps->index, ZRAM_PP_SLOT))
+			goto next;
+
+		err = recompress_slot(zram, pps->index, page,
+				      &num_recomp_pages, threshold,
+				      prio, prio_max);
+next:
+		zram_slot_unlock(zram, pps->index);
+		release_pp_slot(zram, pps);
+
+		if (err) {
+			ret = err;
+			break;
+		}
+
+		cond_resched();
+	}
+
+release_init_lock:
+	if (page)
+		__free_page(page);
+	release_pp_ctl(zram, ctl);
+	atomic_set(&zram->pp_in_progress, 0);
+	up_read(&zram->init_lock);
+	return ret;
+}
+#endif
+
 static void zram_bio_discard(struct zram *zram, struct bio *bio)
 {
 	size_t n = bio->bi_iter.bi_size;
 	u32 index = bio->bi_iter.bi_sector >> SECTORS_PER_PAGE_SHIFT;
 	u32 offset = (bio->bi_iter.bi_sector & (SECTORS_PER_PAGE - 1)) <<
 			SECTOR_SHIFT;
+
+	/*
+	 * zram manages data in physical block size units. Because logical block
+	 * size isn't identical with physical block size on some arch, we
+	 * could get a discard request pointing to a specific offset within a
+	 * certain physical block.  Although we can handle this request by
+	 * reading that physiclal block and decompressing and partially zeroing
+	 * and re-compressing and then re-storing it, this isn't reasonable
+	 * because our intent with a discard request is to save memory.  So
+	 * skipping this logical block is appropriate here.
+	 */
 	if (offset) {
 		if (n <= (PAGE_SIZE - offset))
 			return;
@@ -3089,7 +2625,7 @@ static void zram_bio_discard(struct zram *zram, struct bio *bio)
 		zram_slot_lock(zram, index);
 		zram_free_page(zram, index);
 		zram_slot_unlock(zram, index);
-		percpu_counter_inc(&zram->stats.notify_free);
+		atomic64_inc(&zram->stats.notify_free);
 		index++;
 		n -= PAGE_SIZE;
 	}
@@ -3101,184 +2637,28 @@ static void zram_bio_read(struct zram *zram, struct bio *bio)
 {
 	unsigned long start_time = bio_start_io_acct(bio);
 	struct bvec_iter iter = bio->bi_iter;
-	struct page *tmp_page = NULL;
-	struct zcomp_strm *zstrm = NULL;
-	struct page *bdev_pages[ZRAM_BDEV_READ_BATCH_MAX];
-	struct zram_wb_read_run bdev_runs[ZRAM_BDEV_READ_RUN_MAX];
-	int batch_count = 0;
-	bool from_bdev;
 
 	do {
 		u32 index = iter.bi_sector >> SECTORS_PER_PAGE_SHIFT;
 		u32 offset = (iter.bi_sector & (SECTORS_PER_PAGE - 1)) <<
 				SECTOR_SHIFT;
 		struct bio_vec bv = bio_iter_iovec(bio, iter);
-		unsigned int bdev_nr_pages = 0;
-		unsigned int processed = 0;
-		int ret;
 
 		bv.bv_len = min_t(u32, bv.bv_len, PAGE_SIZE - offset);
-		processed = bv.bv_len;
-		from_bdev = false;
 
-		if (is_partial_io(&bv)) {
-			if (zstrm) {
-				zcomp_stream_put(zram->comp);
-				zstrm = NULL;
-			}
-			ret = zram_bvec_read_partial(zram, &bv, index, offset);
-			goto check_err;
-		}
-
-		/* Prefetch next table entry for sequential reads */
-		if (iter.bi_size > bv.bv_len) {
-			u32 next_idx = (iter.bi_sector +
-				(bv.bv_len >> SECTOR_SHIFT)) >>
-				SECTORS_PER_PAGE_SHIFT;
-			prefetch(&zram->table[next_idx]);
-		}
-
-		{
-			unsigned long flags = READ_ONCE(zram->table[index].flags);
-
-			if ((flags & BIT(ZRAM_SAME)) &&
-			    !(flags & (BIT(ZRAM_IDLE) | BIT(ZRAM_PP_SLOT)))) {
-				ret = read_same_filled_page(zram, bv.bv_page, index);
-				goto check_err;
-			}
-
-		#ifdef CONFIG_ZRAM_WRITEBACK
-			if ((flags & BIT(ZRAM_WB)) &&
-			    !(flags & (BIT(ZRAM_PP_SLOT) | BIT(ZRAM_LOCK)))) {
-				unsigned long handle = READ_ONCE(zram->table[index].handle);
-
-				if (zstrm) {
-					zcomp_stream_put(zram->comp);
-					zstrm = NULL;
-					batch_count = 0;
-				}
-				from_bdev = true;
-				ret = zram_read_from_wb(zram, bio, iter, index, handle,
-						bdev_pages, bdev_runs,
-						&processed, &bdev_nr_pages);
-				goto check_err;
-			}
-		#endif
-		}
-
-		/* Prefetch output page for decompression write */
-		prefetchw(page_address(bv.bv_page));
-
-	retry:
-		zram_slot_lock(zram, index);
-
-		if (zram_test_flag(zram, index, ZRAM_WB)) {
-		#ifdef CONFIG_ZRAM_WRITEBACK
-			unsigned long handle = zram_get_handle(zram, index);
-
-			zram_slot_unlock(zram, index);
-			if (zstrm) {
-				zcomp_stream_put(zram->comp);
-				zstrm = NULL;
-				batch_count = 0;
-			}
-			from_bdev = true;
-			ret = zram_read_from_wb(zram, bio, iter, index, handle,
-						bdev_pages, bdev_runs,
-						&processed, &bdev_nr_pages);
-			goto check_err;
-		#else
-			zram_slot_unlock(zram, index);
-			ret = -EIO;
-			goto check_err;
-		#endif
-		} else {
-			struct zram_zspool_read_ctx read_ctx;
-
-			if (!tmp_page &&
-			    !zram_test_flag(zram, index, ZRAM_SAME) &&
-			    zram_get_handle(zram, index)) {
-				zram_slot_unlock(zram, index);
-				tmp_page = mempool_alloc(zram->io_page_pool,
-							 GFP_NOIO | __GFP_NOWARN);
-				if (!tmp_page) {
-					ret = -ENOMEM;
-					goto check_err;
-				}
-				goto retry;
-			}
-
-			ret = zram_prepare_read_from_zspool(zram, index, tmp_page,
-							   &read_ctx);
-			zram_slot_unlock(zram, index);
-
-			if (unlikely(ret))
-				goto check_err;
-
-			if (read_ctx.mode == ZRAM_ZS_READ_COMPRESSED) {
-				if (!zstrm) {
-					zstrm = zcomp_stream_get(zram->comp);
-					batch_count = 0;
-				}
-				ret = zram_finish_read_from_zspool(bv.bv_page, tmp_page,
-								   &read_ctx, zstrm);
-
-				if (++batch_count >= ZRAM_READ_BATCH_MAX) {
-					zcomp_stream_put(zram->comp);
-					zstrm = NULL;
-				}
-			} else {
-				ret = zram_finish_read_from_zspool(bv.bv_page, tmp_page,
-								   &read_ctx, NULL);
-			}
-		}
-
-		if (WARN_ON(ret < 0))
-			pr_err("Decompression failed! err=%d, page=%u\n",
-			       ret, index);
-
-#ifdef CONFIG_ZRAM_WRITEBACK
-		if (likely(!ret)) {
-			unsigned int active_pages = bdev_nr_pages ?: 1;
-			unsigned int active_idx;
-
-			for (active_idx = 0; active_idx < active_pages; active_idx++)
-				zram_promote_accessed(zram, index + active_idx,
-						      from_bdev);
-		}
-#endif
-
-check_err:
-		if (ret < 0) {
+		if (zram_bvec_read(zram, &bv, index, offset, bio) < 0) {
 			atomic64_inc(&zram->stats.failed_reads);
 			bio->bi_status = BLK_STS_IOERR;
 			break;
 		}
-	#ifdef CONFIG_ZRAM_WRITEBACK
-		if (from_bdev) {
-			unsigned int active_pages = bdev_nr_pages ?: 1;
-			unsigned int active_idx;
+		flush_dcache_page(bv.bv_page);
 
-			for (active_idx = 0; active_idx < active_pages; active_idx++)
-				zram_promote_accessed(zram, index + active_idx, true);
-		}
-	#endif
-		if (!from_bdev)
-			flush_dcache_page(bv.bv_page);
+		zram_slot_lock(zram, index);
+		zram_accessed(zram, index);
+		zram_slot_unlock(zram, index);
 
-		if (!from_bdev) {
-#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
-			zram_write_ac_time(zram, index, ktime_get_boottime());
-#endif
-		}
-
-		bio_advance_iter(bio, &iter, processed);
+		bio_advance_iter_single(bio, &iter, bv.bv_len);
 	} while (iter.bi_size);
-
-	if (zstrm)
-		zcomp_stream_put(zram->comp);
-	if (tmp_page)
-		mempool_free(tmp_page, zram->io_page_pool);
 
 	bio_end_io_acct(bio, start_time);
 	bio_endio(bio);
@@ -3303,10 +2683,9 @@ static void zram_bio_write(struct zram *zram, struct bio *bio)
 			break;
 		}
 
-#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
-		/* 无锁更新时间，原子性由 CPU 保证（或可接受微小误差） */
-		zram_write_ac_time(zram, index, ktime_get_boottime());
-#endif
+		zram_slot_lock(zram, index);
+		zram_accessed(zram, index);
+		zram_slot_unlock(zram, index);
 
 		bio_advance_iter_single(bio, &iter, bv.bv_len);
 	} while (iter.bi_size);
@@ -3321,9 +2700,6 @@ static void zram_bio_write(struct zram *zram, struct bio *bio)
 static void zram_submit_bio(struct bio *bio)
 {
 	struct zram *zram = bio->bi_bdev->bd_disk->private_data;
-	struct blk_plug plug;
-
-	blk_start_plug(&plug);
 
 	switch (bio_op(bio)) {
 	case REQ_OP_READ:
@@ -3340,9 +2716,240 @@ static void zram_submit_bio(struct bio *bio)
 		WARN_ON_ONCE(1);
 		bio_endio(bio);
 	}
-
-	blk_finish_plug(&plug);
 }
+
+#ifdef CONFIG_ZRAM_WRITEBACK
+static DECLARE_WAIT_QUEUE_HEAD(auto_writeback_wq);
+static atomic_t auto_writeback_pending = ATOMIC_INIT(0);
+
+static unsigned long zram_auto_writeback(struct zram *zram,
+					 unsigned long max_pages)
+{
+	u64 nr_pages = zram->disksize >> PAGE_SHIFT;
+	struct zram_pp_ctl *ctl;
+	unsigned long pages_written = 0;
+	int err;
+
+	if (!zram || !zram->disk)
+		return 0;
+
+	down_read(&zram->init_lock);
+	if (!init_done(zram) || !zram->backing_dev) {
+		up_read(&zram->init_lock);
+		return 0;
+	}
+	up_read(&zram->init_lock);
+
+	down_read(&zram->init_lock);
+	if (atomic_xchg(&zram->pp_in_progress, 1)) {
+		up_read(&zram->init_lock);
+		return 0;
+	}
+	ctl = init_pp_ctl();
+	if (!ctl) {
+		atomic_set(&zram->pp_in_progress, 0);
+		up_read(&zram->init_lock);
+		return 0;
+	}
+
+	scan_slots_for_writeback(zram, IDLE_WRITEBACK, 0, nr_pages, ctl);
+	err = zram_writeback_slots(zram, ctl, max_pages, &pages_written);
+	if (err)
+		pr_info_ratelimited("zram %s auto writeback failed ret=%d pages=%lu limit_pages=%lu\n",
+				    zram->disk->disk_name, err, pages_written, max_pages);
+
+	release_pp_ctl(zram, ctl);
+	atomic_set(&zram->pp_in_progress, 0);
+	up_read(&zram->init_lock);
+
+	if (pages_written)
+		pr_info_ratelimited("zram %s auto writeback triggered mode=idle pages=%lu limit_pages=%lu\n",
+				    zram->disk->disk_name, pages_written, max_pages);
+
+	return pages_written;
+}
+
+static int auto_writeback_func(void *data)
+{
+	(void)data;
+
+	while (!kthread_should_stop()) {
+		struct device *single_dev = NULL;
+		struct zram *single_zram = NULL;
+		int zram_ids[32];
+		int num_devs = 0;
+
+		wait_event_freezable(auto_writeback_wq,
+				     kthread_should_stop() ||
+				     atomic_read(&auto_writeback_pending));
+		if (kthread_should_stop())
+			break;
+
+		while (atomic_xchg(&auto_writeback_pending, 0) &&
+		       !kthread_should_stop()) {
+			if (zram_get_single_device(&single_zram, &single_dev)) {
+				pr_info_ratelimited("zram auto writeback worker triggered by monitor (single-device fast path)\n");
+				zram_auto_writeback(single_zram,
+						    ZRAM_AUTO_WRITEBACK_LIMIT_PAGES);
+				put_device(single_dev);
+				cond_resched();
+				continue;
+			}
+
+			unsigned long remaining_pages = ZRAM_AUTO_WRITEBACK_LIMIT_PAGES;
+			int id;
+			int i;
+			struct zram *zram;
+
+			num_devs = 0;
+
+			mutex_lock(&zram_index_mutex);
+			idr_for_each_entry(&zram_index_idr, zram, id) {
+				if (num_devs < ARRAY_SIZE(zram_ids))
+					zram_ids[num_devs++] = id;
+			}
+			mutex_unlock(&zram_index_mutex);
+
+			pr_info_ratelimited("zram auto writeback worker triggered by monitor\n");
+
+			for (i = 0; i < num_devs && !kthread_should_stop(); i++) {
+				struct device *dev;
+
+				rcu_read_lock();
+				zram = idr_find(&zram_index_idr, zram_ids[i]);
+				if (!zram || !zram->disk || !get_device(disk_to_dev(zram->disk))) {
+					rcu_read_unlock();
+					continue;
+				}
+				dev = disk_to_dev(zram->disk);
+				rcu_read_unlock();
+
+				if (remaining_pages == 0) {
+					put_device(dev);
+					break;
+				}
+
+				remaining_pages -= min(remaining_pages,
+						       zram_auto_writeback(zram, remaining_pages));
+				put_device(dev);
+				cond_resched();
+			}
+		}
+	}
+
+	return 0;
+}
+
+static int monitor_func(void *data)
+{
+	(void)data;
+	unsigned int scan_rounds = 0;
+
+	while (!kthread_should_stop()) {
+		ktime_t cutoff_time;
+		struct device *single_dev = NULL;
+		struct zram *single_zram = NULL;
+		int zram_ids[32];
+		int num_devs = 0;
+		int id;
+		int i;
+		struct zram *zram;
+
+#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
+		cutoff_time = ktime_sub(ktime_get_boottime(),
+					ns_to_ktime(600ULL * NSEC_PER_SEC));
+#else
+		cutoff_time = 0;
+#endif
+
+		if (zram_get_single_device(&single_zram, &single_dev)) {
+			unsigned long nr_pages;
+			unsigned long scan_pages;
+			unsigned long start;
+
+			down_read(&single_zram->init_lock);
+			if (init_done(single_zram)) {
+				nr_pages = single_zram->disksize >> PAGE_SHIFT;
+				if (nr_pages) {
+					scan_pages = nr_pages / 8;
+					if (!scan_pages)
+						scan_pages = nr_pages;
+					start = READ_ONCE(single_zram->idle_scan_cursor) % nr_pages;
+					mark_idle_range(single_zram, cutoff_time, start, scan_pages);
+					WRITE_ONCE(single_zram->idle_scan_cursor,
+						   (start + scan_pages) % nr_pages);
+					if (++scan_rounds >= 4) {
+						scan_rounds = 0;
+						pr_info("zram monitor trigger writeback after 4 scans (single-device fast path)\n");
+						atomic_set(&auto_writeback_pending, 1);
+						wake_up(&auto_writeback_wq);
+					}
+				}
+			}
+			up_read(&single_zram->init_lock);
+			put_device(single_dev);
+			schedule_timeout_interruptible(CHECK_INTERVAL);
+			continue;
+		}
+
+		mutex_lock(&zram_index_mutex);
+		idr_for_each_entry(&zram_index_idr, zram, id) {
+			if (num_devs < ARRAY_SIZE(zram_ids))
+				zram_ids[num_devs++] = id;
+		}
+		mutex_unlock(&zram_index_mutex);
+
+		for (i = 0; i < num_devs && !kthread_should_stop(); i++) {
+			unsigned long nr_pages;
+			unsigned long scan_pages;
+			unsigned long start;
+			struct device *dev;
+
+			rcu_read_lock();
+			zram = idr_find(&zram_index_idr, zram_ids[i]);
+			if (!zram || !zram->disk || !get_device(disk_to_dev(zram->disk))) {
+				rcu_read_unlock();
+				continue;
+			}
+			dev = disk_to_dev(zram->disk);
+			rcu_read_unlock();
+
+			down_read(&zram->init_lock);
+			if (init_done(zram)) {
+				nr_pages = zram->disksize >> PAGE_SHIFT;
+				if (nr_pages) {
+					scan_pages = nr_pages / 8;
+					if (!scan_pages)
+						scan_pages = nr_pages;
+					start = READ_ONCE(zram->idle_scan_cursor) % nr_pages;
+					mark_idle_range(zram, cutoff_time, start, scan_pages);
+					WRITE_ONCE(zram->idle_scan_cursor,
+						   (start + scan_pages) % nr_pages);
+				}
+			}
+			up_read(&zram->init_lock);
+
+			put_device(dev);
+			cond_resched();
+		}
+
+		if (num_devs > 0) {
+			if (++scan_rounds >= 4) {
+				scan_rounds = 0;
+				pr_info("zram monitor trigger writeback after 4 scans\n");
+				atomic_set(&auto_writeback_pending, 1);
+				wake_up(&auto_writeback_wq);
+			}
+		} else {
+			scan_rounds = 0;
+		}
+
+		schedule_timeout_interruptible(CHECK_INTERVAL);
+	}
+
+	return 0;
+}
+#endif
 
 static void zram_slot_free_notify(struct block_device *bdev,
 				unsigned long index)
@@ -3351,7 +2958,7 @@ static void zram_slot_free_notify(struct block_device *bdev,
 
 	zram = bdev->bd_disk->private_data;
 
-	percpu_counter_inc(&zram->stats.notify_free);
+	atomic64_inc(&zram->stats.notify_free);
 	if (!zram_slot_trylock(zram, index)) {
 		atomic64_inc(&zram->stats.miss_free);
 		return;
@@ -3361,20 +2968,27 @@ static void zram_slot_free_notify(struct block_device *bdev,
 	zram_slot_unlock(zram, index);
 }
 
-static void zram_destroy_comp(struct zram *zram)
+static void zram_destroy_comps(struct zram *zram)
 {
-	if (zram->comp) {
-		zcomp_destroy(zram->comp);
-		zram->comp = NULL;
-	}
-	if (zram->comp_alg && zram->comp_alg != default_compressor)
-		kfree(zram->comp_alg);
-	zram->comp_alg = NULL;
-}
+	u32 prio;
 
-/* 前向声明：percpu 计数器管理函数 */
-static int zram_stats_init(struct zram *zram);
-static void zram_stats_destroy(struct zram *zram);
+	for (prio = 0; prio < ZRAM_MAX_COMPS; prio++) {
+		struct zcomp *comp = zram->comps[prio];
+
+		zram->comps[prio] = NULL;
+		if (!comp)
+			continue;
+		zcomp_destroy(comp);
+		zram->num_active_comps--;
+	}
+
+	for (prio = ZRAM_PRIMARY_COMP; prio < ZRAM_MAX_COMPS; prio++) {
+		/* Do not free statically defined compression algorithms */
+		if (zram->comp_algs[prio] != default_compressor)
+			kfree(zram->comp_algs[prio]);
+		zram->comp_algs[prio] = NULL;
+	}
+}
 
 static void zram_reset_device(struct zram *zram)
 {
@@ -3388,35 +3002,20 @@ static void zram_reset_device(struct zram *zram)
 	/* I/O operation under all of CPU are done so let's free */
 	zram_meta_free(zram, zram->disksize);
 	zram->disksize = 0;
-	zram_destroy_comp(zram);
-
-	/* Reset percpu counters - destroy and re-init */
-	zram_stats_destroy(zram);
-	zram_stats_init(zram);
-
-	/* Reset remaining atomic stats */
-	atomic64_set(&zram->stats.failed_reads, 0);
-	atomic64_set(&zram->stats.failed_writes, 0);
-	atomic_long_set(&zram->stats.max_used_pages, 0);
-	atomic64_set(&zram->stats.writestall, 0);
-	atomic64_set(&zram->stats.miss_free, 0);
-#ifdef CONFIG_ZRAM_WRITEBACK
-	atomic64_set(&zram->stats.wb_pages_skipped, 0);
-	atomic64_set(&zram->stats.wb_read_batch_pages, 0);
-	atomic64_set(&zram->stats.wb_read_batch_bios, 0);
-	atomic64_set(&zram->stats.wb_read_batch_fallbacks, 0);
-	WRITE_ONCE(zram->wb_read_batch_ewma, 0);
-	WRITE_ONCE(zram->wb_read_fallback_ewma, 0);
-	WRITE_ONCE(zram->current_shrinker_window_ms,
-		   READ_ONCE(sysctl_zram_shrinker_active_window_ms));
-	WARN_ON_ONCE(atomic_read(&zram->pp_in_progress));
-	WARN_ON_ONCE(atomic_read(&zram->wb_inflight));
-#endif
-
+	zram_destroy_comps(zram);
+	memset(&zram->stats, 0, sizeof(zram->stats));
+	atomic_set(&zram->pp_in_progress, 0);
 	reset_bdev(zram);
 
-	comp_algorithm_set(zram, default_compressor);
+	comp_algorithm_set(zram, ZRAM_PRIMARY_COMP, default_compressor);
 	up_write(&zram->init_lock);
+}
+
+static inline u64 _round_up(u64 num, u64 multiple) {
+    if (multiple == 0) return num;
+    u64 remainder = num % multiple;
+    if (remainder == 0) return num;
+    return num + multiple - remainder;
 }
 
 #ifdef CONFIG_ZRAM_AUTO_SIZE
@@ -3472,10 +3071,11 @@ static ssize_t disksize_store(struct device *dev,
 	struct zcomp *comp;
 	struct zram *zram = dev_to_zram(dev);
 	int err;
+	u32 prio;
 
 #ifdef CONFIG_ZRAM_AUTO_SIZE
 	if (sysfs_streq(buf, "auto")) {
-        u64 total_mem = (u64)totalram_pages() << PAGE_SHIFT; // 总物理内存
+        unsigned long total_mem = (u64)totalram_pages() << PAGE_SHIFT; // 总物理内存
         unsigned int num_cores = num_online_cpus(); // 在线 CPU 核心数
         u64 base_ratio;
 		u64 target_size;
@@ -3483,7 +3083,7 @@ static ssize_t disksize_store(struct device *dev,
 
         // 1. 优化 base_ratio 的计算：确保 8 核时达到 100%
         // 每个核心贡献 13%，上限 100%
-        base_ratio = min_t(u64, num_cores * 13ULL, 100ULL); 
+        base_ratio = min(num_cores * 13ULL, 100ULL); 
         
         // 计算基于内存和核心数的初始目标大小
         target_size = div64_ul(total_mem * base_ratio, 100ULL);
@@ -3503,13 +3103,13 @@ static ssize_t disksize_store(struct device *dev,
         target_size = div64_ul(target_size * combined_pressure_factor_percent, 100ULL);
 
         // 3. 向上取整到最近的 GB
-	        target_size = roundup(target_size, 1ULL << 30);
+        target_size = _round_up(target_size, 1ULL << 30);
 
         // 4. 调整 clamp 范围：允许 Zram 大小超过物理内存
         // 最小 Zram 1GB，或总内存的 1/8 （取两者最大值）
-        u64 min_allowed_size = max_t(u64, 1ULL * 1024 * 1024 * 1024ULL, div64_ul(total_mem, 8ULL)); 
+        u64 min_allowed_size = max(1ULL * 1024 * 1024 * 1024ULL, div64_ul(total_mem, 8ULL)); 
         // 最大 Zram 可以是 64GB，或总内存的 2 倍（取两者最小值）
-        u64 max_allowed_size = min_t(u64, 64ULL * 1024 * 1024 * 1024ULL, total_mem * 2ULL); 
+        u64 max_allowed_size = min(64ULL * 1024 * 1024 * 1024ULL, total_mem * 2ULL); 
         
         // 确保最小不会超过最大
         if (min_allowed_size > max_allowed_size) {
@@ -3518,7 +3118,8 @@ static ssize_t disksize_store(struct device *dev,
 
         target_size = clamp(target_size, min_allowed_size, max_allowed_size);
         
-
+        pr_info("zram: auto-calculated disksize: %llu (mem: %luGB, cores: %u, pressure: %u:%u, factor: %llu%%)\n",
+                target_size, total_mem >> 30, num_cores, mem_pressure, zram_pressure, combined_pressure_factor_percent);
 
 		disksize = target_size;
     } else {
@@ -3545,15 +3146,20 @@ static ssize_t disksize_store(struct device *dev,
 		goto out_unlock;
 	}
 
-	if (zram->comp_alg) {
-		comp = zcomp_create(zram->comp_alg);
+	for (prio = 0; prio < ZRAM_MAX_COMPS; prio++) {
+		if (!zram->comp_algs[prio])
+			continue;
+
+		comp = zcomp_create(zram->comp_algs[prio]);
 		if (IS_ERR(comp)) {
 			pr_err("Cannot initialise %s compressing backend\n",
-			       zram->comp_alg);
+			       zram->comp_algs[prio]);
 			err = PTR_ERR(comp);
-			goto out_free_comp;
+			goto out_free_comps;
 		}
-		zram->comp = comp;
+
+		zram->comps[prio] = comp;
+		zram->num_active_comps++;
 	}
 	zram->disksize = disksize;
 	set_capacity_and_notify(zram->disk, zram->disksize >> SECTOR_SHIFT);
@@ -3561,8 +3167,8 @@ static ssize_t disksize_store(struct device *dev,
 
 	return len;
 
-out_free_comp:
-	zram_destroy_comp(zram);
+out_free_comps:
+	zram_destroy_comps(zram);
 	zram_meta_free(zram, disksize);
 out_unlock:
 	up_write(&zram->init_lock);
@@ -3598,10 +3204,9 @@ static ssize_t reset_store(struct device *dev,
 	zram->claim = true;
 	mutex_unlock(&disk->open_mutex);
 
-	/* Freeze front-end I/O and drain async writeback before reset. */
-	zram_quiesce_device(zram);
+	/* Make sure all the pending I/O are finished */
+	sync_blockdev(disk->part0);
 	zram_reset_device(zram);
-	zram_unquiesce_device(zram);
 
 	mutex_lock(&disk->open_mutex);
 	zram->claim = false;
@@ -3621,27 +3226,31 @@ static int zram_open(struct gendisk *disk, blk_mode_t mode)
 		return -EBUSY;
 	return 0;
 }
-static void zram_free_disk(struct gendisk *disk)
-{
-	struct zram *zram = disk->private_data;
-	bioset_exit(&zram->zram_bio_set);
-	zram_stats_destroy(zram);
-	kfree(zram);
-}
 
 static const struct block_device_operations zram_devops = {
 	.open = zram_open,
 	.submit_bio = zram_submit_bio,
 	.swap_slot_free_notify = zram_slot_free_notify,
-	.free_disk = zram_free_disk,
 	.owner = THIS_MODULE
 };
 
 #ifdef CONFIG_ZRAM_AUTO_SIZE
 static ssize_t pressure_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	struct zram *zram = dev_to_zram(dev);
+    struct zram *zram;
     unsigned int mem_pressure, zram_pressure;
+    
+    // 参数合法性检查
+    if (!dev || !buf) {
+        pr_err("zram: invalid parameters in pressure_show\n");
+        return -EINVAL;
+    }
+    
+    zram = dev_to_zram(dev);
+    if (!zram) {
+        pr_warn("zram: zram device data is NULL\n");
+        return scnprintf(buf, PAGE_SIZE, "NULL:NULL\n");
+    }
     
     // 在读取时也需要加锁，确保数据一致性
     spin_lock(&zram->pressure_lock);
@@ -3662,6 +3271,9 @@ static ssize_t pressure_store(struct device *dev, struct device_attribute *attr,
     char *local_buf;
     int ret = -EINVAL;
 
+    pr_debug("zram: pressure_store called with len=%zu, buf='%.*s'\n", 
+             len, (int)len, buf);
+
     // 参数合法性检查
     if (!buf || len == 0) {
         pr_err("zram: invalid buffer parameters\n");
@@ -3673,12 +3285,16 @@ static ssize_t pressure_store(struct device *dev, struct device_attribute *attr,
         return -ENODEV;
     }
 
-	/* 分配本地缓冲区，避免修改原始buf */
-	local_buf = kmemdup_nul(buf, len, GFP_KERNEL);
+    // 分配本地缓冲区，避免修改原始buf
+    local_buf = kmalloc(len + 1, GFP_KERNEL);
     if (!local_buf) {
         pr_err("zram: memory allocation failed\n");
         return -ENOMEM;
     }
+
+    // 复制数据并确保字符串终止
+    memcpy(local_buf, buf, len);
+    local_buf[len] = '\0';
 
     // 移除可能的换行符
     if (len > 0 && local_buf[len - 1] == '\n') {
@@ -3719,6 +3335,8 @@ static ssize_t pressure_store(struct device *dev, struct device_attribute *attr,
     zram->historical_zram_pressure = zram_pressure;
     spin_unlock(&zram->pressure_lock);
 
+    pr_debug("zram: updated historical pressure to %u:%u\n", mem_pressure, zram_pressure);
+    
     ret = len;
 
 out:
@@ -3742,6 +3360,10 @@ static DEVICE_ATTR_WO(writeback);
 static DEVICE_ATTR_RW(writeback_limit);
 static DEVICE_ATTR_RW(writeback_limit_enable);
 #endif
+#ifdef CONFIG_ZRAM_MULTI_COMP
+static DEVICE_ATTR_RW(recomp_algorithm);
+static DEVICE_ATTR_WO(recompress);
+#endif
 #ifdef CONFIG_ZRAM_AUTO_SIZE
 static DEVICE_ATTR_RW(pressure);
 #endif
@@ -3761,7 +3383,6 @@ static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_writeback.attr,
 	&dev_attr_writeback_limit.attr,
 	&dev_attr_writeback_limit_enable.attr,
-	&dev_attr_writeback_skip_pages.attr,
 #endif
 	&dev_attr_io_stat.attr,
 	&dev_attr_mm_stat.attr,
@@ -3769,6 +3390,10 @@ static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_bd_stat.attr,
 #endif
 	&dev_attr_debug_stat.attr,
+#ifdef CONFIG_ZRAM_MULTI_COMP
+	&dev_attr_recomp_algorithm.attr,
+	&dev_attr_recompress.attr,
+#endif
 #ifdef CONFIG_ZRAM_AUTO_SIZE
 	&dev_attr_pressure.attr,
 #endif
@@ -3781,105 +3406,25 @@ ATTRIBUTE_GROUPS(zram_disk);
  * Allocate and initialize new zram device. the function returns
  * '>= 0' device_id upon success, and negative value otherwise.
  */
-static int zram_stats_init(struct zram *zram)
-{
-	int ret;
-
-	ret = percpu_counter_init(&zram->stats.compr_data_size, 0, GFP_KERNEL);
-	if (ret)
-		return ret;
-	ret = percpu_counter_init(&zram->stats.notify_free, 0, GFP_KERNEL);
-	if (ret)
-		goto err_notify_free;
-	ret = percpu_counter_init(&zram->stats.same_pages, 0, GFP_KERNEL);
-	if (ret)
-		goto err_same_pages;
-	ret = percpu_counter_init(&zram->stats.huge_pages, 0, GFP_KERNEL);
-	if (ret)
-		goto err_huge_pages;
-	ret = percpu_counter_init(&zram->stats.huge_pages_since, 0, GFP_KERNEL);
-	if (ret)
-		goto err_huge_pages_since;
-	ret = percpu_counter_init(&zram->stats.pages_stored, 0, GFP_KERNEL);
-	if (ret)
-		goto err_pages_stored;
-#ifdef CONFIG_ZRAM_WRITEBACK
-	atomic64_set(&zram->stats.bd_count, 0);
-	atomic64_set(&zram->stats.bd_reads, 0);
-	atomic64_set(&zram->stats.bd_writes, 0);
-#endif
-	return 0;
-
-err_pages_stored:
-	percpu_counter_destroy(&zram->stats.huge_pages_since);
-err_huge_pages_since:
-	percpu_counter_destroy(&zram->stats.huge_pages);
-err_huge_pages:
-	percpu_counter_destroy(&zram->stats.same_pages);
-err_same_pages:
-	percpu_counter_destroy(&zram->stats.notify_free);
-err_notify_free:
-	percpu_counter_destroy(&zram->stats.compr_data_size);
-	return ret;
-}
-
-static void zram_stats_destroy(struct zram *zram)
-{
-	percpu_counter_destroy(&zram->stats.compr_data_size);
-	percpu_counter_destroy(&zram->stats.notify_free);
-	percpu_counter_destroy(&zram->stats.same_pages);
-	percpu_counter_destroy(&zram->stats.huge_pages);
-	percpu_counter_destroy(&zram->stats.huge_pages_since);
-	percpu_counter_destroy(&zram->stats.pages_stored);
-}
-
 static int zram_add(void)
 {
 	struct zram *zram;
 	int ret, device_id;
 	unsigned long total_mem = (u64)totalram_pages() << PAGE_SHIFT; // 总物理内存
-	u64 default_disksize = roundup((u64)total_mem, 1ULL << 30);
+	u64 default_disksize = _round_up(total_mem, 1ULL << 30);
 
 	zram = kzalloc(sizeof(struct zram), GFP_KERNEL);
 	if (!zram)
 		return -ENOMEM;
 
-	ret = zram_stats_init(zram);
-	if (ret)
-		goto out_free_dev;
-
-	if (bioset_init(&zram->zram_bio_set, 32, 0, BIOSET_NEED_BVECS)) {
-		ret = -ENOMEM;
-		goto out_free_stats;
-	}
-
 	ret = idr_alloc(&zram_index_idr, zram, 0, 0, GFP_KERNEL);
 	if (ret < 0)
-		goto out_free_bioset;
+		goto out_free_dev;
 	device_id = ret;
 
 	init_rwsem(&zram->init_lock);
 #ifdef CONFIG_ZRAM_WRITEBACK
 	spin_lock_init(&zram->wb_limit_lock);
-	spin_lock_init(&zram->bitmap_lock);
-	atomic_set(&zram->wb_inflight, 0);
-	atomic_set(&zram->quiescing, 0);
-	init_waitqueue_head(&zram->wb_done_wait);
-	init_waitqueue_head(&zram->pp_done_wait);
-	zram->wb_read_policy = clamp_t(u8, wb_read_policy,
-				      ZRAM_WB_READ_POLICY_STRICT,
-				      ZRAM_WB_READ_POLICY_ADAPTIVE);
-	zram->wb_read_gap_pages = clamp_t(u8, wb_read_gap_pages, 0, 16);
-	zram->wb_frag_mode = clamp_t(u8, wb_frag_mode,
-				     ZRAM_WB_FRAG_MODE_OFF,
-				     ZRAM_WB_FRAG_MODE_ON);
-	zram->wb_read_batch_ewma = 0;
-	zram->wb_read_fallback_ewma = 0;
-	zram->current_shrinker_window_ms =
-		READ_ONCE(sysctl_zram_shrinker_active_window_ms);
-	atomic64_set(&zram->stats.wb_read_batch_pages, 0);
-	atomic64_set(&zram->stats.wb_read_batch_bios, 0);
-	atomic64_set(&zram->stats.wb_read_batch_fallbacks, 0);
 #endif
 
 	/* gendisk structure */
@@ -3907,8 +3452,9 @@ static int zram_add(void)
 	snprintf(zram->disk->disk_name, 16, "zram%d", device_id);
 	atomic_set(&zram->pp_in_progress, 0);
 
-	comp_algorithm_set(zram, default_compressor);
+	comp_algorithm_set(zram, ZRAM_PRIMARY_COMP, default_compressor);
 
+	/* Actual capacity set using sysfs (/sys/block/zram<id>/disksize */
 	set_capacity(zram->disk, 0);
 
 	down_write(&zram->init_lock);
@@ -3918,30 +3464,26 @@ static int zram_add(void)
 		goto out_cleanup_disk;
 	}
 
-	if (zram->comp_alg) {
-		struct zcomp *comp = zcomp_create(zram->comp_alg);
+	for (u32 prio = 0; prio < ZRAM_MAX_COMPS; prio++) {
+		if (!zram->comp_algs[prio])
+			continue;
+
+		struct zcomp *comp = zcomp_create(zram->comp_algs[prio]);
 		if (IS_ERR(comp)) {
 			pr_err("Cannot initialise %s compressing backend\n",
-				zram->comp_alg);
-			zram_destroy_comp(zram);
-			zram_meta_free(zram, default_disksize);
+				zram->comp_algs[prio]);
+			zram_destroy_comps(zram); // 清理已创建的压缩器
+			zram_meta_free(zram, default_disksize); // 释放元数据
 			up_write(&zram->init_lock);
 			ret = PTR_ERR(comp);
 			goto out_cleanup_disk;
 		}
-		zram->comp = comp;
+		zram->comps[prio] = comp;
+		zram->num_active_comps++;
 	}
 
 	zram->disksize = default_disksize;
 	set_capacity_and_notify(zram->disk, zram->disksize >> SECTOR_SHIFT);
-#ifdef CONFIG_ZRAM_WRITEBACK
-	if (zram_wb_resources_init(zram)) {
-		zram_destroy_comp(zram);
-		zram_meta_free(zram, default_disksize);
-		up_write(&zram->init_lock);
-		goto out_cleanup_disk;
-	}
-#endif
 	up_write(&zram->init_lock);
 
 	/* zram devices sort of resembles non-rotational disks */
@@ -3979,24 +3521,10 @@ static int zram_add(void)
 	zram_debugfs_register(zram);
 	pr_info("Added device: %s with default size %llu bytes\n", zram->disk->disk_name, default_disksize);
 	return device_id;
-
 out_cleanup_disk:
-#ifdef CONFIG_ZRAM_WRITEBACK
-	zram_wb_resources_free(zram);
-#endif
-	if (zram->disk) {
-		put_disk(zram->disk);
-
-	}
-	idr_remove(&zram_index_idr, device_id);
-	return ret;
-
+	put_disk(zram->disk);
 out_free_idr:
 	idr_remove(&zram_index_idr, device_id);
-out_free_bioset:
-	bioset_exit(&zram->zram_bio_set);
-out_free_stats:
-	zram_stats_destroy(zram);
 out_free_dev:
 	kfree(zram);
 	return ret;
@@ -4026,8 +3554,8 @@ static int zram_remove(struct zram *zram)
 		 */
 		;
 	} else {
-		/* Drain front-end I/O and async writeback before teardown. */
-		zram_quiesce_device(zram);
+		/* Make sure all the pending I/O are finished */
+		sync_blockdev(zram->disk->part0);
 		zram_reset_device(zram);
 	}
 
@@ -4043,17 +3571,14 @@ static int zram_remove(struct zram *zram)
 	 * and del_gendisk(), so run the last reset to avoid leaking
 	 * anything allocated with disksize_store()
 	 */
-	zram_begin_quiesce(zram);
-	zram_wait_for_pp_idle(zram);
-	zram_wb_wait_for_idle(zram);
 	zram_reset_device(zram);
 
-	// 释放zram_shrinker和相关资源
-#ifdef CONFIG_ZRAM_WRITEBACK
-	zram_wb_resources_free(zram);
-#endif
+	#ifdef CONFIG_ZRAM_WRITEBACK
+	list_lru_destroy(&zram->zram_list_lru);
+	#endif
 
 	put_disk(zram->disk);
+	kfree(zram);
 	return 0;
 }
 
@@ -4142,636 +3667,6 @@ static void destroy_devices(void)
 	cpuhp_remove_multi_state(CPUHP_ZCOMP_PREPARE);
 }
 
-#ifdef CONFIG_ZRAM_WRITEBACK
-/* 主动回写（带超时限制 + 流量限制），返回写回的页面数 */
-static int zram_proactive_writeback(struct zram *zram, unsigned long timeout_ms,
-				    int max_pages)
-{
-	u64 nr_pages = zram->disksize >> PAGE_SHIFT;
-	struct zram_pp_ctl *ctl;
-	int err;
-	int pages_to_write = 0;
-	int pages_written = 0;
-
-	down_read(&zram->init_lock);
-	if (!init_done(zram) || !zram->backing_dev) {
-		up_read(&zram->init_lock);
-		return 0;
-	}
-
-	err = zram_try_begin_pp(zram);
-	if (err) {
-		up_read(&zram->init_lock);
-		return err;
-	}
-
-	/* 使用带超时的初始化 */
-	ctl = init_pp_ctl_timeout(timeout_ms, GFP_KERNEL);
-	if (!ctl) {
-		zram_end_pp(zram);
-		up_read(&zram->init_lock);
-		return -ENOMEM;
-	}
-	/* 扫描 IDLE 页面，限制最大数量 */
-	pages_to_write = scan_slots_for_writeback(zram, IDLE_WRITEBACK, 0,
-			nr_pages, ctl, max_pages, GFP_KERNEL);
-	
-	if (pages_to_write > 0) {
-		err = zram_writeback_slots(zram, ctl, false);
-		if (err < 0)
-			pages_written = err;
-		else
-			pages_written = pages_to_write;
-	}
-
-	pr_info_ratelimited("zram: proactive_wb timeout_ms=%lu max_pages=%d scanned=%d written=%d\n",
-			    timeout_ms, max_pages, pages_to_write, pages_written);
-
-	release_pp_ctl(zram, ctl);
-	zram_end_pp(zram);
-	up_read(&zram->init_lock);
-
-	return pages_written;
-}
-
-// 计算zram使用率
-static unsigned long __get_zram_usage(struct zram *zram)
-{
-	u64 pages_stored, total_pages, bd_count;
-
-	if (!init_done(zram))
-		return 0;
-
-	pages_stored = percpu_counter_read(&zram->stats.pages_stored);
-	bd_count = max_t(s64, atomic64_read(&zram->stats.bd_count), 0);
-	total_pages = zram->disksize >> PAGE_SHIFT;
-
-	if (total_pages == 0)
-		return 0;
-
-	if (pages_stored <= bd_count)
-		return 0;
-
-	return ((pages_stored - bd_count) * 100) / total_pages;
-}
-
-// 计算内存占用率
-static int get_memory_usage(void)
-{
-    struct sysinfo si;
-    si_meminfo(&si);
-
-    unsigned long total = si.totalram;
-    unsigned long free = si_mem_available();
-
-    if (total == 0)
-        return 0;
-
-    return ((total - free) * 100) / total;
-}
-
-// 监控线程函数
-static int monitor_func(void *data)
-{
-	struct zram *zram;
-	int id;
-	ktime_t cutoff_time = 0;
-	/* 临时数组用于快照 ID，避免长时间持有全局锁 */
-	int zram_ids[32];
-	int num_devs;
-	int i;
-
-	/* 压力自适应状态追踪 */
-	int high_pressure_count = 0;
-	int medium_pressure_count = 0;
-	bool proactive_writeback_pending = false;
-	int pending_writeback_max_pages = 0;
-	int proactive_writeback_max_pages = 0;
-
-	while (!kthread_should_stop()) {
-		int mem_usage = get_memory_usage();
-		unsigned long current_check_interval = CHECK_INTERVAL;
-		unsigned int current_idle_threshold_sec = 600;
-		unsigned int current_shrinker_window_ms =
-			READ_ONCE(sysctl_zram_shrinker_active_window_ms);
-		int current_max_scan = 0;
-		bool dynamic_adjustment_active = false;
-		bool do_proactive_writeback = false;
-
-		/* 检查是否需要执行主动回写 */
-		if (proactive_writeback_pending) {
-			do_proactive_writeback = true;
-			proactive_writeback_pending = false;
-			proactive_writeback_max_pages = pending_writeback_max_pages;
-			pending_writeback_max_pages = 0;
-		}
-
-		/* 压力自适应逻辑 */
-		if (mem_usage > 74) {
-			current_check_interval = 180 * HZ;
-			current_idle_threshold_sec = 420;
-			current_max_scan = 300000;
-			dynamic_adjustment_active = true;
-
-			high_pressure_count = 0;
-			if (!do_proactive_writeback) {
-				medium_pressure_count++;
-				if (medium_pressure_count >= 3) {
-					proactive_writeback_pending = true;
-					pending_writeback_max_pages = 16384; /* 64MB / 4KB */
-				}
-			}
-
-		} else {
-			high_pressure_count = 0;
-			medium_pressure_count = 0;
-		}
-
-		if (IS_ENABLED(CONFIG_ZRAM_TRACK_ENTRY_ACTIME))
-			cutoff_time = ktime_sub(ktime_get_boottime(), ns_to_ktime(current_idle_threshold_sec * NSEC_PER_SEC));
-		else
-			cutoff_time = 0;
-
-		/* 息屏/休眠时不执行 mark_idle 与主动回写，与 shrinker 一致，减少低功耗状态下的 I/O */
-		if (system_entering_hibernation()) {
-			schedule_timeout_interruptible(current_check_interval);
-			continue;
-		}
-
-		num_devs = 0;
-		mutex_lock(&zram_index_mutex);
-		idr_for_each_entry(&zram_index_idr, zram, id) {
-			if (num_devs < ARRAY_SIZE(zram_ids))
-				zram_ids[num_devs++] = id;
-		}
-		mutex_unlock(&zram_index_mutex);
-
-		for (i = 0; i < num_devs; i++) {
-			struct gendisk *disk;
-
-			rcu_read_lock();
-			zram = idr_find(&zram_index_idr, zram_ids[i]);
-			if (!zram || !zram->disk || !get_device(disk_to_dev(zram->disk))) {
-				rcu_read_unlock();
-				continue;
-			}
-			disk = zram->disk;
-			rcu_read_unlock();
-
-			down_read(&zram->init_lock);
-			if (init_done(zram) && dynamic_adjustment_active) {
-				mark_idle(zram, cutoff_time, current_max_scan);
-				WRITE_ONCE(zram->current_shrinker_window_ms,
-					   current_shrinker_window_ms);
-
-				atomic_set(&zram->shrinker_in_active_period, 1);
-				zram->shrinker_active_start = 0;
-			} else if (init_done(zram)) {
-				WRITE_ONCE(zram->current_shrinker_window_ms,
-					   READ_ONCE(sysctl_zram_shrinker_active_window_ms));
-			}
-			up_read(&zram->init_lock);
-			
-			/* 对释放沿用已固定的 disk 指针，避免并发 remove/reset 后解引用悬空 zram->disk */
-			put_device(disk_to_dev(disk));
-
-			/* 处理完一个设备后让出 CPU，防止连续处理占用太多时间 */
-			cond_resched();
-		}
-		
-		/* 连续高压力后主动触发写回，不依赖 shrinker 被动调用 */
-		if (do_proactive_writeback && num_devs > 0) {
-			/* 游戏避让：检查是否在前台游戏运行 */
-			if (!check_game_pid()) {
-				proactive_writeback_pending = false;
-				pending_writeback_max_pages = 0;
-				proactive_writeback_max_pages = 0;
-				high_pressure_count = 0;
-				medium_pressure_count = 0;
-			} else {
-				for (i = 0; i < num_devs; i++) {
-					struct gendisk *disk;
-
-					rcu_read_lock();
-					zram = idr_find(&zram_index_idr, zram_ids[i]);
-					if (!zram || !zram->disk || !get_device(disk_to_dev(zram->disk))) {
-						rcu_read_unlock();
-						continue;
-					}
-					disk = zram->disk;
-					rcu_read_unlock();
-
-					if (zram->backing_dev)
-						zram_proactive_writeback(zram, 5000,
-									 proactive_writeback_max_pages);
-
-					put_device(disk_to_dev(disk));
-					cond_resched();
-				}
-				high_pressure_count = 0;
-				medium_pressure_count = 0;
-				proactive_writeback_max_pages = 0;
-			}
-		}
-
-		schedule_timeout_interruptible(current_check_interval);
-	}
-
-	return 0;
-}
-
-/* 比较函数：用于排序 */
-static int compare_ulong(const void *a, const void *b)
-{
-    unsigned long ua = *(const unsigned long *)a;
-    unsigned long ub = *(const unsigned long *)b;
-    if (ua < ub) return -1;
-    if (ua > ub) return 1;
-    return 0;
-}
-
-/*
- * LRU 遍历回调：收集种子
- * 注意：此函数在持有 LRU 锁的情况下运行，必须快速返回
- */
-static enum lru_status zram_seed_collect_cb(struct list_head *item, struct list_lru_one *l,
-                                            spinlock_t *lock, void *arg)
-{
-	struct zram_wb_table_entry *entry = container_of(item,
-						 struct zram_wb_table_entry, lru);
-	struct zram_shrink_work *work = arg;
-	struct zram *zram = work->zram;
-	unsigned long index = entry - zram->wb_table;
-	unsigned long flags = READ_ONCE(zram_table_entry(zram, index)->flags);
-
-	if (work->nr_candidates >= BATCH_SIZE)
-        return LRU_STOP;
-
-    if (!zram_allocated(zram, index) || (flags & BIT(ZRAM_WB))) {
-        zram_clear_flag_atomic(zram, index, ZRAM_IDLE);
-        return LRU_REMOVED;
-    }
-
-    if (zram_test_flag_atomic(zram, index, ZRAM_REFERENCED)) {
-        zram_clear_flag_atomic(zram, index, ZRAM_REFERENCED);
-        return LRU_ROTATE;
-    }
-
-	if ((flags & BIT(ZRAM_PP_SLOT)) || (flags & BIT(ZRAM_LOCK))) {
-		return LRU_ROTATE;
-	}
-
-	/* File-backed pages are filtered from writeback path with separate policy. */
-	if (flags & BIT(ZRAM_PAGE_FILE)) {
-		atomic64_inc(&zram->stats.wb_pages_skipped);
-		zram_clear_flag_atomic(zram, index, ZRAM_IDLE);
-		return LRU_REMOVED;
-	}
-
-	/* Only anonymous pages are eligible for writeback in shrinker path. */
-	if (!(flags & BIT(ZRAM_PAGE_ANON))) {
-		atomic64_inc(&zram->stats.wb_pages_skipped);
-		return LRU_ROTATE;
-	}
-
-    /* ROI filter: skip pages that cost more IO than memory they free */
-    if (flags & BIT(ZRAM_SAME)) {
-        zram_clear_flag_atomic(zram, index, ZRAM_IDLE);
-        return LRU_REMOVED;
-    }
-
-    {
-        size_t obj_size = zram_get_obj_size(zram, index);
-
-        if (obj_size > 0 && obj_size < ZRAM_WB_MIN_OBJ_SIZE) {
-            zram_clear_flag_atomic(zram, index, ZRAM_IDLE);
-            return LRU_REMOVED;
-        }
-    }
-
-    work->candidates[work->nr_candidates++] = index;
-
-    return LRU_ROTATE;
-}
-
-/* 
- * 尝试锁定并声明 Slot 所有权 
- * 增加了对 handle 的检查，防止空指针解引用
- */
-static bool try_claim_slot(struct zram *zram, unsigned long index)
-{
-    /* 使用 trylock 防止死锁 */
-    if (!zram_slot_trylock(zram, index))
-        return false;
-
-    /* 严格检查：已分配且有有效句柄 */
-    if (!zram_allocated(zram, index) || !zram_get_handle(zram, index)) {
-        zram_slot_unlock(zram, index);
-        return false;
-    }
-
-    /* 检查是否正在回写或已被其他进程锁定 */
-    if (zram_test_flag(zram, index, ZRAM_WB) ||
-        zram_test_flag(zram, index, ZRAM_PP_SLOT) ||
-        zram_test_flag(zram, index, ZRAM_REFERENCED) ||
-        zram_test_flag(zram, index, ZRAM_SAME)) {
-        zram_slot_unlock(zram, index);
-        return false;
-    }
-
-	if (!zram_test_flag(zram, index, ZRAM_PAGE_ANON)) {
-		atomic64_inc(&zram->stats.wb_pages_skipped);
-		zram_slot_unlock(zram, index);
-		return false;
-	}
-
-	{
-		unsigned int temp = zram_get_temp_locked(zram, index);
-
-		if (temp > 0) {
-			zram_set_temp_locked(zram, index, temp - 1);
-			atomic64_inc(&zram->stats.wb_pages_skipped);
-			zram_slot_unlock(zram, index);
-			return false;
-		}
-	}
-
-	if (!zram_test_flag(zram, index, ZRAM_WB_SECOND_CHANCE)) {
-		zram_set_flag(zram, index, ZRAM_WB_SECOND_CHANCE);
-		atomic64_inc(&zram->stats.wb_pages_skipped);
-		zram_slot_unlock(zram, index);
-		return false;
-	}
-	zram_clear_flag(zram, index, ZRAM_WB_SECOND_CHANCE);
-
-    /* ROI filter: skip tiny objects where IO cost dwarfs memory savings */
-    {
-        size_t obj_size = zram_get_obj_size(zram, index);
-
-        if (obj_size > 0 && obj_size < ZRAM_WB_MIN_OBJ_SIZE) {
-            if (zram_test_flag(zram, index, ZRAM_IDLE)) {
-                zram_clear_flag(zram, index, ZRAM_IDLE);
-                zram_lru_del(zram, &zram->table[index]);
-            }
-            zram_slot_unlock(zram, index);
-            return false;
-        }
-    }
-
-    /* 标记为预处理槽位 */
-    zram_set_flag(zram, index, ZRAM_PP_SLOT);
-    zram_slot_unlock(zram, index);
-    return true;
-}
-
-/* 回滚操作：清除标记 */
-static void rollback_slot(struct zram *zram, unsigned long index)
-{
-    zram_slot_lock(zram, index);
-    zram_clear_flag(zram, index, ZRAM_PP_SLOT);
-    zram_slot_unlock(zram, index);
-}
-
-/* 
- * 扫描窗口：以 seed_idx 为中心
- * 修正了循环边界溢出问题
- */
-static int scan_window(struct zram *zram, unsigned long seed_idx,
-		       unsigned long *claimed_list, int max_size)
-{
-	unsigned long start, end, i;
-	unsigned long max_pages = zram->disksize >> PAGE_SHIFT;
-	int count = 0;
-
-	if (max_size <= 0 || !max_pages || seed_idx >= max_pages)
-		return 0;
-
-	/* 计算边界，注意无符号数下溢 */
-	start = (seed_idx > WINDOW_RADIUS) ? seed_idx - WINDOW_RADIUS : 0;
-	end = min(seed_idx + WINDOW_RADIUS, max_pages - 1);
-
-	for (i = start; i <= end && count < max_size; i++) {
-		unsigned long flags = READ_ONCE(zram->table[i].flags);
-
-		/* 无锁快筛：明显不可能成功的槽位直接跳过，减少 trylock 争用 */
-		if (flags & (BIT(ZRAM_WB) | BIT(ZRAM_PP_SLOT) |
-					 BIT(ZRAM_REFERENCED) | BIT(ZRAM_SAME)))
-			continue;
-
-		if (try_claim_slot(zram, i))
-			claimed_list[count++] = i;
-	}
-
-	return count;
-}
-
-/*
- * 核心扫描逻辑
- */
-static unsigned long zram_shrinker_scan(struct shrinker *shrinker, struct shrink_control *sc)
-{
-    struct zram *zram = shrinker->private_data;
-    struct zram_shrink_work *work = NULL;
-    int i, k, nr_claimed, err;
-    unsigned long pages_scheduled = 0;
-    unsigned long last_window_end = 0;
-
-    /* Skip shrinker during hibernation/suspend to reduce I/O in low-power state */
-    if (system_entering_hibernation()) {
-        sc->nr_scanned = 0;
-        return SHRINK_STOP;
-    }
-
-	if (!down_read_trylock(&zram->init_lock)) {
-		return SHRINK_STOP;
-	}
-
-	err = zram_try_begin_pp(zram);
-	if (err)
-		goto out_stop;
-
-    if (!init_done(zram))
-		goto out_end_pp;
-
-    if (__get_zram_usage(zram) > 75)
-		goto out_end_pp;
-
-    if (!zram->backing_dev || !gfp_has_io_fs(sc->gfp_mask))
-		goto out_end_pp;
-
-    if (atomic_read(&zram->shrinker_in_active_period)) {
-        if (zram->shrinker_active_start == 0) {
-            zram->shrinker_active_start = jiffies;
-        } else {
-            unsigned long elapsed = jiffies - zram->shrinker_active_start;
-			unsigned long window_jiffies =
-				msecs_to_jiffies(READ_ONCE(zram->current_shrinker_window_ms));
-
-            if (elapsed > window_jiffies) {
-                atomic_set(&zram->shrinker_in_active_period, 0);
-				goto out_end_pp;
-            }
-        }
-    } else {
-		goto out_end_pp;
-    }
-
-    /* Single allocation to keep reclaim-path stack shallow and avoid extra alloc/free churn. */
-    work = kzalloc(sizeof(*work), GFP_NOWAIT | __GFP_NOWARN);
-    if (!work)
-		goto out_end_pp;
-
-    work->zram = zram;
-	work->ctl = init_pp_ctl_timeout(0, GFP_NOWAIT | __GFP_NOWARN);
-	if (!work->ctl) {
-		goto out_free_work_end_pp;
-	}
-
-    list_lru_shrink_walk(&zram->zram_list_lru, sc, zram_seed_collect_cb, work);
-
-    if (work->nr_candidates == 0)
-        goto out;
-
-    sort(work->candidates, work->nr_candidates, sizeof(unsigned long), compare_ulong, NULL);
-
-    for (i = 0; i < work->nr_candidates; i++) {
-        unsigned long seed = work->candidates[i];
-		unsigned long max_pages = zram->disksize >> PAGE_SHIFT;
-		unsigned long window_end = min(seed + WINDOW_RADIUS, max_pages - 1);
-        
-        if (seed <= last_window_end && last_window_end != 0)
-            continue;
-
-		nr_claimed = scan_window(zram, seed, work->window_claimed,
-					ZRAM_WINDOW_CLAIMED_SIZE);
-        
-        if (nr_claimed == 0) continue;
-
-		if (nr_claimed >= MIN_AGGREGATE) {
-			last_window_end = window_end;
-
-            for (k = 0; k < nr_claimed; k++) {
-				if (place_pp_slot(zram, work->ctl,
-						  work->window_claimed[k],
-						  GFP_NOWAIT | __GFP_NOWARN)) {
-                    pages_scheduled++;
-                } else {
-                    rollback_slot(zram, work->window_claimed[k]);
-                }
-            }
-        } else {
-            for (k = 0; k < nr_claimed; k++) {
-                unsigned long idx = work->window_claimed[k];
-                
-                if (idx == seed) {
-					if (place_pp_slot(zram, work->ctl, idx,
-						  GFP_NOWAIT | __GFP_NOWARN)) {
-                        pages_scheduled++;
-                    } else {
-                        rollback_slot(zram, idx);
-                    }
-                } else {
-                    rollback_slot(zram, idx);
-                }
-            }
-        }
-    }
-
-    if (pages_scheduled > 0) {
-		zram_writeback_slots(zram, work->ctl, true);
-	}
-
-out:
-    release_pp_ctl(zram, work->ctl);
-    kfree(work);
-    zram_end_pp(zram);
-    up_read(&zram->init_lock);
-    return pages_scheduled;
-
-out_free_work_end_pp:
-    kfree(work);
-out_end_pp:
-    zram_end_pp(zram);
-out_stop:
-    up_read(&zram->init_lock);
-    return SHRINK_STOP;
-}
-
-static unsigned long zram_shrinker_count(struct shrinker *shrinker, struct shrink_control *sc)
-{
-    struct zram *zram = shrinker->private_data;
-    unsigned long count = 0;
-
-	if (!down_read_trylock(&zram->init_lock)) {
-		return 0;
-	}
-
-	if (!init_done(zram)) {
-		goto out;
-	}
-
-	if (zram_is_quiescing(zram)) {
-		goto out;
-	}
-
-    if (__get_zram_usage(zram) > 75)
-        goto out;
-
-    if (!zram->backing_dev || !gfp_has_io_fs(sc->gfp_mask))
-        goto out;
-
-    if (!percpu_counter_sum(&zram->stats.pages_stored))
-        goto out;
-
-    if (!zram->zram_list_lru.node)
-        goto out;
-
-    if (atomic_read(&zram->shrinker_in_active_period)) {
-        if (zram->shrinker_active_start == 0) {
-            zram->shrinker_active_start = jiffies;
-        } else {
-            unsigned long elapsed = jiffies - zram->shrinker_active_start;
-			unsigned long window_jiffies =
-				msecs_to_jiffies(READ_ONCE(zram->current_shrinker_window_ms));
-            if (elapsed > window_jiffies) {
-                atomic_set(&zram->shrinker_in_active_period, 0);
-            }
-        }
-    } else {
-        goto out;
-    }
-
-    count = list_lru_shrink_count(&zram->zram_list_lru, sc);
-
-    if (count > 4096UL) {
-        count = 4096UL;
-    }
-
-out:
-    up_read(&zram->init_lock);
-    return count;
-}
-
-static void zram_init_shrinker(struct zram *zram)
-{
-	struct shrinker *shrinker;
-
-	shrinker = shrinker_alloc(SHRINKER_NUMA_AWARE, "mm-zram");
-	if (!shrinker)
-		return;
-
-	shrinker->count_objects = zram_shrinker_count;
-	shrinker->scan_objects = zram_shrinker_scan;
-	shrinker->batch = 512;
-	shrinker->seeks = 4;
-	shrinker->private_data = zram;
-	zram->zram_shrinker = shrinker;
-	atomic_set(&zram->shrinker_in_active_period, 0);
-	zram->shrinker_active_start = 0;
-
-	shrinker_register(zram->zram_shrinker);
-}
-#endif
 
 static int __init zram_init(void)
 {
@@ -4813,11 +3708,42 @@ static int __init zram_init(void)
 		goto out_error;
 
 #ifdef CONFIG_ZRAM_WRITEBACK
+	auto_writeback_thread = kthread_run(auto_writeback_func, NULL, "zram_auto_wb");
+	if (IS_ERR(auto_writeback_thread)) {
+		ret = PTR_ERR(auto_writeback_thread);
+		auto_writeback_thread = NULL;
+		goto out_error_writeback;
+	}
+
 	monitor_thread = kthread_run(monitor_func, NULL, "zram_monitor");
-	zram_sysctl_table_header = register_sysctl("vm", zram_sysctl_table);
+	if (IS_ERR(monitor_thread)) {
+		ret = PTR_ERR(monitor_thread);
+		monitor_thread = NULL;
+		goto out_stop_auto_writeback;
+	}
 #endif
 
+#ifdef CONFIG_ZRAM_MULTI_COMP
+#define ZRAM_IR_VERSION "1.2"
+#define ZRAM_IR_PROGNAME "ZRAM Immediate Recompression (ZRAM-IR)"
+#define ZRAM_IR_AUTHOR   "Masahito Suzuki"
+	printk(KERN_INFO "%s %s by %s\n",
+		ZRAM_IR_PROGNAME, ZRAM_IR_VERSION, ZRAM_IR_AUTHOR);
+	zram_sysctl_table_header = register_sysctl("vm", zram_sysctl_table);
+#endif //CONFIG_ZRAM_MULTI_COMP
+
 	return 0;
+
+#ifdef CONFIG_ZRAM_WRITEBACK
+out_stop_auto_writeback:
+	if (auto_writeback_thread) {
+		kthread_stop(auto_writeback_thread);
+		auto_writeback_thread = NULL;
+	}
+out_error_writeback:
+	destroy_zram_writeback();
+	return ret;
+#endif
 
 out_error:
 	destroy_devices();
@@ -4827,15 +3753,22 @@ out_error:
 static void __exit zram_exit(void)
 {
 #ifdef CONFIG_ZRAM_WRITEBACK
+	if (auto_writeback_thread) {
+		kthread_stop(auto_writeback_thread);
+		auto_writeback_thread = NULL;
+	}
 	if (monitor_thread) {
 		kthread_stop(monitor_thread);
 		monitor_thread = NULL;
 	}
-	unregister_sysctl_table(zram_sysctl_table_header);
 #endif
 
-	destroy_devices();
+#ifdef CONFIG_ZRAM_MULTI_COMP
+	unregister_sysctl_table(zram_sysctl_table_header);
+#endif //CONFIG_ZRAM_MULTI_COMP
+
 	destroy_zram_writeback();
+	destroy_devices();
 }
 
 module_init(zram_init);
@@ -4844,19 +3777,7 @@ module_exit(zram_exit);
 module_param(num_devices, uint, 0);
 MODULE_PARM_DESC(num_devices, "Number of pre-created zram devices");
 
-#ifdef CONFIG_ZRAM_WRITEBACK
-module_param(wb_read_policy, uint, 0644);
-MODULE_PARM_DESC(wb_read_policy,
-	"writeback read policy: 0=strict, 1=relaxed, 2=adaptive");
-module_param(wb_read_gap_pages, uint, 0644);
-MODULE_PARM_DESC(wb_read_gap_pages,
-	"max tolerated page gaps for relaxed/adaptive wb read batching");
-module_param(wb_frag_mode, uint, 0644);
-MODULE_PARM_DESC(wb_frag_mode,
-	"writeback fragmentation mode (default: on): 0=off, 1=auto, 2=on");
-#endif
-
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_AUTHOR("Nitin Gupta <ngupta@vflare.org>");
-MODULE_AUTHOR("Coolapk@BrokeStar&Github@whitewhale0612");
+MODULE_AUTHOR("Coolapk@BrokeStar");
 MODULE_DESCRIPTION("Compressed RAM Block Device");

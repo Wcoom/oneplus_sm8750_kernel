@@ -163,9 +163,20 @@ static inline int folio_lru_gen(struct folio *folio)
 	return ((flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
 }
 
-static inline bool lru_gen_is_active(struct lruvec *lruvec, int gen)
+/*
+ * Re-swappiness: get max_seq for a given LRU type.
+ * Anon uses the existing max_seq field; file uses file_state->max_seq.
+ */
+static inline unsigned long lrugen_max_seq(struct lru_gen_folio *lrugen, int type)
 {
-	unsigned long max_seq = lruvec->lrugen.max_seq;
+	if (type == LRU_GEN_FILE && lrugen->file_state)
+		return READ_ONCE(lrugen->file_state->max_seq);
+	return READ_ONCE(lrugen->max_seq);
+}
+
+static inline bool lru_gen_is_active(struct lruvec *lruvec, int gen, int type)
+{
+	unsigned long max_seq = lrugen_max_seq(&lruvec->lrugen, type);
 
 	VM_WARN_ON_ONCE(gen >= MAX_NR_GENS);
 
@@ -195,7 +206,7 @@ static inline void lru_gen_update_size(struct lruvec *lruvec, struct folio *foli
 
 	/* addition */
 	if (old_gen < 0) {
-		if (lru_gen_is_active(lruvec, new_gen))
+		if (lru_gen_is_active(lruvec, new_gen, type))
 			lru += LRU_ACTIVE;
 		__update_lru_size(lruvec, lru, zone, delta);
 		return;
@@ -203,20 +214,20 @@ static inline void lru_gen_update_size(struct lruvec *lruvec, struct folio *foli
 
 	/* deletion */
 	if (new_gen < 0) {
-		if (lru_gen_is_active(lruvec, old_gen))
+		if (lru_gen_is_active(lruvec, old_gen, type))
 			lru += LRU_ACTIVE;
 		__update_lru_size(lruvec, lru, zone, -delta);
 		return;
 	}
 
 	/* promotion */
-	if (!lru_gen_is_active(lruvec, old_gen) && lru_gen_is_active(lruvec, new_gen)) {
+	if (!lru_gen_is_active(lruvec, old_gen, type) && lru_gen_is_active(lruvec, new_gen, type)) {
 		__update_lru_size(lruvec, lru, zone, -delta);
 		__update_lru_size(lruvec, lru + LRU_ACTIVE, zone, delta);
 	}
 
 	/* demotion requires isolation, e.g., lru_deactivate_fn() */
-	VM_WARN_ON_ONCE(lru_gen_is_active(lruvec, old_gen) && !lru_gen_is_active(lruvec, new_gen));
+	VM_WARN_ON_ONCE(lru_gen_is_active(lruvec, old_gen, type) && !lru_gen_is_active(lruvec, new_gen, type));
 }
 
 static inline unsigned long lru_gen_folio_seq(struct lruvec *lruvec, struct folio *folio,
@@ -249,7 +260,7 @@ static inline unsigned long lru_gen_folio_seq(struct lruvec *lruvec, struct foli
 	else
 		gen = MAX_NR_GENS - folio_test_workingset(folio);
 
-	return max(READ_ONCE(lrugen->max_seq) - gen + 1, READ_ONCE(lrugen->min_seq[type]));
+	return max(lrugen_max_seq(lrugen, type) - gen + 1, READ_ONCE(lrugen->min_seq[type]));
 }
 
 static inline bool lru_gen_add_dst(struct lruvec *lruvec, struct folio *dst)
@@ -323,7 +334,7 @@ static inline bool lru_gen_del_folio(struct lruvec *lruvec, struct folio *folio,
 	VM_WARN_ON_ONCE_FOLIO(folio_test_unevictable(folio), folio);
 
 	/* for folio_migrate_flags() */
-	flags = !reclaiming && lru_gen_is_active(lruvec, gen) ? BIT(PG_active) : 0;
+	flags = !reclaiming && lru_gen_is_active(lruvec, gen, folio_is_file_lru(folio)) ? BIT(PG_active) : 0;
 	flags = set_mask_bits(&folio->flags, LRU_GEN_MASK, flags);
 	gen = ((flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
 

@@ -437,24 +437,30 @@ enum {
 #define NR_HIST_GENS		1U
 #endif
 
+#define RESWAPPINESS_PROGNAME	"Re-swappiness: MGLRU anon/file independent aging"
+#define RESWAPPINESS_AUTHOR	"Masahito Suzuki"
+#define RESWAPPINESS_VERSION	"1.2"
+
+struct lru_gen_per_type_state {
+	unsigned long max_seq;
+	unsigned long timestamps[MAX_NR_GENS];
+	/* for mm_state per-type tracking */
+	unsigned long mm_seq;
+	struct list_head *mm_head;
+	struct list_head *mm_tail;
+};
+
 /*
- * The youngest generation number is stored in max_seq for both anon and file
- * types as they are aged on an equal footing. The oldest generation numbers are
- * stored in min_seq[] separately for anon and file types so that they can be
- * incremented independently. Ideally min_seq[] are kept in sync when both anon
- * and file types are evictable. However, to adapt to situations like extreme
- * swappiness, they are allowed to be out of sync by at most
- * MAX_NR_GENS-MIN_NR_GENS-1.
  *
  * The number of pages in each generation is eventually consistent and therefore
  * can be transiently negative when reset_batch_size() is pending.
  */
 struct lru_gen_folio {
-	/* the aging increments the youngest generation number */
+	/* the aging increments the youngest generation number (anon) */
 	unsigned long max_seq;
 	/* the eviction increments the oldest generation numbers */
 	unsigned long min_seq[ANON_AND_FILE];
-	/* the birth time of each generation in jiffies */
+	/* the birth time of each generation in jiffies (anon) */
 	unsigned long timestamps[MAX_NR_GENS];
 	/* the multi-gen LRU lists, lazily sorted on eviction */
 	struct list_head folios[MAX_NR_GENS][ANON_AND_FILE][MAX_NR_ZONES];
@@ -484,7 +490,7 @@ struct lru_gen_folio {
 	struct hlist_nulls_node list;
 #endif
 
-	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_USE(1, struct lru_gen_per_type_state *file_state);
 	ANDROID_KABI_RESERVE(2);
 };
 
@@ -502,11 +508,11 @@ enum {
 #define NR_BLOOM_FILTERS	2
 
 struct lru_gen_mm_state {
-	/* set to max_seq after each iteration */
+	/* set to max_seq after each iteration (anon type) */
 	unsigned long seq;
-	/* where the current iteration continues after */
+	/* where the current iteration continues after (anon type) */
 	struct list_head *head;
-	/* where the last iteration ended before */
+	/* where the last iteration ended before (anon type) */
 	struct list_head *tail;
 	/* Bloom filters flip after each iteration */
 	unsigned long *filters[NR_BLOOM_FILTERS];
@@ -519,7 +525,7 @@ struct lru_gen_mm_state {
 struct lru_gen_mm_walk {
 	/* the lruvec under reclaim */
 	struct lruvec *lruvec;
-	/* unstable max_seq from lru_gen_folio */
+	/* unstable max_seq from lru_gen_folio (for the type being aged) */
 	unsigned long max_seq;
 	/* the next address within an mm to scan */
 	unsigned long next_addr;

@@ -16,6 +16,7 @@ void hmbird_sched_init_task(struct task_struct *p);
 void slim_walt_enable(int enable);
 void slim_get_cpu_util(int cpu, u64 *util);
 void slim_get_task_util(struct task_struct *p, u64 *util);
+int sched_ravg_window_change(int frame_per_sec);
 
 extern atomic64_t hmbird_irq_work_lastq_ws;
 

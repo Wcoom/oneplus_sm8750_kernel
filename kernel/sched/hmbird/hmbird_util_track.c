@@ -616,11 +616,16 @@ void slim_get_task_util(struct task_struct *p, u64 *util)
 	*util = get_hmbird_ts(p)->sts.demand_scaled;
 }
 
-void sched_ravg_window_change(int frame_per_sec)
+int sched_ravg_window_change(int frame_per_sec)
 {
 	unsigned long flags;
+
+	if (frame_per_sec <= 0)
+		return -EINVAL;
 
 	spin_lock_irqsave(&new_sched_ravg_window_lock, flags);
 	new_hmbird_sched_ravg_window = NSEC_PER_SEC / frame_per_sec;
 	spin_unlock_irqrestore(&new_sched_ravg_window_lock, flags);
+
+	return 0;
 }

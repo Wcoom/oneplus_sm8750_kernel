@@ -5548,7 +5548,13 @@ static int isolate_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 		if (sc->anon_only)
 			break;
 
-		type = !type;
+		/*
+		 * If scanned > 0 and isolated == 0, avoid falling back to the
+		 * other type, as this type remains sufficient. Falling back
+		 * too readily can disrupt the positive_ctrl_err() bias.
+		 */
+		if (!scanned)
+			type = !type;
 		tier = -1;
 	}
 

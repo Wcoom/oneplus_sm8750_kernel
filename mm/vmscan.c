@@ -4893,20 +4893,15 @@ static void set_initial_priority(struct pglist_data *pgdat, struct scan_control 
 	sc->priority = clamp(priority, DEF_PRIORITY / 2, DEF_PRIORITY);
 }
 
-static bool lruvec_is_sizable(struct lruvec *lruvec, struct scan_control *sc)
+static unsigned long lruvec_evictable_size(struct lruvec *lruvec,
+					   struct scan_control *sc, bool can_swap)
 {
 	int gen, type, zone;
 	int first_type, last_type;
 	unsigned long total = 0;
-	bool can_swap = get_swappiness(lruvec, sc);
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
-	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
-	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
 	DEFINE_MAX_SEQ(lruvec);
 	DEFINE_MIN_SEQ(lruvec);
-
-	if (sc->anon_only && !can_reclaim_anon_pages(memcg, pgdat->node_id, sc))
-		return false;
 
 	first_type = sc->anon_only ? LRU_GEN_ANON : !can_swap;
 	last_type = sc->anon_only ? LRU_GEN_ANON : LRU_GEN_FILE;
@@ -4921,6 +4916,21 @@ static bool lruvec_is_sizable(struct lruvec *lruvec, struct scan_control *sc)
 				total += max(READ_ONCE(lrugen->nr_pages[gen][type][zone]), 0L);
 		}
 	}
+
+	return total;
+}
+
+static bool lruvec_is_sizable(struct lruvec *lruvec, struct scan_control *sc)
+{
+	unsigned long total;
+	bool can_swap = get_swappiness(lruvec, sc);
+	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
+	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
+
+	if (sc->anon_only && !can_reclaim_anon_pages(memcg, pgdat->node_id, sc))
+		return false;
+
+	total = lruvec_evictable_size(lruvec, sc, can_swap);
 
 	/* whether the size is big enough to be helpful */
 	return mem_cgroup_online(memcg) ? (total >> sc->priority) : total;
@@ -5652,7 +5662,7 @@ static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
 	int last_type = sc->anon_only ? LRU_GEN_ANON : LRU_GEN_FILE;
 	unsigned long old = 0;
 	unsigned long young = 0;
-	unsigned long total = 0;
+	unsigned long total;
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
 	DEFINE_MIN_SEQ(lruvec);
@@ -5674,13 +5684,14 @@ static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
 			for (zone = 0; zone < MAX_NR_ZONES; zone++)
 				size += max(READ_ONCE(lrugen->nr_pages[gen][type][zone]), 0L);
 
-			total += size;
 			if (seq == max_seq)
 				young += size;
 			else if (seq + MIN_NR_GENS == max_seq)
 				old += size;
 		}
 	}
+
+	total = lruvec_evictable_size(lruvec, sc, can_swap);
 
 	/* try to scrape all its memory if this memcg was deleted */
 	if (!mem_cgroup_online(memcg)) {

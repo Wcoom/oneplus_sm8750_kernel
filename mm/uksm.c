@@ -2377,10 +2377,12 @@ struct ksm_stable_node *first_level_insert(struct tree_node *tree_node,
 			 * collision in first level try to create a subtree.
 			 * A new node need to be created.
 			 */
-			put_page(tree_page);
 
 			stable_node_hash_max(stable_node, tree_page,
 					     tree_node->hash);
+
+			put_page(tree_page);
+
 			hash_max = rmap_item_hash_max(rmap_item, hash);
 			cmp = hash_cmp(hash_max, stable_node->hash_max);
 
@@ -3446,12 +3448,16 @@ static inline int vma_fully_scanned(struct vma_slot *slot)
  */
 static struct rmap_item *get_next_rmap_item(struct vma_slot *slot, u32 *hash)
 {
+	struct vm_area_struct *vma = slot->vma;
 	unsigned long rand_range, addr, swap_index, scan_index;
+	unsigned long pages = slot->pages;
+	unsigned long cur_hash_strength = hash_strength;
 	struct rmap_item *item = NULL;
 	struct rmap_list_entry *scan_entry, *swap_entry = NULL;
 	struct page *page;
+	unsigned long pfn;
 
-	scan_index = swap_index = slot->pages_scanned % slot->pages;
+	scan_index = swap_index = slot->pages_scanned % pages;
 
 	if (pool_entry_boundary(scan_index))
 		try_free_last_pool(slot, scan_index - 1);
@@ -3475,7 +3481,7 @@ static struct rmap_item *get_next_rmap_item(struct vma_slot *slot, u32 *hash)
 	}
 
 	if (slot->flags & UKSM_SLOT_NEED_RERAND) {
-		rand_range = slot->pages - scan_index;
+		rand_range = pages - scan_index;
 		BUG_ON(!rand_range);
 		swap_index = scan_index + (get_random_u32() % rand_range);
 	}
@@ -3484,7 +3490,7 @@ static struct rmap_item *get_next_rmap_item(struct vma_slot *slot, u32 *hash)
 		swap_entry = get_rmap_list_entry(slot, swap_index, 1);
 
 		if (!swap_entry)
-			return NULL;
+			goto put_scan_entry;
 
 		if (entry_is_new(swap_entry)) {
 			swap_entry->addr = get_index_orig_addr(slot,
@@ -3496,29 +3502,29 @@ static struct rmap_item *get_next_rmap_item(struct vma_slot *slot, u32 *hash)
 
 	addr = get_entry_address(scan_entry);
 	item = get_entry_item(scan_entry);
-	BUG_ON(addr > slot->vma->vm_end || addr < slot->vma->vm_start);
+	BUG_ON(addr > vma->vm_end || addr < vma->vm_start);
 
-	page = follow_page(slot->vma, addr, FOLL_GET);
+	page = follow_page(vma, addr, FOLL_GET);
 	if (IS_ERR_OR_NULL(page))
 		goto nopage;
 
-	if (!PageAnon(page))
+	if (unlikely(!PageAnon(page)))
 		goto putpage;
 
 	/*check is zero_page pfn or uksm_zero_page*/
-	if ((page_to_pfn(page) == zero_pfn)
-			|| (page_to_pfn(page) == uksm_zero_pfn))
+	pfn = page_to_pfn(page);
+	if (unlikely(pfn == zero_pfn || pfn == uksm_zero_pfn))
 		goto putpage;
 
-	flush_anon_page(slot->vma, page, addr);
+	flush_anon_page(vma, page, addr);
 	flush_dcache_page(page);
 
 
-	*hash = page_hash(page, hash_strength, 1);
+	*hash = page_hash(page, cur_hash_strength, 1);
 	inc_uksm_pages_scanned();
 	/*if the page content all zero, re-map to zero-page*/
-	if (find_zero_page_hash(hash_strength, *hash)) {
-		if (!cmp_and_merge_zero_page(slot->vma, page)) {
+	if (unlikely(find_zero_page_hash(cur_hash_strength, *hash))) {
+		if (!cmp_and_merge_zero_page(vma, page)) {
 			slot->pages_merged++;
 
 			/* For full-zero pages, no need to create rmap item */
@@ -3558,6 +3564,10 @@ nopage:
 	put_rmap_list_entry(slot, scan_index);
 	if (swap_entry)
 		put_rmap_list_entry(slot, swap_index);
+	return NULL;
+
+put_scan_entry:
+	put_rmap_list_entry(slot, scan_index);
 	return NULL;
 }
 

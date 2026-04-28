@@ -242,26 +242,20 @@ static inline void zram_raise_temp_locked(struct zram *zram, u32 index,
 	zram_set_temp_locked(zram, index, temp);
 }
 
+static void zram_accessed(struct zram *zram, u32 index);
+static int zram_read_from_zspool(struct zram *zram, struct page *page,
+				 u32 index);
+
 static inline void zram_promote_accessed(struct zram *zram, u32 index,
 					 bool from_wb)
 {
-	unsigned int old_temp;
-	unsigned int new_temp;
-	const char *source = from_wb ? "wb" : "read";
-
 	zram_slot_lock(zram, index);
-	old_temp = zram_get_temp_locked(zram, index);
 	if (from_wb)
 		zram_set_temp_locked(zram, index, ZRAM_TEMP_MAX);
 	else
 		zram_raise_temp_locked(zram, index, ZRAM_TEMP_INC_READ);
-	new_temp = zram_get_temp_locked(zram, index);
+	zram_accessed(zram, index);
 	zram_slot_unlock(zram, index);
-
-	if (from_wb || old_temp == 0 || new_temp == ZRAM_TEMP_MAX)
-		pr_info_ratelimited("zram %s promote index=%u source=%s temp=%u->%u\n",
-				    zram->disk->disk_name, index, source,
-				    old_temp, new_temp);
 }
 
 static size_t zram_get_obj_size(struct zram *zram, u32 index)
@@ -361,8 +355,11 @@ static inline u32 zram_get_priority(struct zram *zram, u32 index)
 
 static void zram_accessed(struct zram *zram, u32 index)
 {
-	/* Remove from LRU list if present */
-	zram_lru_del(zram, &zram->table[index]);
+#ifdef CONFIG_ZRAM_WRITEBACK
+	/* Remove from idle LRU only if this slot is currently tracked there. */
+	if (zram_test_flag(zram, index, ZRAM_IDLE))
+		zram_lru_del(zram, &zram->table[index]);
+#endif
 	zram_clear_flag(zram, index, ZRAM_IDLE);
 	zram_clear_flag(zram, index, ZRAM_PP_SLOT);
 #ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
@@ -464,8 +461,6 @@ static bool zram_writeback_candidate_locked(struct zram *zram, u32 index,
 
 	temp = zram_get_temp_locked(zram, index);
 	if (temp > 0) {
-		pr_info_ratelimited("zram %s writeback scan skip hot page index=%u temp=%u->%u\n",
-				    zram->disk->disk_name, index, temp, temp - 1);
 		zram_set_temp_locked(zram, index, temp - 1);
 		return false;
 	}
@@ -473,11 +468,8 @@ static bool zram_writeback_candidate_locked(struct zram *zram, u32 index,
 	if (mode & IDLE_WRITEBACK) {
 		if (!zram_test_flag(zram, index, ZRAM_IDLE))
 			return false;
-		if (!zram_test_flag(zram, index, ZRAM_PAGE_ANON)) {
-			pr_info_ratelimited("zram %s writeback scan skip non-anon page index=%u\n",
-					    zram->disk->disk_name, index);
+		if (!zram_test_flag(zram, index, ZRAM_PAGE_ANON))
 			return false;
-		}
 	}
 
 	if ((mode & HUGE_WRITEBACK) &&
@@ -497,11 +489,8 @@ static bool zram_writeback_mode_match_locked(struct zram *zram, u32 index,
 	if (mode & IDLE_WRITEBACK) {
 		if (!zram_test_flag(zram, index, ZRAM_IDLE))
 			return false;
-		if (!zram_test_flag(zram, index, ZRAM_PAGE_ANON)) {
-			pr_info_ratelimited("zram %s writeback scan skip non-anon page index=%u\n",
-					    zram->disk->disk_name, index);
+		if (!zram_test_flag(zram, index, ZRAM_PAGE_ANON))
 			return false;
-		}
 	}
 
 	if ((mode & HUGE_WRITEBACK) &&
@@ -813,12 +802,6 @@ static void mark_idle_range(struct zram *zram, ktime_t cutoff,
 {
 	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
 	unsigned long i;
-	unsigned long scanned = 0;
-	unsigned long idle_set = 0;
-	unsigned long idle_cleared = 0;
-	unsigned long skipped_unallocated = 0;
-	unsigned long skipped_wb = 0;
-	unsigned long skipped_same = 0;
 
 	if (!nr_pages || !nr_scan)
 		return;
@@ -833,17 +816,10 @@ static void mark_idle_range(struct zram *zram, ktime_t cutoff,
 		 *
 		 * And ZRAM_WB slots simply cannot be ZRAM_IDLE.
 		 */
-		scanned++;
 		zram_slot_lock(zram, index);
 		if (!zram_allocated(zram, index) ||
 		    zram_test_flag(zram, index, ZRAM_WB) ||
 		    zram_test_flag(zram, index, ZRAM_SAME)) {
-			if (!zram_allocated(zram, index))
-				skipped_unallocated++;
-			else if (zram_test_flag(zram, index, ZRAM_WB))
-				skipped_wb++;
-			else
-				skipped_same++;
 			zram_slot_unlock(zram, index);
 			continue;
 		}
@@ -854,14 +830,12 @@ static void mark_idle_range(struct zram *zram, ktime_t cutoff,
 				zram_set_flag(zram, index, ZRAM_IDLE);
 				/* Add to LRU list for shrinker */
 				zram_lru_add(zram, &zram->table[index]);
-				idle_set++;
 			}
 		} else {
 			/* Page was accessed recently, make sure it's not marked as IDLE */
 			if (zram_test_flag(zram, index, ZRAM_IDLE)) {
 				zram_clear_flag(zram, index, ZRAM_IDLE);
 				zram_lru_del(zram, &zram->table[index]);
-				idle_cleared++;
 			}
 		}
 #else
@@ -873,18 +847,10 @@ static void mark_idle_range(struct zram *zram, ktime_t cutoff,
 			zram_set_flag(zram, index, ZRAM_IDLE);
 			/* Add to LRU list for shrinker */
 			zram_lru_add(zram, &zram->table[index]);
-			idle_set++;
 		}
 #endif
 		zram_slot_unlock(zram, index);
 	}
-
-	pr_info("zram %s idle-scan range=%lu/%lu start=%lu next=%lu cutoff=%s scanned=%lu idle_set=%lu idle_cleared=%lu skip_unalloc=%lu skip_wb=%lu skip_same=%lu\n",
-		zram->disk->disk_name, nr_scan, nr_pages, start,
-		(start + nr_scan) % nr_pages,
-		cutoff ? "age-filtered" : "all",
-		scanned, idle_set, idle_cleared,
-		skipped_unallocated, skipped_wb, skipped_same);
 }
 
 static ssize_t idle_store(struct device *dev,
@@ -1210,9 +1176,10 @@ static int zram_writeback_slots(struct zram *zram, struct zram_pp_ctl *ctl,
 		 */
 		if (!zram_test_flag(zram, index, ZRAM_PP_SLOT))
 			goto next;
-		zram_slot_unlock(zram, index);
 
-		if (zram_read_page(zram, page, index, NULL)) {
+		ret = zram_read_from_zspool(zram, page, index);
+		zram_slot_unlock(zram, index);
+		if (ret) {
 			release_pp_slot(zram, pps);
 			continue;
 		}
@@ -2043,6 +2010,7 @@ static int write_same_filled_page(struct zram *zram, unsigned long fill,
 		if (PageDirty(page) || PageWriteback(page))
 			zram_set_flag(zram, index, ZRAM_PAGE_DIRTY);
 	}
+	zram_accessed(zram, index);
 
 	zram_slot_unlock(zram, index);
 
@@ -2093,6 +2061,7 @@ static int write_incompressible_page(struct zram *zram, struct page *page,
 		if (PageDirty(page) || PageWriteback(page))
 			zram_set_flag(zram, index, ZRAM_PAGE_DIRTY);
 	}
+	zram_accessed(zram, index);
 
 	zram_slot_unlock(zram, index);
 
@@ -2196,6 +2165,7 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
 		if (PageDirty(page) || PageWriteback(page))
 			zram_set_flag(zram, index, ZRAM_PAGE_DIRTY);
 	}
+	zram_accessed(zram, index);
 
 	zram_slot_unlock(zram, index);
 
@@ -2259,8 +2229,6 @@ static int scan_slots_for_recompress(struct zram *zram, u32 mode, u32 prio_max,
 			unsigned int temp = zram_get_temp_locked(zram, index);
 
 			if (temp > 0) {
-				pr_info_ratelimited("zram %s recompress scan skip hot page index=%lu temp=%u->%u\n",
-						    zram->disk->disk_name, index, temp, temp - 1);
 				zram_set_temp_locked(zram, index, temp - 1);
 				goto next;
 			}
@@ -2653,10 +2621,6 @@ static void zram_bio_read(struct zram *zram, struct bio *bio)
 		}
 		flush_dcache_page(bv.bv_page);
 
-		zram_slot_lock(zram, index);
-		zram_accessed(zram, index);
-		zram_slot_unlock(zram, index);
-
 		bio_advance_iter_single(bio, &iter, bv.bv_len);
 	} while (iter.bi_size);
 
@@ -2682,10 +2646,6 @@ static void zram_bio_write(struct zram *zram, struct bio *bio)
 			bio->bi_status = BLK_STS_IOERR;
 			break;
 		}
-
-		zram_slot_lock(zram, index);
-		zram_accessed(zram, index);
-		zram_slot_unlock(zram, index);
 
 		bio_advance_iter_single(bio, &iter, bv.bv_len);
 	} while (iter.bi_size);
@@ -2725,7 +2685,7 @@ static atomic_t auto_writeback_pending = ATOMIC_INIT(0);
 static unsigned long zram_auto_writeback(struct zram *zram,
 					 unsigned long max_pages)
 {
-	u64 nr_pages = zram->disksize >> PAGE_SHIFT;
+	u64 nr_pages;
 	struct zram_pp_ctl *ctl;
 	unsigned long pages_written = 0;
 	int err;
@@ -2738,13 +2698,13 @@ static unsigned long zram_auto_writeback(struct zram *zram,
 		up_read(&zram->init_lock);
 		return 0;
 	}
-	up_read(&zram->init_lock);
 
-	down_read(&zram->init_lock);
 	if (atomic_xchg(&zram->pp_in_progress, 1)) {
 		up_read(&zram->init_lock);
 		return 0;
 	}
+
+	nr_pages = zram->disksize >> PAGE_SHIFT;
 	ctl = init_pp_ctl();
 	if (!ctl) {
 		atomic_set(&zram->pp_in_progress, 0);

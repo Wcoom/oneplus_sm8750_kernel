@@ -193,35 +193,38 @@ resubmit:
 	raw = raw_local_deliver(skb, protocol);
 
 	ipprot = rcu_dereference(inet_protos[protocol]);
-	if (ipprot) {
-		if (!ipprot->no_policy) {
-			if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb)) {
-				kfree_skb_reason(skb,
-						 SKB_DROP_REASON_XFRM_POLICY);
-				return;
-			}
-			nf_reset_ct(skb);
-		}
-		ret = INDIRECT_CALL_2(ipprot->handler, tcp_v4_rcv, udp_rcv,
-				      skb);
-		if (ret < 0) {
-			protocol = -ret;
-			goto resubmit;
-		}
-		__IP_INC_STATS(net, IPSTATS_MIB_INDELIVERS);
-	} else {
-		if (!raw) {
-			if (xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb)) {
-				__IP_INC_STATS(net, IPSTATS_MIB_INUNKNOWNPROTOS);
-				icmp_send(skb, ICMP_DEST_UNREACH,
-					  ICMP_PROT_UNREACH, 0);
-			}
-			kfree_skb_reason(skb, SKB_DROP_REASON_IP_NOPROTO);
-		} else {
+	if (unlikely(!ipprot)) {
+		if (raw) {
 			__IP_INC_STATS(net, IPSTATS_MIB_INDELIVERS);
 			consume_skb(skb);
+			return;
 		}
+
+		if (xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb)) {
+			__IP_INC_STATS(net, IPSTATS_MIB_INUNKNOWNPROTOS);
+			icmp_send(skb, ICMP_DEST_UNREACH,
+				  ICMP_PROT_UNREACH, 0);
+		}
+		kfree_skb_reason(skb, SKB_DROP_REASON_IP_NOPROTO);
+		return;
 	}
+
+	if (!ipprot->no_policy) {
+		if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb)) {
+			kfree_skb_reason(skb,
+					 SKB_DROP_REASON_XFRM_POLICY);
+			return;
+		}
+		nf_reset_ct(skb);
+	}
+
+	ret = INDIRECT_CALL_2(ipprot->handler, tcp_v4_rcv, udp_rcv, skb);
+	if (ret < 0) {
+		protocol = -ret;
+		goto resubmit;
+	}
+
+	__IP_INC_STATS(net, IPSTATS_MIB_INDELIVERS);
 }
 
 static int ip_local_deliver_finish(struct net *net, struct sock *sk, struct sk_buff *skb)
@@ -319,6 +322,7 @@ static int ip_rcv_finish_core(struct net *net, struct sock *sk,
 			      const struct sk_buff *hint)
 {
 	const struct iphdr *iph = ip_hdr(skb);
+	bool early_demux;
 	int err, drop_reason;
 	struct rtable *rt;
 
@@ -331,10 +335,9 @@ static int ip_rcv_finish_core(struct net *net, struct sock *sk,
 			goto drop_error;
 	}
 
-	if (READ_ONCE(net->ipv4.sysctl_ip_early_demux) &&
-	    !skb_dst(skb) &&
-	    !skb->sk &&
-	    !ip_is_fragment(iph)) {
+	early_demux = READ_ONCE(net->ipv4.sysctl_ip_early_demux) &&
+		      !skb_dst(skb) && !skb->sk && !ip_is_fragment(iph);
+	if (early_demux) {
 		switch (iph->protocol) {
 		case IPPROTO_TCP:
 			if (READ_ONCE(net->ipv4.sysctl_tcp_early_demux)) {

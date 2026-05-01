@@ -6035,6 +6035,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 	    TCP_SKB_CB(skb)->seq == tp->rcv_nxt &&
 	    !after(TCP_SKB_CB(skb)->ack_seq, tp->snd_nxt)) {
 		int tcp_header_len = tp->tcp_header_len;
+		bool store_ts_recent;
 
 		/* Timestamp header prediction: tcp_header_len
 		 * is automatically equal to th->doff*4 due to pred_flags
@@ -6058,35 +6059,37 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 			 */
 		}
 
-		if (len <= tcp_header_len) {
-			/* Bulk data transfer: sender */
-			if (len == tcp_header_len) {
-				/* Predicted packet is in window by definition.
-				 * seq == rcv_nxt and rcv_wup <= rcv_nxt.
-				 * Hence, check seq<=rcv_wup reduces to:
-				 */
-				if (tcp_header_len ==
-				    (sizeof(struct tcphdr) + TCPOLEN_TSTAMP_ALIGNED) &&
-				    tp->rcv_nxt == tp->rcv_wup)
-					tcp_store_ts_recent(tp);
+		store_ts_recent = tcp_header_len ==
+			(sizeof(struct tcphdr) + TCPOLEN_TSTAMP_ALIGNED) &&
+			tp->rcv_nxt == tp->rcv_wup;
 
-				/* We know that such packets are checksummed
-				 * on entry.
-				 */
-				tcp_ack(sk, skb, 0);
-				__kfree_skb(skb);
-				tcp_data_snd_check(sk);
-				/* When receiving pure ack in fast path, update
-				 * last ts ecr directly instead of calling
-				 * tcp_rcv_rtt_measure_ts()
-				 */
-				tp->rcv_rtt_last_tsecr = tp->rx_opt.rcv_tsecr;
-				return;
-			} else { /* Header too small */
-				reason = SKB_DROP_REASON_PKT_TOO_SMALL;
-				TCP_INC_STATS(sock_net(sk), TCP_MIB_INERRS);
-				goto discard;
-			}
+		if (len < tcp_header_len) {
+			reason = SKB_DROP_REASON_PKT_TOO_SMALL;
+			TCP_INC_STATS(sock_net(sk), TCP_MIB_INERRS);
+			goto discard;
+		}
+
+		if (len == tcp_header_len) {
+			/* Bulk data transfer: sender */
+			/* Predicted packet is in window by definition.
+			 * seq == rcv_nxt and rcv_wup <= rcv_nxt.
+			 * Hence, check seq<=rcv_wup reduces to:
+			 */
+			if (store_ts_recent)
+				tcp_store_ts_recent(tp);
+
+			/* We know that such packets are checksummed
+			 * on entry.
+			 */
+			tcp_ack(sk, skb, 0);
+			__kfree_skb(skb);
+			tcp_data_snd_check(sk);
+			/* When receiving pure ack in fast path, update
+			 * last ts ecr directly instead of calling
+			 * tcp_rcv_rtt_measure_ts()
+			 */
+			tp->rcv_rtt_last_tsecr = tp->rx_opt.rcv_tsecr;
+			return;
 		} else {
 			int eaten = 0;
 			bool fragstolen = false;
@@ -6101,9 +6104,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 			 * seq == rcv_nxt and rcv_wup <= rcv_nxt.
 			 * Hence, check seq<=rcv_wup reduces to:
 			 */
-			if (tcp_header_len ==
-			    (sizeof(struct tcphdr) + TCPOLEN_TSTAMP_ALIGNED) &&
-			    tp->rcv_nxt == tp->rcv_wup)
+			if (store_ts_recent)
 				tcp_store_ts_recent(tp);
 
 			tcp_rcv_rtt_measure_ts(sk, skb);

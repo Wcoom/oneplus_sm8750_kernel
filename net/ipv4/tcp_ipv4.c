@@ -2155,7 +2155,7 @@ process:
 
 	skb->dev = NULL;
 
-	if (sk->sk_state == TCP_LISTEN) {
+	if (unlikely(sk->sk_state == TCP_LISTEN)) {
 		ret = tcp_v4_do_rcv(sk, skb);
 		goto put_and_return;
 	}
@@ -2165,7 +2165,7 @@ process:
 	bh_lock_sock_nested(sk);
 	tcp_segs_in(tcp_sk(sk), skb);
 	ret = 0;
-	if (!sock_owned_by_user(sk)) {
+	if (likely(!sock_owned_by_user(sk))) {
 		ret = tcp_v4_do_rcv(sk, skb);
 	} else {
 		if (tcp_add_backlog(sk, skb, &drop_reason))

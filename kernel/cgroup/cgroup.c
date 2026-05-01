@@ -4323,6 +4323,8 @@ static int cgroup_addrm_files(struct cgroup_subsys_state *css,
 			      bool is_add)
 {
 	struct cftype *cft, *cft_end = NULL;
+	bool is_root = !cgroup_parent(cgrp);
+	bool on_dfl = cgroup_on_dfl(cgrp);
 	int ret = 0;
 
 	lockdep_assert_held(&cgroup_mutex);
@@ -4330,13 +4332,13 @@ static int cgroup_addrm_files(struct cgroup_subsys_state *css,
 restart:
 	for (cft = cfts; cft != cft_end && cft->name[0] != '\0'; cft++) {
 		/* does cft->flags tell us to skip this file on @cgrp? */
-		if ((cft->flags & __CFTYPE_ONLY_ON_DFL) && !cgroup_on_dfl(cgrp))
+		if ((cft->flags & __CFTYPE_ONLY_ON_DFL) && !on_dfl)
 			continue;
-		if ((cft->flags & __CFTYPE_NOT_ON_DFL) && cgroup_on_dfl(cgrp))
+		if ((cft->flags & __CFTYPE_NOT_ON_DFL) && on_dfl)
 			continue;
-		if ((cft->flags & CFTYPE_NOT_ON_ROOT) && !cgroup_parent(cgrp))
+		if ((cft->flags & CFTYPE_NOT_ON_ROOT) && is_root)
 			continue;
-		if ((cft->flags & CFTYPE_ONLY_ON_ROOT) && cgroup_parent(cgrp))
+		if ((cft->flags & CFTYPE_ONLY_ON_ROOT) && !is_root)
 			continue;
 		if ((cft->flags & CFTYPE_DEBUG) && !cgroup_debug)
 			continue;

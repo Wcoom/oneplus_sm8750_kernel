@@ -1285,7 +1285,7 @@ static void compute_effective_cpumask(struct cpumask *new_cpus,
 		cpumask_and(new_cpus, new_cpus, cs->cpus_requested);
 		cpumask_and(new_cpus, new_cpus, cpu_active_mask);
 	} else {
-		cpumask_and(new_cpus, cs->cpus_requested, parent_cs(cs)->effective_cpus);
+		cpumask_and(new_cpus, cs->cpus_requested, parent->effective_cpus);
 	}
 }
 
@@ -2070,6 +2070,7 @@ static void update_tasks_nodemask(struct cpuset *cs)
 	static nodemask_t newmems;	/* protected by cpuset_mutex */
 	struct css_task_iter it;
 	struct task_struct *task;
+	bool migrate = is_memory_migrate(cs);
 
 	cpuset_being_rebound = cs;		/* causes mpol_dup() rebind */
 
@@ -2088,15 +2089,12 @@ static void update_tasks_nodemask(struct cpuset *cs)
 	css_task_iter_start(&cs->css, 0, &it);
 	while ((task = css_task_iter_next(&it))) {
 		struct mm_struct *mm;
-		bool migrate;
 
 		cpuset_change_task_nodemask(task, &newmems);
 
 		mm = get_task_mm(task);
 		if (!mm)
 			continue;
-
-		migrate = is_memory_migrate(cs);
 
 		mpol_rebind_mm(mm, &cs->mems_allowed);
 		if (migrate)

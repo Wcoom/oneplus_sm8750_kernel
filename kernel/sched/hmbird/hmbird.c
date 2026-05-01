@@ -1031,6 +1031,7 @@ static int consume_pcp_dsq(struct rq *rq, struct rq_flags *rf, bool any)
 	int cpu = cpu_of(rq);
 	unsigned long flags;
 	struct hmbird_dispatch_q *dsq = &per_cpu(pcp_ldsq, cpu);
+	struct pcp_sched_info *pcp = &per_cpu(pcp_info, cpu);
 
 	raw_spin_lock_irqsave(&dsq->lock, flags);
 	is_timeout = dsq->is_timeout;
@@ -1058,12 +1059,11 @@ static int consume_pcp_dsq(struct rq *rq, struct rq_flags *rf, bool any)
 	 * No pcp task, clear quota.
 	 */
 	if (any) {
-		if (per_cpu(pcp_info, cpu_of(rq)).pcp_round) {
-			per_cpu(pcp_info, cpu).rtime = 0;
-			per_cpu(pcp_info, cpu).pcp_round = false;
+		if (pcp->pcp_round) {
+			pcp->rtime = 0;
+			pcp->pcp_round = false;
 			hmbird_info_systrace("C|9999|pcp_%d_round|%d\n", cpu, false);
-			systrace_output_rtime_state(&per_cpu(pcp_ldsq, cpu),
-					per_cpu(pcp_info, cpu).rtime);
+			systrace_output_rtime_state(dsq, pcp->rtime);
 		}
 	}
 	return 0;
@@ -1071,7 +1071,10 @@ static int consume_pcp_dsq(struct rq *rq, struct rq_flags *rf, bool any)
 
 static int check_pcp_dsq_round(struct rq *rq, struct rq_flags *rf)
 {
-	if (per_cpu(pcp_info, cpu_of(rq)).pcp_round) {
+	int cpu = cpu_of(rq);
+	struct pcp_sched_info *pcp = &per_cpu(pcp_info, cpu);
+
+	if (pcp->pcp_round) {
 		if (consume_pcp_dsq(rq, rf, true))
 			return 1;
 	}
@@ -1415,9 +1418,12 @@ static void update_runningtime(struct rq *rq, struct task_struct *p, unsigned lo
 		return;
 
 	if (idx >= MAX_GLOBAL_DSQS) {
-		per_cpu(pcp_info, cpu_of(rq)).rtime += exec_time;
-		systrace_output_rtime_state(&per_cpu(pcp_ldsq, cpu_of(rq)),
-					per_cpu(pcp_info, cpu_of(rq)).rtime);
+		int cpu = cpu_of(rq);
+		struct pcp_sched_info *pcp = &per_cpu(pcp_info, cpu);
+		struct hmbird_dispatch_q *dsq = &per_cpu(pcp_ldsq, cpu);
+
+		pcp->rtime += exec_time;
+		systrace_output_rtime_state(dsq, pcp->rtime);
 	} else {
 		spin_lock(&sinfo.lock);
 		sinfo.rtime[idx] += exec_time;
@@ -1431,6 +1437,8 @@ static void update_dsq_idx(struct rq *rq, struct task_struct *p, enum cpu_type t
 	int cidx;
 	struct cluster_ctx ctx;
 	int cpu = cpu_of(rq);
+	struct pcp_sched_info *pcp = &per_cpu(pcp_info, cpu);
+	struct hmbird_dispatch_q *pcp_dsq = &per_cpu(pcp_ldsq, cpu);
 
 	if (gen_cluster_ctx(&ctx, type))
 		return;
@@ -1445,15 +1453,14 @@ static void update_dsq_idx(struct rq *rq, struct task_struct *p, enum cpu_type t
 	}
 
 	while (1) {
-		if (per_cpu(pcp_info, cpu).pcp_round) {
-			if (per_cpu(pcp_info, cpu).rtime >= pcp_dsq_quota) {
+		if (pcp->pcp_round) {
+			if (pcp->rtime >= pcp_dsq_quota) {
 				hmbird_info_trace("cpu[%d] pcp_dsq_round is full, rtime = %d\n",
-								cpu, per_cpu(pcp_info, cpu).rtime);
-				per_cpu(pcp_info, cpu).rtime = 0;
-				per_cpu(pcp_info, cpu).pcp_round = false;
+								cpu, pcp->rtime);
+				pcp->rtime = 0;
+				pcp->pcp_round = false;
 				hmbird_info_systrace("C|9999|pcp_%d_round|%d\n", cpu, false);
-				systrace_output_rtime_state(&per_cpu(pcp_ldsq, cpu),
-						per_cpu(pcp_info, cpu_of(rq)).rtime);
+				systrace_output_rtime_state(pcp_dsq, pcp->rtime);
 			}
 		}
 		if (sinfo.rtime[cidx] < dsq_quota[cidx])
@@ -1541,19 +1548,22 @@ void scan_timeout(struct rq *rq)
 	int i;
 	int cpu = cpu_of(rq);
 	struct hmbird_dispatch_q *dsq;
+	unsigned long now = jiffies;
+	u64 *pcp_last_scan_at_ptr;
 	static u64 last_scan_at;
 	static DEFINE_PER_CPU(u64, pcp_last_scan_at);
 
-	if (time_before_eq(jiffies, (unsigned long)per_cpu(pcp_last_scan_at, cpu)))
+	pcp_last_scan_at_ptr = &per_cpu(pcp_last_scan_at, cpu);
+	if (time_before_eq(now, (unsigned long)*pcp_last_scan_at_ptr))
 		return;
-	per_cpu(pcp_last_scan_at, cpu) = jiffies;
+	*pcp_last_scan_at_ptr = now;
 
 	dsq = &per_cpu(pcp_ldsq, cpu);
 	scan_dsq_timeout(rq, dsq, pcp_dsq_deadline);
 
-	if (time_before_eq(jiffies, (unsigned long)last_scan_at))
+	if (time_before_eq(now, (unsigned long)last_scan_at))
 		return;
-	last_scan_at = jiffies;
+	last_scan_at = now;
 
 	for (i = NON_PERIOD_START; i < NON_PERIOD_END; i++) {
 		dsq = &gdsqs[i];
@@ -2604,6 +2614,7 @@ static void systrace_output_cpu_ds(struct rq *rq, struct task_struct *p)
 {
 	static DEFINE_PER_CPU(int, is_last_exceed);
 	int cpu = cpu_of(rq);
+	int *last_exceed = &per_cpu(is_last_exceed, cpu);
 	u64 util = 0;
 
 	if (likely(!debug_enabled()))
@@ -2620,10 +2631,10 @@ static void systrace_output_cpu_ds(struct rq *rq, struct task_struct *p)
 
 	if (util >= misfit_ds) {
 		hmbird_internal_systrace("C|9999|cpu_%d_ds|%llu\n", cpu, util);
-		per_cpu(is_last_exceed, cpu) = true;
-	} else if (per_cpu(is_last_exceed, cpu) && (util < misfit_ds)) {
+		*last_exceed = true;
+	} else if (*last_exceed && (util < misfit_ds)) {
 		hmbird_internal_systrace("C|9999|cpu_%d_ds|%d\n", cpu, 0);
-		per_cpu(is_last_exceed, cpu) = false;
+		*last_exceed = false;
 	} else {
 	}
 }
@@ -3101,14 +3112,16 @@ static void hmbird_watchdog_workfn(struct work_struct *work)
 static void set_pcp_round(struct rq *rq)
 {
 	int cpu = cpu_of(rq);
+	s64 round = atomic64_read(&pcp_dsq_round);
+	struct pcp_sched_info *pcp = &per_cpu(pcp_info, cpu);
+	struct hmbird_dispatch_q *dsq = &per_cpu(pcp_ldsq, cpu);
 
-	if (atomic64_read(&pcp_dsq_round) != per_cpu(pcp_info, cpu).pcp_seq) {
-		per_cpu(pcp_info, cpu).pcp_seq = atomic64_read(&pcp_dsq_round);
-		per_cpu(pcp_info, cpu).pcp_round = true;
+	if (round != pcp->pcp_seq) {
+		pcp->pcp_seq = round;
+		pcp->pcp_round = true;
 		hmbird_info_systrace("C|9999|pcp_%d_round|%d\n", cpu, true);
-		per_cpu(pcp_info, cpu).rtime = 0;
-		systrace_output_rtime_state(&per_cpu(pcp_ldsq, cpu),
-						per_cpu(pcp_info, cpu).rtime);
+		pcp->rtime = 0;
+		systrace_output_rtime_state(dsq, pcp->rtime);
 	}
 }
 

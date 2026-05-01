@@ -2303,6 +2303,8 @@ static int recompress_slot(struct zram *zram, u32 index, struct page *page,
 	 * we don't preserve IDLE flag and don't incorrectly pick this entry
 	 * for different post-processing type (e.g. writeback).
 	 */
+	if (zram_test_flag(zram, index, ZRAM_IDLE))
+		zram_lru_del(zram, &zram->table[index]);
 	zram_clear_flag(zram, index, ZRAM_IDLE);
 
 	class_index_old = zs_lookup_class_index(zram->mem_pool, comp_len_old);

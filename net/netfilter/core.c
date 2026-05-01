@@ -624,9 +624,9 @@ int nf_hook_slow(struct sk_buff *skb, struct nf_hook_state *state,
 
 	for (; s < e->num_hook_entries; s++) {
 		verdict = nf_hook_entry_hookfn(&e->hooks[s], skb, state);
+		if (likely((verdict & NF_VERDICT_MASK) == NF_ACCEPT))
+			continue;
 		switch (verdict & NF_VERDICT_MASK) {
-		case NF_ACCEPT:
-			break;
 		case NF_DROP:
 			kfree_skb_reason(skb,
 					 SKB_DROP_REASON_NETFILTER_DROP);

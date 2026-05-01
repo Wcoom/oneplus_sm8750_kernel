@@ -184,11 +184,12 @@ ip6_finish_output_gso_slowpath_drop(struct net *net, struct sock *sk,
 
 static int __ip6_finish_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
+	struct dst_entry *dst = skb_dst(skb);
 	unsigned int mtu;
 
 #if defined(CONFIG_NETFILTER) && defined(CONFIG_XFRM)
 	/* Policy lookup after SNAT yielded a new policy */
-	if (skb_dst(skb)->xfrm) {
+	if (dst->xfrm) {
 		IP6CB(skb)->flags |= IP6SKB_REROUTED;
 		return dst_output(net, sk, skb);
 	}
@@ -201,7 +202,7 @@ static int __ip6_finish_output(struct net *net, struct sock *sk, struct sk_buff 
 		return ip6_finish_output_gso_slowpath_drop(net, sk, skb, mtu);
 
 	if ((skb->len > mtu && !skb_is_gso(skb)) ||
-	    dst_allfrag(skb_dst(skb)) ||
+	    dst_allfrag(dst) ||
 	    (IP6CB(skb)->frag_max_size && skb->len > IP6CB(skb)->frag_max_size))
 		return ip6_fragment(net, sk, skb, ip6_finish_output2);
 	else
@@ -225,8 +226,9 @@ static int ip6_finish_output(struct net *net, struct sock *sk, struct sk_buff *s
 
 int ip6_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
-	struct net_device *dev = skb_dst(skb)->dev, *indev = skb->dev;
-	struct inet6_dev *idev = ip6_dst_idev(skb_dst(skb));
+	struct dst_entry *dst = skb_dst(skb);
+	struct net_device *dev = dst->dev, *indev = skb->dev;
+	struct inet6_dev *idev = ip6_dst_idev(dst);
 
 	skb->protocol = htons(ETH_P_IPV6);
 	skb->dev = dev;

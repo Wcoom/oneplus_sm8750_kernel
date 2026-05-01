@@ -1266,9 +1266,10 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 	struct tcp_md5sig_key *md5;
 	struct tcphdr *th;
 	u64 prior_wstamp;
+	u32 pcount;
 	int err;
 
-	BUG_ON(!skb || !tcp_skb_pcount(skb));
+	BUG_ON(!skb);
 	tp = tcp_sk(sk);
 	prior_wstamp = tp->tcp_wstamp_ns;
 	tp->tcp_wstamp_ns = max(tp->tcp_wstamp_ns, tp->tcp_clock_cache);
@@ -1290,6 +1291,8 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 		 */
 		skb->dev = NULL;
 	}
+	pcount = tcp_skb_pcount(skb);
+	BUG_ON(!pcount);
 
 	inet = inet_sk(sk);
 	tcb = TCP_SKB_CB(skb);
@@ -1308,7 +1311,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 		 * packets and thus the corresponding ACK packet that would
 		 * release the following packet.
 		 */
-		if (tcp_skb_pcount(skb) > 1)
+		if (pcount > 1)
 			tcb->tcp_flags |= TCPHDR_PSH;
 	}
 	tcp_header_size = tcp_options_size + sizeof(struct tcphdr);
@@ -1403,18 +1406,18 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 
 	if (skb->len != tcp_header_size) {
 		tcp_event_data_sent(tp, sk);
-		tp->data_segs_out += tcp_skb_pcount(skb);
+		tp->data_segs_out += pcount;
 		tp->bytes_sent += skb->len - tcp_header_size;
 	}
 
 	if (after(tcb->end_seq, tp->snd_nxt) || tcb->seq == tcb->end_seq)
 		TCP_ADD_STATS(sock_net(sk), TCP_MIB_OUTSEGS,
-			      tcp_skb_pcount(skb));
+			      pcount);
 
-	tp->segs_out += tcp_skb_pcount(skb);
+	tp->segs_out += pcount;
 	skb_set_hash_from_sk(skb, sk);
 	/* OK, its time to fill skb_shinfo(skb)->gso_{segs|size} */
-	skb_shinfo(skb)->gso_segs = tcp_skb_pcount(skb);
+	skb_shinfo(skb)->gso_segs = pcount;
 	skb_shinfo(skb)->gso_size = tcp_skb_mss(skb);
 
 	/* Leave earliest departure time in skb->tstamp (skb->skb_mstamp_ns) */

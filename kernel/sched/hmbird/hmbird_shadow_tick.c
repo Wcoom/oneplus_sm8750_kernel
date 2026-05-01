@@ -66,8 +66,13 @@ static inline void high_res_clear_phase(int cpu)
 
 static enum hrtimer_restart highres_next_phase(int cpu, struct hrtimer *timer)
 {
-	per_cpu(tick_phase, cpu) = ++per_cpu(tick_phase, cpu) % 3;
-	if (per_cpu(tick_phase, cpu)) {
+	u8 phase = per_cpu(tick_phase, cpu) + 1;
+
+	if (phase == 3)
+		phase = 0;
+	per_cpu(tick_phase, cpu) = phase;
+
+	if (phase) {
 		hrtimer_forward_now(timer, ns_to_ktime(TICK_INTVAL));
 		return HRTIMER_RESTART;
 	}
@@ -78,8 +83,9 @@ void sched_switch_handler(void *data, bool preempt, struct task_struct *prev,
 		struct task_struct *next, unsigned int prev_state)
 {
 	int cpu = smp_processor_id();
+	struct rq *rq = cpu_rq(cpu);
 
-	if (shadow_tick_enable() && (cpu_rq(cpu)->idle == prev)) {
+	if (shadow_tick_enable() && rq->idle == prev) {
 		per_cpu(trigger_event, cpu) = STOP_IDLE_TRIGGER;
 		high_res_clear_phase(cpu);
 		highres_timer_ctrl(true, cpu);

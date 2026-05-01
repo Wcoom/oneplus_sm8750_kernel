@@ -21,6 +21,7 @@ int ip_route_me_harder(struct net *net, struct sock *sk, struct sk_buff *skb, un
 {
 	const struct iphdr *iph = ip_hdr(skb);
 	struct rtable *rt;
+	struct dst_entry *dst;
 	struct flowi4 fl4 = {};
 	__be32 saddr = iph->saddr;
 	__u8 flags;
@@ -55,15 +56,15 @@ int ip_route_me_harder(struct net *net, struct sock *sk, struct sk_buff *skb, un
 
 	/* Drop old route. */
 	skb_dst_drop(skb);
-	skb_dst_set(skb, &rt->dst);
+	dst = &rt->dst;
+	skb_dst_set(skb, dst);
 
-	if (skb_dst(skb)->error)
-		return skb_dst(skb)->error;
+	if (dst->error)
+		return dst->error;
 
 #ifdef CONFIG_XFRM
 	if (!(IPCB(skb)->flags & IPSKB_XFRM_TRANSFORMED) &&
 	    xfrm_decode_session(skb, flowi4_to_flowi(&fl4), AF_INET) == 0) {
-		struct dst_entry *dst = skb_dst(skb);
 		skb_dst_set(skb, NULL);
 		dst = xfrm_lookup(net, dst, flowi4_to_flowi(&fl4), sk, 0);
 		if (IS_ERR(dst))
@@ -73,7 +74,7 @@ int ip_route_me_harder(struct net *net, struct sock *sk, struct sk_buff *skb, un
 #endif
 
 	/* Change in oif may mean change in hh_len. */
-	hh_len = skb_dst(skb)->dev->hard_header_len;
+	hh_len = dst->dev->hard_header_len;
 	if (skb_headroom(skb) < hh_len &&
 	    pskb_expand_head(skb, HH_DATA_ALIGN(hh_len - skb_headroom(skb)),
 				0, GFP_ATOMIC))

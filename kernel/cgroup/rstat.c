@@ -10,7 +10,8 @@
 static DEFINE_SPINLOCK(cgroup_rstat_lock);
 static DEFINE_PER_CPU(raw_spinlock_t, cgroup_rstat_cpu_lock);
 
-static void cgroup_base_stat_flush(struct cgroup *cgrp, int cpu);
+static void cgroup_base_stat_flush(struct cgroup *cgrp,
+				   struct cgroup *parent, int cpu);
 
 static struct cgroup_rstat_cpu *cgroup_rstat_cpu(struct cgroup *cgrp, int cpu)
 {
@@ -237,10 +238,11 @@ static void cgroup_rstat_flush_locked(struct cgroup *cgrp)
 		struct cgroup *pos = cgroup_rstat_updated_list(cgrp, cpu);
 
 		for (; pos; pos = pos->rstat_flush_next) {
+			struct cgroup *parent = cgroup_parent(pos);
 			struct cgroup_subsys_state *css;
 
-			cgroup_base_stat_flush(pos, cpu);
-			bpf_rstat_flush(pos, cgroup_parent(pos), cpu);
+			cgroup_base_stat_flush(pos, parent, cpu);
+			bpf_rstat_flush(pos, parent, cpu);
 
 			rcu_read_lock();
 			list_for_each_entry_rcu(css, &pos->rstat_css_list,
@@ -380,10 +382,10 @@ static void cgroup_base_stat_sub(struct cgroup_base_stat *dst_bstat,
 #endif
 }
 
-static void cgroup_base_stat_flush(struct cgroup *cgrp, int cpu)
+static void cgroup_base_stat_flush(struct cgroup *cgrp,
+				   struct cgroup *parent, int cpu)
 {
 	struct cgroup_rstat_cpu *rstatc = cgroup_rstat_cpu(cgrp, cpu);
-	struct cgroup *parent = cgroup_parent(cgrp);
 	struct cgroup_rstat_cpu *prstatc;
 	struct cgroup_base_stat delta;
 	unsigned seq;

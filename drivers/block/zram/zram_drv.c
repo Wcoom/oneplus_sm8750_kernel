@@ -35,6 +35,7 @@
 #include <linux/cpuhotplug.h>
 #include <linux/part_stat.h>
 #include <linux/mm.h>
+#include <linux/freezer.h>
 #include <linux/kthread.h>
 #include <linux/wait.h>
 #include <linux/sysms_finder.h>
@@ -57,6 +58,7 @@
 
 #define CHECK_INTERVAL (180 * HZ) // 每180秒检查一次
 #define ZRAM_AUTO_WRITEBACK_LIMIT_PAGES (64UL * 1024 * 1024 / PAGE_SIZE)
+#define ZRAM_IDLE_SCAN_SIZE_PAGES (512UL * 1024 * 1024 / PAGE_SIZE)
 
 static struct task_struct *monitor_thread;
 static struct task_struct *auto_writeback_thread;
@@ -197,7 +199,8 @@ static void zram_clear_flag(struct zram *zram, u32 index,
 #define ZRAM_TEMP_BITS_MASK \
 	(BIT(ZRAM_TEMP_0) | BIT(ZRAM_TEMP_1) | BIT(ZRAM_TEMP_2))
 #define ZRAM_TEMP_MAX 7U
-#define ZRAM_TEMP_INC_READ 2U
+#define ZRAM_TEMP_INC_READ 4U
+#define ZRAM_TEMP_INIT_WRITE 4U
 
 static inline unsigned int zram_get_temp_from_flags(unsigned long flags)
 {
@@ -362,9 +365,6 @@ static void zram_accessed(struct zram *zram, u32 index)
 #endif
 	zram_clear_flag(zram, index, ZRAM_IDLE);
 	zram_clear_flag(zram, index, ZRAM_PP_SLOT);
-#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
-	zram->table[index].ac_time = ktime_get_boottime();
-#endif
 }
 
 #if defined CONFIG_ZRAM_WRITEBACK || defined CONFIG_ZRAM_MULTI_COMP
@@ -446,6 +446,9 @@ static bool place_pp_slot(struct zram *zram, struct zram_pp_ctl *ctl,
 	return true;
 }
 
+static bool zram_writeback_mode_match_locked(struct zram *zram, u32 index,
+					     u32 mode);
+
 static bool zram_writeback_candidate_locked(struct zram *zram, u32 index,
 					    u32 mode)
 {
@@ -465,21 +468,7 @@ static bool zram_writeback_candidate_locked(struct zram *zram, u32 index,
 		return false;
 	}
 
-	if (mode & IDLE_WRITEBACK) {
-		if (!zram_test_flag(zram, index, ZRAM_IDLE))
-			return false;
-		if (!zram_test_flag(zram, index, ZRAM_PAGE_ANON))
-			return false;
-	}
-
-	if ((mode & HUGE_WRITEBACK) &&
-	    !zram_test_flag(zram, index, ZRAM_HUGE))
-		return false;
-	if ((mode & INCOMPRESSIBLE_WRITEBACK) &&
-	    !zram_test_flag(zram, index, ZRAM_INCOMPRESSIBLE))
-		return false;
-
-	return true;
+	return zram_writeback_mode_match_locked(zram, index, mode);
 }
 
 static bool zram_writeback_mode_match_locked(struct zram *zram, u32 index,
@@ -608,6 +597,9 @@ static int scan_slots_for_writeback_lru(struct zram *zram, u32 mode,
 	unsigned int i;
 
 	for (;;) {
+		if (unlikely(freezing(current)))
+			break;
+
 		nr_to_walk = list_lru_count(&zram->zram_list_lru);
 		if (!nr_to_walk)
 			break;
@@ -618,6 +610,12 @@ static int scan_slots_for_writeback_lru(struct zram *zram, u32 mode,
 			      &ctx, nr_to_walk);
 
 		for (i = 0; i < ctx.nr_collected; i++) {
+			if (unlikely(freezing(current))) {
+				while (i < ctx.nr_collected)
+					clear_marked_pp_slot(zram, ctx.indexes[i++]);
+				return 0;
+			}
+
 			if (!place_marked_pp_slot(zram, ctl, ctx.indexes[i], mode)) {
 				while (++i < ctx.nr_collected)
 					clear_marked_pp_slot(zram, ctx.indexes[i]);
@@ -683,6 +681,19 @@ static bool page_same_filled(void *ptr, unsigned long *element)
 	return true;
 }
 
+static inline void zram_set_page_type_flags(struct zram *zram, u32 index,
+					    struct page *page)
+{
+	if (PageAnon(page)) {
+		zram_set_flag(zram, index, ZRAM_PAGE_ANON);
+		return;
+	}
+
+	zram_set_flag(zram, index, ZRAM_PAGE_FILE);
+	if (PageDirty(page) || PageWriteback(page))
+		zram_set_flag(zram, index, ZRAM_PAGE_DIRTY);
+}
+
 static ssize_t initstate_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
@@ -743,63 +754,10 @@ static ssize_t mem_used_max_store(struct device *dev,
 	return len;
 }
 
-/*
- * Mark all pages which are older than or equal to cutoff as IDLE.
- * Callers should hold the zram init lock in read mode
- */
-static void mark_idle(struct zram *zram, ktime_t cutoff)
-{
-	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
-	int index;
-
-	for (index = 0; index < nr_pages; index++) {
-		/*
-		 * Do not mark ZRAM_SAME slots as ZRAM_IDLE, because no
-		 * post-processing (recompress, writeback) happens to the
-		 * ZRAM_SAME slot.
-		 *
-		 * And ZRAM_WB slots simply cannot be ZRAM_IDLE.
-		 */
-		zram_slot_lock(zram, index);
-		if (!zram_allocated(zram, index) ||
-		    zram_test_flag(zram, index, ZRAM_WB) ||
-		    zram_test_flag(zram, index, ZRAM_SAME)) {
-			zram_slot_unlock(zram, index);
-			continue;
-		}
-
-#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
-		if (!cutoff || ktime_after(cutoff, zram->table[index].ac_time)) {
-			if (!zram_test_flag(zram, index, ZRAM_IDLE)) {
-				zram_set_flag(zram, index, ZRAM_IDLE);
-				/* Add to LRU list for shrinker */
-				zram_lru_add(zram, &zram->table[index]);
-			}
-		} else {
-			/* Page was accessed recently, make sure it's not marked as IDLE */
-			if (zram_test_flag(zram, index, ZRAM_IDLE)) {
-				zram_clear_flag(zram, index, ZRAM_IDLE);
-				zram_lru_del(zram, &zram->table[index]);
-			}
-		}
-#else
-		/* When access time tracking is disabled, we only mark pages as IDLE
-		 * if they are not already marked. This prevents re-adding pages
-		 * to the LRU list unnecessarily.
-		 */
-		if (!zram_test_flag(zram, index, ZRAM_IDLE)) {
-			zram_set_flag(zram, index, ZRAM_IDLE);
-			/* Add to LRU list for shrinker */
-			zram_lru_add(zram, &zram->table[index]);
-		}
-#endif
-		zram_slot_unlock(zram, index);
-	}
-}
-
-static void mark_idle_range(struct zram *zram, ktime_t cutoff,
+static void mark_idle_slots(struct zram *zram, ktime_t cutoff,
 			    unsigned long start, unsigned long nr_scan)
 {
+	(void)cutoff;
 	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
 	unsigned long i;
 
@@ -809,6 +767,9 @@ static void mark_idle_range(struct zram *zram, ktime_t cutoff,
 	for (i = 0; i < nr_scan; i++) {
 		unsigned long index = (start + i) % nr_pages;
 
+		if (unlikely(freezing(current)))
+			break;
+
 		/*
 		 * Do not mark ZRAM_SAME slots as ZRAM_IDLE, because no
 		 * post-processing (recompress, writeback) happens to the
@@ -824,21 +785,6 @@ static void mark_idle_range(struct zram *zram, ktime_t cutoff,
 			continue;
 		}
 
-#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
-		if (!cutoff || ktime_after(cutoff, zram->table[index].ac_time)) {
-			if (!zram_test_flag(zram, index, ZRAM_IDLE)) {
-				zram_set_flag(zram, index, ZRAM_IDLE);
-				/* Add to LRU list for shrinker */
-				zram_lru_add(zram, &zram->table[index]);
-			}
-		} else {
-			/* Page was accessed recently, make sure it's not marked as IDLE */
-			if (zram_test_flag(zram, index, ZRAM_IDLE)) {
-				zram_clear_flag(zram, index, ZRAM_IDLE);
-				zram_lru_del(zram, &zram->table[index]);
-			}
-		}
-#else
 		/* When access time tracking is disabled, we only mark pages as IDLE
 		 * if they are not already marked. This prevents re-adding pages
 		 * to the LRU list unnecessarily.
@@ -848,41 +794,39 @@ static void mark_idle_range(struct zram *zram, ktime_t cutoff,
 			/* Add to LRU list for shrinker */
 			zram_lru_add(zram, &zram->table[index]);
 		}
-#endif
 		zram_slot_unlock(zram, index);
 	}
+}
+
+/*
+ * Mark all pages which are older than or equal to cutoff as IDLE.
+ * Callers should hold the zram init lock in read mode
+ */
+static void mark_idle(struct zram *zram, ktime_t cutoff)
+{
+	mark_idle_slots(zram, cutoff, 0, zram->disksize >> PAGE_SHIFT);
+}
+
+static void mark_idle_range(struct zram *zram, ktime_t cutoff,
+			    unsigned long start, unsigned long nr_scan)
+{
+	mark_idle_slots(zram, cutoff, start, nr_scan);
 }
 
 static ssize_t idle_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t len)
 {
 	struct zram *zram = dev_to_zram(dev);
-	ktime_t cutoff_time = 0;
 	ssize_t rv = -EINVAL;
 
-	if (!sysfs_streq(buf, "all")) {
-		/*
-		 * If it did not parse as 'all' try to treat it as an integer
-		 * when we have memory tracking enabled.
-		 */
-		u64 age_sec;
-
-		if (IS_ENABLED(CONFIG_ZRAM_TRACK_ENTRY_ACTIME) && !kstrtoull(buf, 0, &age_sec))
-			cutoff_time = ktime_sub(ktime_get_boottime(),
-					ns_to_ktime(age_sec * NSEC_PER_SEC));
-		else
-			goto out;
-	}
+	if (!sysfs_streq(buf, "all"))
+		goto out;
 
 	down_read(&zram->init_lock);
 	if (!init_done(zram))
 		goto out_unlock;
 
-	/*
-	 * A cutoff_time of 0 marks everything as idle, this is the
-	 * "all" behavior.
-	 */
-	mark_idle(zram, cutoff_time);
+	mark_idle(zram, 0);
 	rv = len;
 
 out_unlock:
@@ -1140,6 +1084,9 @@ static int zram_writeback_slots(struct zram *zram, struct zram_pp_ctl *ctl,
 		struct zram_wb_request *req;
 		struct page *page;
 
+		if (unlikely(freezing(current)))
+			break;
+
 		if (max_pages && written >= max_pages)
 			break;
 
@@ -1283,6 +1230,9 @@ static int scan_slots_for_writeback(struct zram *zram, u32 mode,
 
 	while (index < hi) {
 		bool ok = true;
+
+		if (unlikely(freezing(current)))
+			break;
 
 		zram_slot_lock(zram, index);
 		if (!zram_writeback_candidate_locked(zram, index, mode))
@@ -1814,9 +1764,6 @@ void zram_free_page(struct zram *zram, size_t index)
 {
 	unsigned long handle;
 
-#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
-	zram->table[index].ac_time = 0;
-#endif
 	/* Remove from LRU list if present */
 	if (zram_test_flag(zram, index, ZRAM_IDLE))
 		zram_lru_del(zram, &zram->table[index]);
@@ -2001,15 +1948,8 @@ static int write_same_filled_page(struct zram *zram, unsigned long fill,
 	zram_slot_lock(zram, index);
 	zram_set_flag(zram, index, ZRAM_SAME);
 	zram_set_handle(zram, index, fill);
-
-	if (PageAnon(page)) {
-		zram_set_flag(zram, index, ZRAM_PAGE_ANON);
-	} else {
-		zram_set_flag(zram, index, ZRAM_PAGE_FILE);
-		/* 块层写入时常设 Writeback，因此两者需一并判断 */
-		if (PageDirty(page) || PageWriteback(page))
-			zram_set_flag(zram, index, ZRAM_PAGE_DIRTY);
-	}
+	zram_set_temp_locked(zram, index, ZRAM_TEMP_INIT_WRITE);
+	zram_set_page_type_flags(zram, index, page);
 	zram_accessed(zram, index);
 
 	zram_slot_unlock(zram, index);
@@ -2053,14 +1993,8 @@ static int write_incompressible_page(struct zram *zram, struct page *page,
 	zram_set_handle(zram, index, handle);
 	zram_set_obj_size(zram, index, PAGE_SIZE);
 	zram_set_priority(zram, index, prio);
-
-	if (PageAnon(page)) {
-		zram_set_flag(zram, index, ZRAM_PAGE_ANON);
-	} else {
-		zram_set_flag(zram, index, ZRAM_PAGE_FILE);
-		if (PageDirty(page) || PageWriteback(page))
-			zram_set_flag(zram, index, ZRAM_PAGE_DIRTY);
-	}
+	zram_set_temp_locked(zram, index, ZRAM_TEMP_INIT_WRITE);
+	zram_set_page_type_flags(zram, index, page);
 	zram_accessed(zram, index);
 
 	zram_slot_unlock(zram, index);
@@ -2157,14 +2091,9 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
 	zram_set_handle(zram, index, handle);
 	zram_set_obj_size(zram, index, comp_len);
 	zram_set_priority(zram, index, prio);
+	zram_set_temp_locked(zram, index, ZRAM_TEMP_INIT_WRITE);
 
-	if (PageAnon(page)) {
-		zram_set_flag(zram, index, ZRAM_PAGE_ANON);
-	} else {
-		zram_set_flag(zram, index, ZRAM_PAGE_FILE);
-		if (PageDirty(page) || PageWriteback(page))
-			zram_set_flag(zram, index, ZRAM_PAGE_DIRTY);
-	}
+	zram_set_page_type_flags(zram, index, page);
 	zram_accessed(zram, index);
 
 	zram_slot_unlock(zram, index);
@@ -2682,7 +2611,61 @@ static void zram_submit_bio(struct bio *bio)
 
 #ifdef CONFIG_ZRAM_WRITEBACK
 static DECLARE_WAIT_QUEUE_HEAD(auto_writeback_wq);
+static DECLARE_WAIT_QUEUE_HEAD(zram_monitor_wq);
 static atomic_t auto_writeback_pending = ATOMIC_INIT(0);
+
+static void zram_queue_auto_writeback(void)
+{
+	atomic_set(&auto_writeback_pending, 1);
+	wake_up(&auto_writeback_wq);
+}
+
+static bool zram_monitor_scan_device(struct zram *zram, bool *interrupted)
+{
+	unsigned long nr_pages;
+	unsigned long scan_pages;
+	unsigned long start;
+	bool scanned_idle = false;
+
+	down_read(&zram->init_lock);
+	if (unlikely(freezing(current)) || !init_done(zram))
+		goto out;
+
+	nr_pages = zram->disksize >> PAGE_SHIFT;
+	if (!nr_pages)
+		goto out;
+
+	scan_pages = min_t(unsigned long, nr_pages, ZRAM_IDLE_SCAN_SIZE_PAGES);
+
+	start = READ_ONCE(zram->idle_scan_cursor) % nr_pages;
+	mark_idle_range(zram, 0, start, scan_pages);
+	if (unlikely(freezing(current))) {
+		*interrupted = true;
+		goto out;
+	}
+
+	WRITE_ONCE(zram->idle_scan_cursor, (start + scan_pages) % nr_pages);
+	scanned_idle = true;
+
+out:
+	up_read(&zram->init_lock);
+	return scanned_idle;
+}
+
+static bool zram_monitor_wait(void)
+{
+	if (kthread_should_stop())
+		return true;
+
+	/*
+	 * Monitor runs periodically and has no external wakeup source, but it
+	 * still needs a TASK_FREEZABLE sleep so the freezer can stop it cleanly.
+	 */
+	wait_event_freezable_timeout(zram_monitor_wq,
+				     kthread_should_stop(),
+				     CHECK_INTERVAL);
+	return kthread_should_stop();
+}
 
 static unsigned long zram_auto_writeback(struct zram *zram,
 					 unsigned long max_pages)
@@ -2694,6 +2677,8 @@ static unsigned long zram_auto_writeback(struct zram *zram,
 
 	if (!zram || !zram->disk)
 		return 0;
+	if (unlikely(freezing(current)))
+		return 0;
 
 	down_read(&zram->init_lock);
 	if (!init_done(zram) || !zram->backing_dev) {
@@ -2702,6 +2687,11 @@ static unsigned long zram_auto_writeback(struct zram *zram,
 	}
 
 	if (atomic_xchg(&zram->pp_in_progress, 1)) {
+		up_read(&zram->init_lock);
+		return 0;
+	}
+	if (unlikely(freezing(current))) {
+		atomic_set(&zram->pp_in_progress, 0);
 		up_read(&zram->init_lock);
 		return 0;
 	}
@@ -2735,33 +2725,50 @@ static int auto_writeback_func(void *data)
 {
 	(void)data;
 
+	set_freezable();
+
 	while (!kthread_should_stop()) {
 		struct device *single_dev = NULL;
 		struct zram *single_zram = NULL;
 		int zram_ids[32];
 		int num_devs = 0;
+		bool requeue = false;
+
+		if (try_to_freeze())
+			continue;
 
 		wait_event_freezable(auto_writeback_wq,
 				     kthread_should_stop() ||
 				     atomic_read(&auto_writeback_pending));
 		if (kthread_should_stop())
 			break;
+		if (try_to_freeze())
+			continue;
 
-		while (atomic_xchg(&auto_writeback_pending, 0) &&
-		       !kthread_should_stop()) {
-			if (zram_get_single_device(&single_zram, &single_dev)) {
-				pr_info_ratelimited("zram auto writeback worker triggered by monitor (single-device fast path)\n");
-				zram_auto_writeback(single_zram,
-						    ZRAM_AUTO_WRITEBACK_LIMIT_PAGES);
-				put_device(single_dev);
-				cond_resched();
-				continue;
-			}
-
+		while (!kthread_should_stop()) {
 			unsigned long remaining_pages = ZRAM_AUTO_WRITEBACK_LIMIT_PAGES;
 			int id;
 			int i;
 			struct zram *zram;
+
+			if (!atomic_xchg(&auto_writeback_pending, 0))
+				break;
+
+			if (unlikely(freezing(current)))
+				requeue = true;
+			if (requeue)
+				break;
+
+			if (zram_get_single_device(&single_zram, &single_dev)) {
+				pr_info_ratelimited("zram auto writeback worker triggered by monitor (single-device fast path)\n");
+				zram_auto_writeback(single_zram,
+						    ZRAM_AUTO_WRITEBACK_LIMIT_PAGES);
+				if (unlikely(freezing(current)))
+					requeue = true;
+				put_device(single_dev);
+				cond_resched();
+				continue;
+			}
 
 			num_devs = 0;
 
@@ -2776,6 +2783,11 @@ static int auto_writeback_func(void *data)
 
 			for (i = 0; i < num_devs && !kthread_should_stop(); i++) {
 				struct device *dev;
+
+				if (unlikely(freezing(current))) {
+					requeue = true;
+					break;
+				}
 
 				rcu_read_lock();
 				zram = idr_find(&zram_index_idr, zram_ids[i]);
@@ -2794,9 +2806,19 @@ static int auto_writeback_func(void *data)
 				remaining_pages -= min(remaining_pages,
 						       zram_auto_writeback(zram, remaining_pages));
 				put_device(dev);
+				if (unlikely(freezing(current))) {
+					requeue = true;
+					break;
+				}
 				cond_resched();
 			}
+
+			if (requeue)
+				break;
 		}
+
+		if (requeue)
+			zram_queue_auto_writeback();
 	}
 
 	return 0;
@@ -2807,8 +2829,9 @@ static int monitor_func(void *data)
 	(void)data;
 	unsigned int scan_rounds = 0;
 
+	set_freezable();
+
 	while (!kthread_should_stop()) {
-		ktime_t cutoff_time;
 		struct device *single_dev = NULL;
 		struct zram *single_zram = NULL;
 		int zram_ids[32];
@@ -2816,41 +2839,33 @@ static int monitor_func(void *data)
 		int id;
 		int i;
 		struct zram *zram;
+		bool interrupted = false;
+		bool scanned_idle = false;
 
-#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
-		cutoff_time = ktime_sub(ktime_get_boottime(),
-					ns_to_ktime(600ULL * NSEC_PER_SEC));
-#else
-		cutoff_time = 0;
-#endif
+		if (try_to_freeze())
+			continue;
 
 		if (zram_get_single_device(&single_zram, &single_dev)) {
-			unsigned long nr_pages;
-			unsigned long scan_pages;
-			unsigned long start;
-
-			down_read(&single_zram->init_lock);
-			if (init_done(single_zram)) {
-				nr_pages = single_zram->disksize >> PAGE_SHIFT;
-				if (nr_pages) {
-					scan_pages = nr_pages / 8;
-					if (!scan_pages)
-						scan_pages = nr_pages;
-					start = READ_ONCE(single_zram->idle_scan_cursor) % nr_pages;
-					mark_idle_range(single_zram, cutoff_time, start, scan_pages);
-					WRITE_ONCE(single_zram->idle_scan_cursor,
-						   (start + scan_pages) % nr_pages);
-					if (++scan_rounds >= 4) {
-						scan_rounds = 0;
-						pr_info("zram monitor trigger writeback after 4 scans (single-device fast path)\n");
-						atomic_set(&auto_writeback_pending, 1);
-						wake_up(&auto_writeback_wq);
-					}
-				}
-			}
-			up_read(&single_zram->init_lock);
+			scanned_idle = zram_monitor_scan_device(single_zram,
+						      &interrupted);
 			put_device(single_dev);
-			schedule_timeout_interruptible(CHECK_INTERVAL);
+			if (interrupted) {
+				scan_rounds = 0;
+				continue;
+			}
+
+			if (scanned_idle) {
+				if (++scan_rounds >= 4) {
+					scan_rounds = 0;
+					pr_info("zram monitor trigger writeback after 4 scans (single-device fast path)\n");
+					zram_queue_auto_writeback();
+				}
+			} else {
+				scan_rounds = 0;
+			}
+
+			if (zram_monitor_wait())
+				break;
 			continue;
 		}
 
@@ -2862,10 +2877,12 @@ static int monitor_func(void *data)
 		mutex_unlock(&zram_index_mutex);
 
 		for (i = 0; i < num_devs && !kthread_should_stop(); i++) {
-			unsigned long nr_pages;
-			unsigned long scan_pages;
-			unsigned long start;
 			struct device *dev;
+
+			if (unlikely(freezing(current)))
+				interrupted = true;
+			if (interrupted)
+				break;
 
 			rcu_read_lock();
 			zram = idr_find(&zram_index_idr, zram_ids[i]);
@@ -2876,37 +2893,30 @@ static int monitor_func(void *data)
 			dev = disk_to_dev(zram->disk);
 			rcu_read_unlock();
 
-			down_read(&zram->init_lock);
-			if (init_done(zram)) {
-				nr_pages = zram->disksize >> PAGE_SHIFT;
-				if (nr_pages) {
-					scan_pages = nr_pages / 8;
-					if (!scan_pages)
-						scan_pages = nr_pages;
-					start = READ_ONCE(zram->idle_scan_cursor) % nr_pages;
-					mark_idle_range(zram, cutoff_time, start, scan_pages);
-					WRITE_ONCE(zram->idle_scan_cursor,
-						   (start + scan_pages) % nr_pages);
-				}
-			}
-			up_read(&zram->init_lock);
-
+			scanned_idle |= zram_monitor_scan_device(zram, &interrupted);
 			put_device(dev);
+			if (interrupted)
+				break;
 			cond_resched();
 		}
 
-		if (num_devs > 0) {
+		if (interrupted) {
+			scan_rounds = 0;
+			continue;
+		}
+
+		if (scanned_idle) {
 			if (++scan_rounds >= 4) {
 				scan_rounds = 0;
 				pr_info("zram monitor trigger writeback after 4 scans\n");
-				atomic_set(&auto_writeback_pending, 1);
-				wake_up(&auto_writeback_wq);
+				zram_queue_auto_writeback();
 			}
 		} else {
 			scan_rounds = 0;
 		}
 
-		schedule_timeout_interruptible(CHECK_INTERVAL);
+		if (zram_monitor_wait())
+			break;
 	}
 
 	return 0;

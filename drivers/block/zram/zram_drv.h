@@ -75,9 +75,6 @@ enum zram_pageflags {
 struct zram_table_entry {
 	unsigned long handle;
 	unsigned long flags;
-#ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
-	ktime_t ac_time;
-#endif
 #ifdef	CONFIG_ZRAM_WRITEBACK
 	struct list_head lru;
 	bool referenced;

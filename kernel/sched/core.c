@@ -11095,9 +11095,9 @@ static int cpu_cgroup_can_attach(struct cgroup_taskset *tset)
 #endif
 
 #ifdef CONFIG_HMBIRD_SCHED
-static inline void update_cgroup_ids_table(int ids, u8 hmbird_cgroup_deadline_idx)
+static inline void update_cgroup_ids_table(u64 ids, int hmbird_cgroup_deadline_idx)
 {
-	if (ids < 0 || ids >= NUMS_CGROUP_KINDS) {
+	if (ids >= NUMS_CGROUP_KINDS) {
 		pr_err("update_cgroup_ids_tab idx err!\n");
 		return;
 	}
@@ -11125,18 +11125,24 @@ static int cgroup_write_hmbird_deadline(struct cgroup_subsys_state *css,
 static u64 cgroup_read_hmbird_deadline(struct cgroup_subsys_state *css,
 						struct cftype *cft)
 {
-	u8 i;
+	u64 id;
+	int idx;
 
 	if (!css || !css->cgroup || !css->cgroup->kn)
-		return (u64) HMBIRD_BPF_DSQS_DEADLINE[DEFAULT_CGROUP_DL_IDX];
-	i = min_t(u8, cgroup_ids_table[css->cgroup->kn->id], MAX_GLOBAL_DSQS-1);
-	if (i < 0) {
-		pr_err("<sched_ext> <%s> i is %d, less than 0, name is %s\n",
-			__func__, i, css->cgroup->kn->name);
-		i = DEFAULT_CGROUP_DL_IDX;
+		return HMBIRD_BPF_DSQS_DEADLINE[DEFAULT_CGROUP_DL_IDX];
+
+	id = css->cgroup->kn->id;
+	if (id >= NUMS_CGROUP_KINDS)
+		return HMBIRD_BPF_DSQS_DEADLINE[DEFAULT_CGROUP_DL_IDX];
+
+	idx = cgroup_ids_table[id];
+	if (idx < 0 || idx >= MAX_GLOBAL_DSQS) {
+		pr_err("<sched_ext> <%s> idx is %d, invalid, name is %s\n",
+		       __func__, idx, css->cgroup->kn->name);
+		idx = DEFAULT_CGROUP_DL_IDX;
 	}
 
-	return (u64) HMBIRD_BPF_DSQS_DEADLINE[i];
+	return HMBIRD_BPF_DSQS_DEADLINE[idx];
 }
 
 static void hmbird_change_rt_sched_prop(struct cgroup_subsys_state *css,

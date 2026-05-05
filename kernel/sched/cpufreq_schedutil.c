@@ -176,22 +176,29 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
 				  unsigned long util, unsigned long max)
 {
 	struct cpufreq_policy *policy = sg_policy->policy;
-	unsigned int freq;
-	unsigned long next_freq = 0;
-	freq = get_capacity_ref_freq(policy);
+	unsigned int ref_freq;
+	unsigned long override_freq = 0;
+	unsigned long raw_freq;
+	unsigned int resolved_freq;
 
-	trace_android_vh_map_util_freq(util, freq, max, &next_freq, policy,
-			&sg_policy->need_freq_update);
-	if (next_freq)
-		freq = next_freq;
-	else
-		freq = map_util_freq(util, freq, max);
-
-	if (freq == sg_policy->cached_raw_freq && !sg_policy->need_freq_update)
+	if (unlikely(!max))
 		return sg_policy->next_freq;
 
-	sg_policy->cached_raw_freq = freq;
-	return cpufreq_driver_resolve_freq(policy, freq);
+	ref_freq = get_capacity_ref_freq(policy);
+
+	trace_android_vh_map_util_freq(util, ref_freq, max, &override_freq, policy,
+			&sg_policy->need_freq_update);
+	raw_freq = override_freq ? override_freq :
+		map_util_freq(util, ref_freq, max);
+
+	if (raw_freq == sg_policy->cached_raw_freq &&
+	    !sg_policy->need_freq_update)
+		return sg_policy->next_freq;
+
+	resolved_freq = cpufreq_driver_resolve_freq(policy, raw_freq);
+	sg_policy->cached_raw_freq = raw_freq;
+
+	return resolved_freq;
 }
 
 unsigned long sugov_effective_cpu_perf(int cpu, unsigned long actual,

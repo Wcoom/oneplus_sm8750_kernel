@@ -379,6 +379,7 @@ static struct zram_pp_ctl *init_pp_ctl(void)
 
 	init_completion(&ctl->all_done);
 	atomic_set(&ctl->num_pp_slots, 0);
+	ctl->highest_pp_bucket = -1;
 	for (idx = 0; idx < NUM_PP_BUCKETS; idx++)
 		INIT_LIST_HEAD(&ctl->pp_buckets[idx]);
 	return ctl;
@@ -440,6 +441,8 @@ static bool place_pp_slot(struct zram *zram, struct zram_pp_ctl *ctl,
 
 	bid = zram_get_obj_size(zram, pps->index) / PP_BUCKET_SIZE_RANGE;
 	list_add(&pps->entry, &ctl->pp_buckets[bid]);
+	if ((s32)bid > ctl->highest_pp_bucket)
+		ctl->highest_pp_bucket = bid;
 
 	zram_set_flag(zram, pps->index, ZRAM_PP_SLOT);
 	atomic_inc(&ctl->num_pp_slots);
@@ -571,6 +574,8 @@ static bool place_marked_pp_slot(struct zram *zram, struct zram_pp_ctl *ctl,
 	INIT_LIST_HEAD(&pps->entry);
 	pps->index = index;
 	list_add(&pps->entry, &ctl->pp_buckets[bid]);
+	if ((s32)bid > ctl->highest_pp_bucket)
+		ctl->highest_pp_bucket = bid;
 	atomic_inc(&ctl->num_pp_slots);
 	return true;
 }
@@ -636,18 +641,22 @@ static int scan_slots_for_writeback_lru(struct zram *zram, u32 mode,
 static struct zram_pp_slot *select_pp_slot(struct zram_pp_ctl *ctl)
 {
 	struct zram_pp_slot *pps = NULL;
-	s32 idx = NUM_PP_BUCKETS - 1;
+	s32 idx = ctl->highest_pp_bucket;
 
 	/* The higher the bucket id the more optimal slot post-processing is */
 	while (idx >= 0) {
 		pps = list_first_entry_or_null(&ctl->pp_buckets[idx],
 					       struct zram_pp_slot,
 					       entry);
-		if (pps)
+		if (pps) {
+			ctl->highest_pp_bucket = idx;
 			break;
+		}
 
 		idx--;
 	}
+	if (!pps)
+		ctl->highest_pp_bucket = -1;
 	return pps;
 }
 #endif
@@ -1090,13 +1099,15 @@ static int zram_writeback_slots(struct zram *zram, struct zram_pp_ctl *ctl,
 		if (max_pages && written >= max_pages)
 			break;
 
-		spin_lock(&zram->wb_limit_lock);
-		if (zram->wb_limit_enable && !zram->bd_wb_limit) {
+		if (READ_ONCE(zram->wb_limit_enable)) {
+			spin_lock(&zram->wb_limit_lock);
+			if (zram->wb_limit_enable && !zram->bd_wb_limit) {
+				spin_unlock(&zram->wb_limit_lock);
+				ret = -EIO;
+				break;
+			}
 			spin_unlock(&zram->wb_limit_lock);
-			ret = -EIO;
-			break;
 		}
-		spin_unlock(&zram->wb_limit_lock);
 
 		if (!blk_idx) {
 			blk_idx = alloc_block_bdev(zram);
@@ -1887,25 +1898,30 @@ static int zram_read_page(struct zram *zram, struct page *page, u32 index,
 {
 	int ret;
 	bool from_wb;
+	unsigned long wb_handle = 0;
 
 	zram_slot_lock(zram, index);
 	from_wb = zram_test_flag(zram, index, ZRAM_WB);
 	if (!from_wb) {
 		/* Slot should be locked through out the function call */
 		ret = zram_read_from_zspool(zram, page, index);
+		if (!ret) {
+			zram_raise_temp_locked(zram, index, ZRAM_TEMP_INC_READ);
+			zram_accessed(zram, index);
+		}
 		zram_slot_unlock(zram, index);
 	} else {
 		/*
 		 * The slot should be unlocked before reading from the backing
 		 * device.
 		 */
+		wb_handle = zram_get_handle(zram, index);
 		zram_slot_unlock(zram, index);
 
-		ret = read_from_bdev(zram, page, zram_get_handle(zram, index),
-				     parent);
+		ret = read_from_bdev(zram, page, wb_handle, parent);
 	}
 
-	if (!ret)
+	if (!ret && from_wb)
 		zram_promote_accessed(zram, index, from_wb);
 
 	/* Should NEVER happen. Return bio error if it does. */
@@ -1977,7 +1993,6 @@ static int write_incompressible_page(struct zram *zram, struct page *page,
 		return PTR_ERR((void *)handle);
 
 	if (!zram_can_store_page(zram)) {
-		zcomp_stream_put(zram->comps[ZRAM_PRIMARY_COMP]);
 		zs_free(zram->mem_pool, handle);
 		return -ENOMEM;
 	}
@@ -2027,23 +2042,23 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
 	zram_slot_unlock(zram, index);
 
 
-	mem = kmap_atomic(page);
+	mem = kmap_local_page(page);
 	same_filled = page_same_filled(mem, &element);
-	kunmap_atomic(mem);
-	if (same_filled)
+	if (same_filled) {
+		kunmap_local(mem);
 		return write_same_filled_page(zram, element, index, page);
+	}
 
 	for (prio = ZRAM_PRIMARY_COMP; prio < prio_max; prio++) {
 		if (!zram->comps[prio])
 			continue;
 
 		zstrm = zcomp_stream_get(zram->comps[prio]);
-		mem = kmap_local_page(page);
 		ret = zcomp_compress(zstrm, mem, &comp_len);
-		kunmap_local(mem);
 
 		if (unlikely(ret)) {
 			pr_err("Compression failed! err=%d\n", ret);
+			kunmap_local(mem);
 			goto out;
 		}
 
@@ -2053,6 +2068,7 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
 		zcomp_stream_put(zram->comps[prio]);
 		zstrm = NULL;
 	}
+	kunmap_local(mem);
 
 	if (!zstrm) {
 		if (prio >= zram->num_active_comps) {

@@ -194,6 +194,7 @@ struct zram_pp_ctl {
 	struct list_head	pp_buckets[NUM_PP_BUCKETS];
 	struct completion	all_done;
 	atomic_t		num_pp_slots;
+	s32			highest_pp_bucket;
 };
 
 void free_pp_slot(struct zram *zram, struct zram_pp_slot *pps);

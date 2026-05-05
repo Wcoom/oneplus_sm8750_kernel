@@ -58,6 +58,7 @@ static void complete_wb_request(struct zram_wb_request *req)
 	unsigned long index = pps->index;
 	unsigned long blk_idx = req->blk_idx;
 	struct bio *bio = req->bio;
+	bool wb_limit_consumed = false;
 
 	if (bio->bi_status)
 		goto out_err;
@@ -82,11 +83,15 @@ static void complete_wb_request(struct zram_wb_request *req)
 	zram_set_flag(zram, index, ZRAM_WB);
 	zram_set_handle(zram, index, blk_idx);
 	atomic64_inc(&zram->stats.pages_stored);
-	spin_lock(&zram->wb_limit_lock);
-	if (zram->wb_limit_enable && zram->bd_wb_limit > 0)
-		zram->bd_wb_limit -=  1UL << (PAGE_SHIFT - 12);
-	spin_unlock(&zram->wb_limit_lock);
+	wb_limit_consumed = true;
 	zram_slot_unlock(zram, index);
+
+	if (wb_limit_consumed) {
+		spin_lock(&zram->wb_limit_lock);
+		if (zram->wb_limit_enable && zram->bd_wb_limit > 0)
+			zram->bd_wb_limit -= 1UL << (PAGE_SHIFT - 12);
+		spin_unlock(&zram->wb_limit_lock);
+	}
 	goto end;
 
 out_err:

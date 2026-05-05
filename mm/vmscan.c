@@ -2851,7 +2851,8 @@ unsigned long shrink_inactive_list(unsigned long nr_to_scan,
 			return SWAP_CLUSTER_MAX;
 	}
 
-	lru_add_drain();
+	if (!current_is_kswapd())
+		lru_add_drain();
 
 	spin_lock_irq(&lruvec->lru_lock);
 
@@ -2963,7 +2964,9 @@ static void shrink_active_list(unsigned long nr_to_scan,
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
 	int should_protect = 0;
 	bool bypass = false;
-	lru_add_drain();
+
+	if (!current_is_kswapd())
+		lru_add_drain();
 
 	spin_lock_irq(&lruvec->lru_lock);
 
@@ -3427,6 +3430,12 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
 	anon_cost = total_cost + sc->anon_cost;
 	file_cost = total_cost + sc->file_cost;
 	total_cost = anon_cost + file_cost;
+
+	if (sc->may_swap && total_cost && sc->file_cost &&
+	    sc->anon_cost < sc->file_cost / 3) {
+		anon_cost = anon_cost * 3 / 5;
+		total_cost = anon_cost + file_cost;
+	}
 
 	ap = swappiness * (total_cost + 1);
 	ap /= anon_cost + 1;
@@ -5723,8 +5732,10 @@ retry:
 			scanned, reclaimed, &stat, sc->priority,
 			type ? LRU_INACTIVE_FILE : LRU_INACTIVE_ANON);
 
+	/* Pre-compute min_seq outside the loop: values won't change during iteration */
+	DEFINE_MIN_SEQ(lruvec);
+
 	list_for_each_entry_safe_reverse(folio, next, &list, lru) {
-		DEFINE_MIN_SEQ(lruvec);
 		bool bypass = false;
 
 		trace_android_vh_evict_folios_bypass(folio, &bypass);
@@ -6050,7 +6061,8 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 	VM_WARN_ON_ONCE(root_reclaim(sc));
 	VM_WARN_ON_ONCE(!sc->may_writepage || !sc->may_unmap);
 
-	lru_add_drain();
+	if (!current_is_kswapd())
+		lru_add_drain();
 
 	blk_start_plug(&plug);
 
@@ -6093,7 +6105,8 @@ static void lru_gen_shrink_node(struct pglist_data *pgdat, struct scan_control *
 	if (!sc->may_writepage || !sc->may_unmap)
 		goto done;
 
-	lru_add_drain();
+	if (!current_is_kswapd())
+		lru_add_drain();
 
 	blk_start_plug(&plug);
 
@@ -7766,6 +7779,9 @@ static void kswapd_age_node(struct pglist_data *pgdat, struct scan_control *sc)
 	if (!inactive_is_low(lruvec, LRU_INACTIVE_ANON))
 		return;
 
+	if (!lruvec_lru_size(lruvec, LRU_ACTIVE_ANON, MAX_NR_ZONES - 1))
+		return;
+
 	memcg = mem_cgroup_iter(NULL, NULL, NULL);
 	do {
 		lruvec = mem_cgroup_lruvec(memcg, pgdat);
@@ -8004,6 +8020,7 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int highest_zoneidx)
 	set_task_reclaim_state(current, &sc.reclaim_state);
 	psi_memstall_enter(&pflags);
 	__fs_reclaim_acquire(_THIS_IP_);
+	lru_add_drain();
 
 	count_vm_event(PAGEOUTRUN);
 

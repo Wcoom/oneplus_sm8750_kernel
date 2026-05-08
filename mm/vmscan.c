@@ -1623,15 +1623,8 @@ static int __remove_mapping(struct address_space *mapping, struct folio *folio,
 		 * same address_space.
 		 */
 		if (reclaimed && folio_is_file_lru(folio) &&
-		    !mapping_exiting(mapping) && !dax_mapping(mapping)) {
-			bool keep = false;
-
-			trace_android_vh_keep_reclaimed_folio(folio, refcount, &keep);
-			if (keep)
-				goto cannot_free;
+		   !mapping_exiting(mapping) && !dax_mapping(mapping))
 			shadow = workingset_eviction(folio, target_memcg);
-		}
-		trace_android_vh_clear_reclaimed_folio(folio, reclaimed);
 		__filemap_remove_folio(folio, shadow);
 		xa_unlock_irq(&mapping->i_pages);
 		if (mapping_shrinkable(mapping))
@@ -5736,12 +5729,6 @@ retry:
 	DEFINE_MIN_SEQ(lruvec);
 
 	list_for_each_entry_safe_reverse(folio, next, &list, lru) {
-		bool bypass = false;
-
-		trace_android_vh_evict_folios_bypass(folio, &bypass);
-		if (bypass)
-			continue;
-
 		if (!folio_evictable(folio)) {
 			list_del(&folio->lru);
 			folio_putback_lru(folio);
@@ -5834,6 +5821,8 @@ static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
  */
 static long get_nr_to_scan(struct lruvec *lruvec, struct scan_control *sc, int swappiness)
 {
+	bool bypass = false;
+	bool young = false;
 	unsigned long nr_to_scan;
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
 	DEFINE_MAX_SEQ(lruvec);
@@ -5848,6 +5837,11 @@ static long get_nr_to_scan(struct lruvec *lruvec, struct scan_control *sc, int s
 	if (sc->priority == DEF_PRIORITY)
 		return nr_to_scan;
 
+	trace_android_vh_mglru_aging_bypass(lruvec, max_seq,
+		swappiness, &bypass, &young);
+	if (bypass)
+		return young ? -1 : 0;
+
 	/* skip this lruvec as it's low on cold folios */
 	return try_to_inc_max_seq(lruvec, max_seq, sc, swappiness, false) ? -1 : 0;
 }
@@ -5858,9 +5852,8 @@ static bool should_abort_scan(struct lruvec *lruvec, struct scan_control *sc)
 	enum zone_watermarks mark;
 	bool bypass = false;
 
-#ifdef CONFIG_ANDROID_VENDOR_OEM_DATA
-	trace_android_vh_mglru_should_abort_scan(&sc->android_vendor_data1, &bypass);
-#endif
+	trace_android_vh_mglru_should_abort_scan(sc->nr_reclaimed,
+		sc->nr_to_reclaim, sc->order, &bypass);
 	/* don't abort memcg reclaim to ensure fairness */
 	if (!root_reclaim(sc) && !bypass)
 		return false;
@@ -7934,7 +7927,6 @@ static bool kswapd_shrink_node(pg_data_t *pgdat,
 
 		sc->nr_to_reclaim += max(high_wmark_pages(zone), SWAP_CLUSTER_MAX);
 	}
-	trace_android_rvh_kswapd_shrink_node(&sc->nr_to_reclaim);
 
 	/*
 	 * Historically care was taken to put equal pressure on all zones but

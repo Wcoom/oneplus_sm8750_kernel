@@ -85,11 +85,16 @@ DECLARE_HOOK(android_vh_file_is_tiny_bypass,
 	TP_PROTO(bool file_is_tiny, bool *bypass),
 	TP_ARGS(file_is_tiny, bypass));
 DECLARE_HOOK(android_vh_mglru_should_abort_scan,
-	TP_PROTO(u64 *ext, bool *bypass),
-	TP_ARGS(ext, bypass));
+	TP_PROTO(unsigned long nr_reclaimed, unsigned long nr_to_reclaim,
+	unsigned int order, bool *bypass),
+	TP_ARGS(nr_to_reclaim, nr_reclaimed, order, bypass));
 DECLARE_HOOK(android_vh_mglru_should_abort_scan_order,
 	TP_PROTO(unsigned int order, bool *bypass),
 	TP_ARGS(order, bypass));
+DECLARE_HOOK(android_vh_mglru_aging_bypass,
+	TP_PROTO(struct lruvec *lruvec, unsigned long max_seq,
+	int swappiness, bool *bypass, bool *young),
+	TP_ARGS(lruvec, max_seq, swappiness, bypass, young));
 DECLARE_HOOK(android_vh_rebalance_anon_lru_bypass,
 	TP_PROTO(bool *bypass),
 	TP_ARGS(bypass));

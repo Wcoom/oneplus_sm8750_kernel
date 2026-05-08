@@ -1640,7 +1640,6 @@ void folio_remove_rmap_ptes(struct folio *folio, struct page *page,
 {
 	__folio_remove_rmap(folio, page, nr_pages, vma, RMAP_LEVEL_PTE);
 
-	trace_android_vh_folio_remove_rmap_ptes(folio);
 }
 
 /**

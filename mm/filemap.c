@@ -3441,8 +3441,6 @@ retry_find:
 		}
 	}
 
-	trace_android_vh_filemap_fault_pre_folio_locked(folio);
-
 	if (!lock_folio_maybe_drop_mmap(vmf, folio, &fpin))
 		goto out_retry;
 
@@ -3734,7 +3732,6 @@ vm_fault_t filemap_map_pages(struct vm_fault *vmf,
 		last_pgoff = xas.xa_index;
 		end = folio->index + folio_nr_pages(folio) - 1;
 		nr_pages = min(end, end_pgoff) - xas.xa_index + 1;
-		trace_android_vh_filemap_pages(folio);
 
 		if (!folio_test_large(folio))
 			ret |= filemap_map_order0_folio(vmf,
@@ -3745,7 +3742,6 @@ vm_fault_t filemap_map_pages(struct vm_fault *vmf,
 					nr_pages, &mmap_miss);
 
 		folio_unlock(folio);
-		trace_android_vh_filemap_folio_mapped(folio);
 		folio_put(folio);
 	} while ((folio = next_uptodate_folio(&xas, mapping, end_pgoff)) != NULL);
 	pte_unmap_unlock(vmf->pte, vmf->ptl);

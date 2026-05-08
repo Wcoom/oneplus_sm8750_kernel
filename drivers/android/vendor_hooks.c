@@ -703,3 +703,4 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_folio_remove_rmap);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_mm_get_zone_mark);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_folios_put_refs_direct_free_extent);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_free_pages_and_swap_cache);
+EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_swap_bio_charge);

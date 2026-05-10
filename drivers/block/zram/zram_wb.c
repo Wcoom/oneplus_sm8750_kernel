@@ -6,6 +6,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/blkdev.h>
+#include <linux/sched.h>
 
 #include "zram_wb.h"
 
@@ -151,6 +152,7 @@ static void destroy_wb_request_list(struct zram_wb_request_list *req_list)
 static void zram_wb_work(struct work_struct *work)
 {
 	struct zram *zram = container_of(work, struct zram, wb_work);
+	unsigned int completed = 0;
 
 	while (1) {
 		struct zram_wb_request *req;
@@ -159,6 +161,8 @@ static void zram_wb_work(struct work_struct *work)
 		if (!req)
 			break;
 		complete_wb_request(req);
+		if (!(++completed & 0x3f))
+			cond_resched();
 	}
 }
 
@@ -233,14 +237,16 @@ int setup_zram_writeback(void)
 	 * 初始化 bioset:
 	 * - pool_size: 64,预分配的 bio 数量,用于减少分配开销
 	 * - front_pad: ZRAM_WB_FRONT_PAD,在每个 bio 之前预留空间
-	 * - flags: BIOSET_NEED_BVECS,需要 bio vecs 支持
-	 * 
+	 * - flags: BIOSET_NEED_BVECS,需要 bio vecs 支持; BIOSET_NEED_RESCUER,
+	 *   避免 stacked block device 路径在内存压力下陷入 bio 分配等待
+	 *
 	 * 参考 dm-table.c 的做法,使用 front_pad 可以:
 	 * 1. 避免为 zram_wb_request 单独分配内存
 	 * 2. 提高缓存局部性(request 和 bio 内存连续)
 	 * 3. 简化内存管理(一起分配一起释放)
 	 */
-	if (bioset_init(&zram_wb_bs, 64, ZRAM_WB_FRONT_PAD, BIOSET_NEED_BVECS)) {
+	if (bioset_init(&zram_wb_bs, 64, ZRAM_WB_FRONT_PAD,
+			BIOSET_NEED_BVECS | BIOSET_NEED_RESCUER)) {
 		pr_err("Unable to init zram_wb_bs\n");
 		return -1;
 	}

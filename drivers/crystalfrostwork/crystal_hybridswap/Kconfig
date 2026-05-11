@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: GPL-2.0
+
+config CRYSTAL_HYBRIDSWAP
+	tristate "Crystal Hybridswap zram replacement framework"
+	depends on BLOCK && SYSFS && MMU
+	depends on ZRAM=n
+	depends on MEMCG
+	depends on CGROUPS
+	depends on CRYPTO_LZO || CRYPTO_LZ4 || CRYPTO_LZ4HC || CRYPTO_LZ4K || CRYPTO_LZ4KD || CRYPTO_DEFLATE || CRYPTO_842 || CRYPTO_ZSTD
+	select EVENTFD
+	select ZSMALLOC
+	select CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
+	help
+	  Build the Crystal Hybridswap rewrite compatibility framework with
+	  its own zram ABI-compatible block driver/data plane.  This option
+	  conflicts with CONFIG_ZRAM because it registers the zram block
+	  device, zram-control class, and zram sysfs ABI itself.  It still
+	  intentionally avoids the old extent/rmap/synchronous fault-out data
+	  path.  Swapout requests are routed through zram page writeback;
+	  zram handles per-slot readback on fault.
+
+config CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS
+	bool "Expose legacy empty Crystal Hybridswap compatibility APIs"
+	depends on CRYSTAL_HYBRIDSWAP
+	default n
+	help
+	  Expose compatibility-only Crystal Hybridswap ABI files that currently
+	  do not provide functional behavior and are kept solely for old
+	  userspace.  This includes memory.aging_anon, memory.swapd_pid,
+	  memory.psi, memory.ub_ufs2zram_ratio and the zram max_comp_streams
+	  no-op sysfs attribute.  Leave this disabled unless old userspace
+	  explicitly depends on these placeholder files.  Enabling it does not
+	  restore the old OPPO extent/rmap/fault-out data path and does not wire
+	  these placeholder APIs into the core policy.
+
+config CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
+	bool "zram writeback support for Crystal Hybridswap"
+	depends on CRYSTAL_HYBRIDSWAP
+	default y
+	help
+	  Keep the upstream zram backing_dev/writeback/read_from_bdev page-level
+	  mechanism inside the private zram driver.  This is required by
+	  the migrated hybridswap data path so force_swapout and automatic
+	  policy writeback can move idle or incompressible zram pages to the
+	  configured backing device without reintroducing the old extent data
+	  plane.
+
+config CRYSTAL_HYBRIDSWAP_ZRAM_TRACK_ENTRY_ACTIME
+	bool "Track zram entry access time for Crystal Hybridswap"
+	depends on CRYSTAL_HYBRIDSWAP
+	default y
+	help
+	  Track per-entry access time so idle writeback can use age-based idle
+	  marking like upstream zram.  Crystal Hybridswap uses this to preserve
+	  the legacy policy knobs while keeping readback at the zram slot/page
+	  layer instead of exposing an external extent fault-out interface.
+
+config CRYSTAL_HYBRIDSWAP_ZRAM_MEMORY_TRACKING
+	bool "Track zram block state for Crystal Hybridswap"
+	depends on CRYSTAL_HYBRIDSWAP && DEBUG_FS
+	select CRYSTAL_HYBRIDSWAP_ZRAM_TRACK_ENTRY_ACTIME
+	help
+	  Expose zram debugfs block_state information under the zram debugfs
+	  root.  The directory and per-device names intentionally match upstream
+	  zram debugfs naming, while the Kconfig conflict with CONFIG_ZRAM
+	  prevents both providers from registering the same debugfs ABI.
+
+config CRYSTAL_HYBRIDSWAP_ZRAM_MULTI_COMP
+	bool "Enable multiple compression streams for zram replacement"
+	depends on CRYSTAL_HYBRIDSWAP
+	help
+	  Enable upstream zram-style secondary recompression streams in the
+	  private zram driver.  This keeps the standard zram
+	  recomp_algorithm and recompress sysfs attributes available when the
+	  extra compressors are configured, without changing the userspace ABI
+	  away from zram.
+
+config CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP
+	string "Default Crystal Hybridswap zram compressor"
+	depends on CRYSTAL_HYBRIDSWAP
+	default "lz4kd" if CRYPTO_LZ4KD
+	default "lz4" if CRYPTO_LZ4
+	default "lzo" if CRYPTO_LZO
+	default "lz4hc" if CRYPTO_LZ4HC
+	default "lz4k" if CRYPTO_LZ4K
+	default "deflate" if CRYPTO_DEFLATE
+	default "842" if CRYPTO_842
+	default "zstd" if CRYPTO_ZSTD
+	help
+	  Select the primary compressor used by the private Crystal Hybridswap
+	  zram device before userspace changes /sys/block/zramX/comp_algorithm.
+	  The value is passed to the kernel crypto compression API, so it must
+	  name an algorithm supported by the current kernel/zcomp configuration,
+	  such as lzo, lzo-rle, lz4, lz4kd, or zstd when those backends are
+	  enabled.

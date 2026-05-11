@@ -1,0 +1,15 @@
+#
+# CrystalFrostwork kernel private drivers configuration
+#
+menuconfig CRYSTALFROSTWORK
+	bool "CrystalFrostwork kernel private drivers"
+	default n
+	help
+		Author: 阿菌•未霜 <799620521@qq.com>
+		Copyright 2019-2025 阿菌•未霜 (799620521@qq.com) All rights reserved.
+
+if CRYSTALFROSTWORK
+
+source "drivers/crystalfrostwork/crystal_hybridswap/Kconfig"
+
+endif

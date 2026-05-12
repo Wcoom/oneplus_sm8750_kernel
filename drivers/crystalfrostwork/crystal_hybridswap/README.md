@@ -66,6 +66,7 @@ Typical configuration requirements are:
 Relevant optional symbols include:
 
 - `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS`: exposes compatibility placeholder interfaces for old user-space probes. It is disabled by default and does not restore the old hybridswap data path.
+- `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM`: exposes and enables the old Hybridswap `memory.swapd_memcgs_param` memcg swapd policy control logic. It is disabled by default. The legacy tuple contains compatibility/saved-only fields and fields that can still affect Crystal automatic memcg writeback when this option is enabled.
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK`: enables the private zram writeback data path.
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MEMORY_TRACKING`: enables more detailed memory tracking when debugfs support is available.
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MULTI_COMP`: enables multi-stream or multi-compressor support where supported by the platform.
@@ -121,7 +122,7 @@ The control plane coordinates:
 - pause/resume behavior during reconfiguration or teardown;
 - last-operation snapshots and counters.
 
-Automatic policy is best-effort. It evaluates memory pressure, swap availability, zram state, quota, backoff windows, and memcg candidates before dispatching writeback work.
+Automatic policy is best-effort. It evaluates memory pressure, swap availability, zram state, quota, backoff windows, and memcg candidates before dispatching writeback work. By default, the old Hybridswap memcg score policy from `memory.swapd_memcgs_param` is disabled, so automatic memcg writeback is not selected or weighted by that legacy parameter set unless `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM` is enabled.
 
 ### 2.5 Key Operation Paths
 
@@ -212,7 +213,8 @@ echo 1          > /sys/block/<zramX>/hybridswap_dev_life
 echo 1000000000 > /sys/block/<zramX>/hybridswap_quota_day
 echo 75         > /sys/block/<zramX>/hybridswap_zram_increase
 
-# 7. Optional: configure memcg policy.
+# 7. Optional: configure legacy memcg swapd policy when
+# CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM is enabled.
 # Read the parameter nodes first and follow the format reported by the kernel.
 echo '...' > /sys/fs/cgroup/memory/<cg_path>/memory.swapd_memcgs_param
 echo '...' > /sys/fs/cgroup/memory/<cg_path>/memory.swapd_single_memcg_param
@@ -259,9 +261,9 @@ Common memcg nodes include:
 - `memory.force_shrink_anon`
 - `memory.force_shrink_file`
 - `memory.swapd_pressure`
-- `memory.swapd_memcgs_param`
-- `memory.swapd_single_memcg_param`
 - `memory.total_info_per_app`
+
+When `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM` is enabled, Crystal also exposes the legacy `memory.swapd_memcgs_param` root cgroup node and `memory.swapd_single_memcg_param` per-memcg node. When that option is disabled, these nodes are hidden and automatic memcg writeback is not controlled by the old score/ratio policy.
 
 When `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS` is enabled, additional placeholder nodes may appear for compatibility with old user-space probes. These placeholders do not restore old internal hybridswap behavior.
 
@@ -317,6 +319,12 @@ Crystal-specific interfaces are grouped as:
 
 `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS` is intended only for user-space compatibility when old scripts probe for legacy node names. The option is disabled by default. When enabled, those nodes are placeholders or saved-state views and do not imply old internal data-path compatibility.
 
+### 5.4 Legacy memcg swapd Policy ABI
+
+`CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM` controls the old Hybridswap `memory.swapd_memcgs_param` policy interface as a separate compatibility feature. It is disabled by default. When disabled, `memory.swapd_memcgs_param` and `memory.swapd_single_memcg_param` are not exposed, and Crystal automatic memcg writeback does not use the old score and ratio policy for candidate selection or weighting. `memory.app_score` remains available as a basic per-memcg value used by other compatibility and diagnostic paths; without the legacy policy option it does not by itself enable the old automatic memcg writeback policy.
+
+When the option is enabled, `memory.swapd_memcgs_param` accepts the old level-based format: level count followed by per-level `min_score`, `max_score`, `ub_mem2zram_ratio`, `ub_zram2ufs_ratio`, and `refault_threshold` values. The fields that affect Crystal automatic memcg zram-to-UFS writeback are the score interval and `ub_zram2ufs_ratio`; the score interval selects matching memcgs and `ub_zram2ufs_ratio` contributes to candidate weighting and budget distribution. `ub_mem2zram_ratio` and `refault_threshold` are kept mainly as old ABI compatibility and display fields.
+
 ---
 
 ## 6. Differences from OPPO Official Hybridswap
@@ -346,6 +354,7 @@ The practical result is that Crystal Hybridswap behaves like a zram-compatible s
 - Standard zram ABI compatibility takes priority for standard nodes. Crystal-specific information belongs in Crystal extension nodes or debugfs.
 - debugfs is intended for development and deep diagnostics, not as a stable production ABI.
 - Compatibility placeholder APIs are disabled by default and should only be enabled when required by user space.
+- The legacy `memory.swapd_memcgs_param` policy ABI is disabled by default; enable it only when old user space needs that control surface and its score/`ub_zram2ufs_ratio` automatic memcg writeback behavior.
 - The module does not provide the OPPO official internal extent/rmap/fault-out data path.
 - Automatic policy decisions depend on runtime pressure, quota, memcg state, and backing-device availability; they should be treated as adaptive rather than deterministic.
 
@@ -430,6 +439,7 @@ When changing the module, preserve these invariants:
 7. Statistics should use clear units such as pages, bytes, nanoseconds, milliseconds, counts, or ratios.
 8. Standard zram nodes must remain compatible; Crystal-specific data should stay in Crystal extension nodes or debugfs.
 9. Compatibility placeholder APIs must not silently acquire real old-data-path semantics.
+10. Legacy `memory.swapd_memcgs_param` policy behavior must remain behind `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM`; when that option is disabled it must not influence automatic memcg writeback.
 
 ### 9.3 Maintenance Recommendations
 

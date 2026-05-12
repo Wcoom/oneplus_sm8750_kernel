@@ -499,6 +499,9 @@ static ssize_t hybridswap_report_show(struct device *dev,
 			 "legacy_empty_apis=%s\n"
 			 "legacy_empty_apis_visibility=%s\n"
 			 "legacy_empty_apis_list=%s\n"
+			 "legacy_swapd_memcgs_param=%s\n"
+			 "legacy_swapd_memcgs_param_visibility=%s\n"
+			 "legacy_swapd_memcgs_param_list=%s\n"
 			 "force_swapout=private_zram_per_memcg_best_effort_multi_zram\n"
 			 "force_swapout_scope=zram_resident_pages_not_full_ram_anon_reclaim\n"
 			 "force_swapout_unknown_identity=skip_and_count_unknown_or_filtered\n"
@@ -509,12 +512,12 @@ static ssize_t hybridswap_report_show(struct device *dev,
 			 "fault_out=disabled\n"
 			 "writeback_modes=idle,huge,huge_idle,incompressible,page_index=N\n"
 			 "internal_writeback_mode=%s\n"
-			 "policy_formats=swapd_memcgs_param levels+5-tuples; swapd_single_memcg_param 3-tuple\n"
+			 "legacy_swapd_policy_formats=%s; swapd_memcgs_param levels+5-tuples; swapd_single_memcg_param 3-tuple\n"
 			 "avail_buffers_policy=kernel_delayed_work_auto_MB_config_available_or_free_swap_pages_or_high_watermark_to_zram_writeback\n"
 			 "zram_wm_ratio_api=memory.zram_wm_ratio_zram_watermark,old_compatible_range_0_100,no_runtime_min_clamp\n"
 			 "auto_policy_controls=daily_quota,dev_life_budget_scale,zram_wm_ratio_gate,zram_increase_boost,empty_no_data_backoff,window_throttle,min_writeback_interval\n"
 			 "auto_policy_limits=zram_wm_ratio:%lld window_mb:%u memcg_candidates:%u memcg_max_mb:%u quota_window_ms:%lu dev_life_auto_percent:%u\n"
-			 "auto_memcg=prefer_policy_enabled_candidates_by_app_score_zram2ufs_ratio_recent_result_then_multi_zram_global_fallback\n"
+			 "auto_memcg=legacy_swapd_memcgs_param_%s_policy_enabled_candidates_by_app_score_zram2ufs_ratio_recent_result_then_multi_zram_global_fallback\n"
 			 "multi_zram_policy=auto_writeback_pressure_selected force_swapout_memcg_bounded_traverse force_swapin_memcg_writeback_first global_writeback_pages_fallback\n"
 			 "diagnostics=backing_read_write_latency batchin_worker writeback_worker slow_logs_rate_limited\n"
 			 "force_swapout_units=unknown_or_filtered fields with _pages suffix are page counts; no-suffix names are compatibility aliases\n"
@@ -532,13 +535,18 @@ static ssize_t hybridswap_report_show(struct device *dev,
 			 CHS_LEGACY_EMPTY_APIS_STATE,
 			 CHS_LEGACY_EMPTY_APIS_VISIBILITY,
 			 CHS_LEGACY_EMPTY_APIS_LIST,
+			 CHS_LEGACY_SWAPD_MEMCGS_PARAM_STATE,
+			 CHS_LEGACY_SWAPD_MEMCGS_PARAM_VISIBILITY,
+			 CHS_LEGACY_SWAPD_MEMCGS_PARAM_LIST,
 			 CHS_INTERNAL_WB_MODE,
+			 CHS_LEGACY_SWAPD_MEMCGS_PARAM_VISIBILITY,
 			 crystal_hybridswap_zram_wm_ratio(),
 			 CHS_AUTO_POLICY_WINDOW_MAX_WRITEBACK_MB,
 			 CHS_AUTO_MEMCG_MAX_CANDIDATES,
 			 CHS_AUTO_MEMCG_MAX_WRITEBACK_MB,
 			 CHS_QUOTA_WINDOW_MS,
 			 CHS_DEV_LIFE_AUTO_BUDGET_PERCENT,
+			 CHS_LEGACY_SWAPD_MEMCGS_PARAM_STATE,
 			 (unsigned long long)CHS_ZRAM_SLOW_IO_NS,
 			 (unsigned long long)CHS_ZRAM_SLOW_WORK_NS,
 			 IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS) ?

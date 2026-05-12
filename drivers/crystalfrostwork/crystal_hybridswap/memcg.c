@@ -53,10 +53,12 @@ struct crystal_hybridswap_force_shrink_req {
 	char memcg_name[CHS_MEMCG_NAME_MAX];
 };
 
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
 static struct crystal_hybridswap_swapd_param
 	swapd_params[CHS_SWAPD_MAX_LEVEL_NUM];
 static int swapd_param_levels;
 static char swapd_memcgs_param_raw[CHS_POLICY_RAW_MAX];
+#endif
 static atomic_t swapd_avail_buffers;
 static atomic_t swapd_min_avail_buffers;
 static atomic_t swapd_high_avail_buffers;
@@ -237,6 +239,7 @@ static void memcg_css_offline(void *data, struct cgroup_subsys_state *css,
 	mutex_unlock(&memcg_lock);
 }
 
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
 static char *memcg_next_token(char **buf)
 {
 	char *token;
@@ -264,6 +267,7 @@ static int memcg_parse_uint_token(const char *token, unsigned int *val)
 
 	return kstrtouint(value, 0, val);
 }
+#endif
 
 static s64 memcg_parse_compat_s64(char *buf)
 {
@@ -281,6 +285,7 @@ static s64 memcg_parse_compat_s64(char *buf)
 	return val;
 }
 
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
 static unsigned int memcg_clamp_uint(unsigned int val, unsigned int max,
 				     bool *clamped)
 {
@@ -300,6 +305,7 @@ static void memcg_copy_raw(char *dst, const char *src)
 	strim(raw);
 	strscpy(dst, raw, CHS_POLICY_RAW_MAX);
 }
+#endif
 
 static s64 memcg_pages_to_mb(s64 pages)
 {
@@ -712,6 +718,7 @@ static ssize_t memcg_force_shrink_write(struct kernfs_open_file *of, char *buf,
 	return nbytes;
 }
 
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
 static bool memcg_apply_policy_locked(struct crystal_hybridswap_memcg *entry)
 {
 	s64 score;
@@ -758,6 +765,13 @@ static void memcg_apply_policies_locked(void)
 	list_for_each_entry(entry, &memcg_list, node)
 		memcg_apply_policy_locked(entry);
 }
+#else
+static void memcg_apply_policy(struct crystal_hybridswap_memcg *entry)
+{
+	if (entry)
+		atomic_set(&entry->policy_level, CHS_POLICY_LEVEL_NONE);
+}
+#endif
 
 struct crystal_hybridswap_memcg *
 crystal_hybridswap_memcg_get(struct cgroup_subsys_state *css, bool create)
@@ -833,7 +847,9 @@ crystal_hybridswap_memcg_get(struct cgroup_subsys_state *css, bool create)
 	atomic64_set(&entry->force_shrink_file_skipped, 0);
 	atomic64_set(&entry->pending_writeback_pages, 0);
 	entry->single_policy_raw[0] = '\0';
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
 	memcg_apply_policy_locked(entry);
+#endif
 	list_add_tail(&entry->node, &memcg_list);
 	atomic64_inc(&chs.stats.memcg_entries);
 
@@ -1100,6 +1116,7 @@ void crystal_hybridswap_memcg_record_force_swapin_result(u64 cgroup_id,
 	mutex_unlock(&memcg_lock);
 }
 
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
 static u64 memcg_auto_candidate_weight(struct crystal_hybridswap_memcg *entry,
 					      unsigned int ratio)
 {
@@ -1122,16 +1139,19 @@ static u64 memcg_auto_candidate_weight(struct crystal_hybridswap_memcg *entry,
 
 	return weight;
 }
+#endif
 
 int crystal_hybridswap_memcg_collect_auto_candidates(
 		struct crystal_hybridswap_auto_memcg_candidate *candidates,
 		int max_candidates, s64 total_budget_pages)
 {
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
 	struct crystal_hybridswap_memcg *entry;
 	u64 weights[CHS_AUTO_MEMCG_MAX_CANDIDATES] = { 0 };
 	u64 total_weight = 0;
 	int count = 0;
 	int i;
+#endif
 
 	if (!candidates || max_candidates <= 0 || total_budget_pages <= 0)
 		return 0;
@@ -1139,6 +1159,9 @@ int crystal_hybridswap_memcg_collect_auto_candidates(
 	max_candidates = min_t(int, max_candidates, CHS_AUTO_MEMCG_MAX_CANDIDATES);
 	memset(candidates, 0, sizeof(*candidates) * max_candidates);
 
+#ifndef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
+	return 0;
+#else
 	mutex_lock(&memcg_lock);
 	list_for_each_entry(entry, &memcg_list, node) {
 		struct crystal_hybridswap_auto_memcg_candidate cand;
@@ -1207,6 +1230,7 @@ int crystal_hybridswap_memcg_collect_auto_candidates(
 	mutex_unlock(&memcg_lock);
 
 	return count;
+#endif
 }
 
 static ssize_t memcg_force_shrink_anon(struct kernfs_open_file *of, char *buf,
@@ -1609,6 +1633,7 @@ static int swapd_policy_stat_show(struct seq_file *m, void *v)
 	return 0;
 }
 
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
 static int parse_swapd_memcgs_param(char *buf)
 {
 	struct crystal_hybridswap_swapd_param parsed[CHS_SWAPD_MAX_LEVEL_NUM];
@@ -1821,6 +1846,7 @@ static int swapd_single_memcg_param_show(struct seq_file *m, void *v)
 	seq_printf(m, "raw: %s\n", entry->single_policy_raw);
 	return 0;
 }
+#endif
 
 void crystal_hybridswap_memcg_stats_show(struct seq_file *m)
 {
@@ -1834,8 +1860,18 @@ void crystal_hybridswap_memcg_stats_show(struct seq_file *m)
 		   CHS_LEGACY_EMPTY_APIS_VISIBILITY);
 	seq_printf(m, "memcg_legacy_empty_apis_list: %s\n",
 		   CHS_LEGACY_EMPTY_APIS_LIST);
+	seq_printf(m, "memcg_legacy_swapd_memcgs_param: %s (%s)\n",
+		   CHS_LEGACY_SWAPD_MEMCGS_PARAM_STATE,
+		   CHS_LEGACY_SWAPD_MEMCGS_PARAM_VISIBILITY);
+	seq_printf(m, "memcg_legacy_swapd_memcgs_param_list: %s\n",
+		   CHS_LEGACY_SWAPD_MEMCGS_PARAM_LIST);
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
 	seq_printf(m, "memcg_policy_levels: %d\n", swapd_param_levels);
 	seq_printf(m, "memcg_policy_raw: %s\n", swapd_memcgs_param_raw);
+#else
+	seq_puts(m, "memcg_policy_levels: 0\n");
+	seq_puts(m, "memcg_policy_raw:\n");
+#endif
 	seq_puts(m, "zram_wm_ratio_api: memory.zram_wm_ratio controls zram watermark, range=0..100, no runtime min clamp\n");
 	seq_printf(m, "zram_wm_ratio: %lld\n",
 		   crystal_hybridswap_zram_wm_ratio());
@@ -1902,6 +1938,7 @@ void crystal_hybridswap_memcg_stats_show(struct seq_file *m)
 		   CHS_AUTO_POLICY_MIN_WRITEBACK_INTERVAL_MS,
 		   CHS_AUTO_POLICY_WINDOW_MS,
 		   CHS_AUTO_POLICY_WINDOW_MAX_WRITEBACK_MB);
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
 	for (i = 0; i < swapd_param_levels; i++) {
 		seq_printf(m,
 			   "memcg_policy[%d]: min=%u max=%u mem2zram=%u zram2ufs=%u refault=%u\n",
@@ -1911,6 +1948,7 @@ void crystal_hybridswap_memcg_stats_show(struct seq_file *m)
 			   swapd_params[i].ub_zram2ufs_ratio,
 			   swapd_params[i].refault_threshold);
 	}
+#endif
 	mutex_unlock(&memcg_lock);
 
 	count = memcg_collect_snapshots(&snapshots);
@@ -2064,6 +2102,7 @@ static struct cftype crystal_hybridswap_memcg_files[] = {
 		.flags = CFTYPE_ONLY_ON_ROOT,
 		.seq_show = swapd_policy_stat_show,
 	},
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
 	{
 		.name = "swapd_memcgs_param",
 		.flags = CFTYPE_ONLY_ON_ROOT,
@@ -2075,6 +2114,7 @@ static struct cftype crystal_hybridswap_memcg_files[] = {
 		.write = swapd_single_memcg_param_write,
 		.seq_show = swapd_single_memcg_param_show,
 	},
+#endif
 	{ }
 };
 
@@ -2082,7 +2122,10 @@ int crystal_hybridswap_memcg_init(void)
 {
 	int ret;
 
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
 	swapd_memcgs_param_raw[0] = '\0';
+	swapd_param_levels = 0;
+#endif
 	atomic_set(&swapd_avail_buffers, 0);
 	atomic_set(&swapd_min_avail_buffers, 0);
 	atomic_set(&swapd_high_avail_buffers, 0);

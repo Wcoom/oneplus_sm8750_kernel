@@ -66,6 +66,7 @@ Crystal 因此保留有利于部署和维护的用户可见部分，但重写内
 相关可选配置包括：
 
 - `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS`：为旧用户态探测保留兼容占位接口。默认关闭，且不会恢复旧 Hybridswap 数据路径。
+- `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM`：暴露并启用旧 Hybridswap `memory.swapd_memcgs_param` memcg swapd 策略控制逻辑。该选项默认关闭。这套旧参数同时包含兼容/保存展示字段，以及启用后仍可能影响 Crystal 自动 memcg 写回的字段。
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK`：启用私有 zram 写回数据面。
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MEMORY_TRACKING`：在具备 debugfs 支持时启用更详细的内存跟踪。
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MULTI_COMP`：在平台支持时启用多压缩流或多压缩器能力。
@@ -121,7 +122,7 @@ Crystal Hybridswap 使用页级 zram slot 状态，而不是 extent 级对象模
 - 重配置或 teardown 期间的暂停/恢复行为；
 - 最近操作快照和计数器。
 
-自动策略是 best-effort。它会结合内存压力、swap 可用性、zram 状态、quota、退避窗口和 memcg 候选情况，再决定是否派发写回工作。
+自动策略是 best-effort。它会结合内存压力、swap 可用性、zram 状态、quota、退避窗口和 memcg 候选情况，再决定是否派发写回工作。默认情况下，来自 `memory.swapd_memcgs_param` 的旧 Hybridswap memcg score 策略处于关闭状态，因此自动 memcg 写回不会被这套旧参数选择或加权；只有启用 `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM` 后才会使用。
 
 ### 2.5 关键操作路径
 
@@ -212,7 +213,8 @@ echo 1          > /sys/block/<zramX>/hybridswap_dev_life
 echo 1000000000 > /sys/block/<zramX>/hybridswap_quota_day
 echo 75         > /sys/block/<zramX>/hybridswap_zram_increase
 
-# 7. 可选：配置 memcg 策略。
+# 7. 可选：在启用 CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM 时，
+# 配置旧 memcg swapd 策略。
 # 请先读取参数节点，并按内核返回的格式写入。
 echo '...' > /sys/fs/cgroup/memory/<cg_path>/memory.swapd_memcgs_param
 echo '...' > /sys/fs/cgroup/memory/<cg_path>/memory.swapd_single_memcg_param
@@ -259,9 +261,9 @@ echo '...' > /sys/fs/cgroup/memory/<cg_path>/memory.swapd_single_memcg_param
 - `memory.force_shrink_anon`
 - `memory.force_shrink_file`
 - `memory.swapd_pressure`
-- `memory.swapd_memcgs_param`
-- `memory.swapd_single_memcg_param`
 - `memory.total_info_per_app`
+
+启用 `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM` 时，Crystal 还会暴露旧 `memory.swapd_memcgs_param` 根 cgroup 节点和 `memory.swapd_single_memcg_param` per-memcg 节点。关闭该选项时，这些节点不暴露，自动 memcg 写回也不受旧 score/ratio 策略控制。
 
 启用 `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS` 时，可能额外出现面向旧用户态探测的占位节点。这些占位节点不会恢复旧内部 Hybridswap 行为。
 
@@ -317,6 +319,12 @@ Crystal 专属接口分为：
 
 `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS` 只用于旧脚本探测 legacy 节点名时的用户态兼容。该选项默认关闭。启用后，这些节点仍是占位或保存态视图，不代表兼容旧内部数据路径。
 
+### 5.4 旧 memcg swapd 策略 ABI
+
+`CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM` 将旧 Hybridswap `memory.swapd_memcgs_param` 策略接口作为独立兼容功能控制。该选项默认关闭。关闭时，`memory.swapd_memcgs_param` 和 `memory.swapd_single_memcg_param` 不暴露，Crystal 自动 memcg 写回不会使用旧 score 和 ratio 策略进行候选选择或权重计算。`memory.app_score` 仍作为基础 per-memcg 数值保留给其他兼容和诊断路径；不启用旧策略选项时，它本身不会开启旧式自动 memcg 写回策略。
+
+启用该选项时，`memory.swapd_memcgs_param` 接受旧 level 格式：level 数量后跟每个 level 的 `min_score`、`max_score`、`ub_mem2zram_ratio`、`ub_zram2ufs_ratio` 和 `refault_threshold`。真正影响 Crystal 自动 memcg zram-to-UFS 写回的是 score 区间和 `ub_zram2ufs_ratio`：score 区间用于匹配 memcg，`ub_zram2ufs_ratio` 参与候选权重和预算分配。`ub_mem2zram_ratio` 和 `refault_threshold` 主要作为旧 ABI 兼容/展示字段保留。
+
 ---
 
 ## 6. 与 OPPO 官方 Hybridswap 的区别
@@ -346,6 +354,7 @@ Crystal 专属接口分为：
 - 标准 zram ABI 兼容性优先于标准节点扩展。Crystal 专属信息应放在 Crystal 扩展节点或 debugfs。
 - debugfs 面向开发和深度诊断，不应视为稳定生产 ABI。
 - 兼容占位 API 默认关闭，只应在用户态确实需要时启用。
+- 旧 `memory.swapd_memcgs_param` 策略 ABI 默认关闭；只有旧用户态需要该控制面及其 score/`ub_zram2ufs_ratio` 自动 memcg 写回行为时才应启用。
 - 模块不提供 OPPO 官方内部 extent / rmap / fault-out 数据路径。
 - 自动策略依赖运行时压力、quota、memcg 状态和 backing-device 可用性，应视为自适应策略而非确定性事务。
 
@@ -430,6 +439,7 @@ Crystal 专属接口分为：
 7. 统计字段应使用清晰单位，例如 pages、bytes、ns、ms、count 或 ratio。
 8. 标准 zram 节点必须保持兼容；Crystal 专属数据应放在 Crystal 扩展节点或 debugfs。
 9. 兼容占位 API 不应悄悄获得真实旧数据路径语义。
+10. 旧 `memory.swapd_memcgs_param` 策略行为必须始终受 `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM` 控制；关闭该选项时不得影响自动 memcg 写回。
 
 ### 9.3 维护建议
 

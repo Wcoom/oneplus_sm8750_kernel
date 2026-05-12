@@ -33,6 +33,24 @@ config CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS
 	  restore the old OPPO extent/rmap/fault-out data path and does not wire
 	  these placeholder APIs into the core policy.
 
+config CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
+	bool "Enable legacy memory.swapd_memcgs_param memcg policy control"
+	depends on CRYSTAL_HYBRIDSWAP
+	default n
+	help
+	  Enable the old Hybridswap memory.swapd_memcgs_param compatibility
+	  control logic for memcg swapd policy.  This legacy ABI stores score
+	  levels and per-level parameters from old userspace; the tuple contains
+	  compatibility/saved-only fields such as ub_mem2zram_ratio and
+	  refault_threshold, plus fields that still affect Crystal automatic
+	  per-memcg zram-to-UFS writeback when this option is enabled, including
+	  min_score, max_score and ub_zram2ufs_ratio.
+
+	  Leave this disabled unless old userspace explicitly depends on the
+	  legacy memcg swapd policy ABI.  When disabled, memory.swapd_memcgs_param
+	  is not exposed and the old score/ratio policy is not used to select or
+	  weight Crystal automatic memcg writeback candidates.
+
 config CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
 	bool "zram writeback support for Crystal Hybridswap"
 	depends on CRYSTAL_HYBRIDSWAP

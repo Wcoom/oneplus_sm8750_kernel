@@ -70,6 +70,14 @@ void crystal_hybridswap_stats_show(struct seq_file *m)
 		   CHS_LEGACY_EMPTY_APIS_VISIBILITY);
 	seq_printf(m, "legacy_empty_apis_list: %s\n",
 		   CHS_LEGACY_EMPTY_APIS_LIST);
+	seq_printf(m, "legacy_swapd_memcgs_param_enabled: %d\n",
+		   CHS_LEGACY_SWAPD_MEMCGS_PARAM_ENABLED);
+	seq_printf(m, "legacy_swapd_memcgs_param_state: %s\n",
+		   CHS_LEGACY_SWAPD_MEMCGS_PARAM_STATE);
+	seq_printf(m, "legacy_swapd_memcgs_param_visibility: %s\n",
+		   CHS_LEGACY_SWAPD_MEMCGS_PARAM_VISIBILITY);
+	seq_printf(m, "legacy_swapd_memcgs_param_list: %s\n",
+		   CHS_LEGACY_SWAPD_MEMCGS_PARAM_LIST);
 	seq_printf(m, "swapd_pause: %d\n", crystal_hybridswap_swapd_paused());
 	seq_printf(m, "loglevel: %d\n", crystal_hybridswap_loglevel());
 	seq_printf(m, "quota_day: %llu\n", crystal_hybridswap_quota_day());
@@ -614,6 +622,11 @@ static int report_show(struct seq_file *m, void *v)
 		   CHS_LEGACY_EMPTY_APIS_VISIBILITY);
 	seq_printf(m, "legacy_empty_apis_list: %s\n",
 		   CHS_LEGACY_EMPTY_APIS_LIST);
+	seq_printf(m, "legacy_swapd_memcgs_param: %s (%s)\n",
+		   CHS_LEGACY_SWAPD_MEMCGS_PARAM_STATE,
+		   CHS_LEGACY_SWAPD_MEMCGS_PARAM_VISIBILITY);
+	seq_printf(m, "legacy_swapd_memcgs_param_list: %s\n",
+		   CHS_LEGACY_SWAPD_MEMCGS_PARAM_LIST);
 	seq_puts(m, "force_swapout: private_zram_per_memcg_best_effort_multi_zram\n");
 	seq_puts(m, "force_swapout_scope: zram_resident_pages_not_full_ram_anon_reclaim\n");
 	seq_puts(m, "force_swapout_unknown_identity: skip_and_count_unknown_or_filtered\n");
@@ -637,7 +650,8 @@ static int report_show(struct seq_file *m, void *v)
 	seq_puts(m, "fault_out: disabled; zram handles per-slot readback\n");
 	seq_puts(m, "writeback_modes: idle,huge,huge_idle,incompressible,page_index=N\n");
 	seq_printf(m, "internal_writeback_mode: %s\n", CHS_INTERNAL_WB_MODE);
-	seq_puts(m, "policy_formats: swapd_memcgs_param=<levels> <min> <max> <mem2zram> <zram2ufs> <refault>...; swapd_single_memcg_param=<mem2zram> <zram2ufs> <refault>\n");
+	seq_printf(m, "legacy_swapd_policy_formats: %s; swapd_memcgs_param=<levels> <min> <max> <mem2zram> <zram2ufs> <refault>...; swapd_single_memcg_param=<mem2zram> <zram2ufs> <refault>\n",
+		   CHS_LEGACY_SWAPD_MEMCGS_PARAM_VISIBILITY);
 	seq_puts(m, "avail_buffers: stored ABI tuple configures kernel automatic policy; all four ABI values are MB; delayed work compares free_swap_threshold_mb after converting it to pages\n");
 	seq_puts(m, "zram_wm_ratio_api: memory.zram_wm_ratio controls zram watermark, old-compatible range 0..100, no runtime min clamp\n");
 	seq_puts(m, "auto_policy_controls: daily_quota + dev_life_budget_scale + zram_wm_ratio_gate + zram_increase_boost + empty_no_data_backoff + window_throttle + min_writeback_interval\n");
@@ -648,7 +662,8 @@ static int report_show(struct seq_file *m, void *v)
 		   CHS_AUTO_MEMCG_MAX_WRITEBACK_MB,
 		   CHS_QUOTA_WINDOW_MS,
 		   CHS_DEV_LIFE_AUTO_BUDGET_PERCENT);
-	seq_puts(m, "auto_memcg: prefer policy-enabled memcg candidates by app_score/zram2ufs_ratio/recent_result; fallback to selected global zram writeback when no candidate queues\n");
+	seq_printf(m, "auto_memcg: legacy_swapd_memcgs_param=%s; when exposed, prefer policy-enabled memcg candidates by app_score/zram2ufs_ratio/recent_result; fallback to selected global zram writeback when no candidate queues\n",
+		   CHS_LEGACY_SWAPD_MEMCGS_PARAM_STATE);
 	seq_printf(m, "ub_ufs2zram_ratio_api: %s; per_memcg_batchin=page_level_slot_memcg_filter_no_legacy_extent\n",
 		   IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS) ?
 		   "legacy_empty_compat_saved_only" : "hidden");

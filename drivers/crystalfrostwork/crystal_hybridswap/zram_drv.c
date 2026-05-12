@@ -235,6 +235,164 @@ static inline bool zram_allocated(struct zram *zram, u32 index)
 			zram_test_flag(zram, index, ZRAM_WB);
 }
 
+struct zram_memcg_account {
+	u64 cgroup_id;
+	bool allocated;
+	bool wb;
+	bool same;
+	bool huge;
+	size_t size;
+};
+
+static struct zram_memcg_stats_entry *
+zram_memcg_stats_find_locked(struct zram *zram, u64 cgroup_id)
+{
+	struct zram_memcg_stats_entry *entry;
+
+	hash_for_each_possible(zram->memcg_stats_table, entry, node, cgroup_id) {
+		if (entry->cgroup_id == cgroup_id)
+			return entry;
+	}
+
+	return NULL;
+}
+
+static bool zram_memcg_stats_ensure(struct zram *zram,
+				    u64 cgroup_id, gfp_t gfp)
+{
+	struct zram_memcg_stats_entry *entry;
+	struct zram_memcg_stats_entry *new_entry;
+	unsigned long flags;
+
+	if (!cgroup_id)
+		return true;
+
+	spin_lock_irqsave(&zram->memcg_stats_lock, flags);
+	entry = zram_memcg_stats_find_locked(zram, cgroup_id);
+	spin_unlock_irqrestore(&zram->memcg_stats_lock, flags);
+	if (entry)
+		return true;
+
+	new_entry = kzalloc(sizeof(*new_entry), gfp);
+	if (!new_entry)
+		return false;
+	new_entry->cgroup_id = cgroup_id;
+
+	spin_lock_irqsave(&zram->memcg_stats_lock, flags);
+	entry = zram_memcg_stats_find_locked(zram, cgroup_id);
+	if (entry) {
+		spin_unlock_irqrestore(&zram->memcg_stats_lock, flags);
+		kfree(new_entry);
+		return true;
+	}
+	hash_add(zram->memcg_stats_table, &new_entry->node, cgroup_id);
+	spin_unlock_irqrestore(&zram->memcg_stats_lock, flags);
+
+	return true;
+}
+
+static void zram_memcg_stats_update(atomic64_t *counter, u64 value, bool add)
+{
+	s64 cur;
+
+	if (!value)
+		return;
+	if (add) {
+		atomic64_add(value, counter);
+		return;
+	}
+
+	cur = atomic64_read(counter);
+	atomic64_set(counter, cur > value ? cur - value : 0);
+}
+
+static void zram_memcg_account_snapshot(struct zram *zram,
+					u32 index,
+					struct zram_memcg_account *account)
+{
+	memset(account, 0, sizeof(*account));
+	if (!zram_allocated(zram, index))
+		return;
+
+	account->cgroup_id = zram->table[index].memcg_id;
+	if (!account->cgroup_id)
+		return;
+
+	account->allocated = true;
+	account->wb = zram_test_flag(zram, index, ZRAM_WB);
+	account->same = zram_test_flag(zram, index, ZRAM_SAME);
+	account->huge = zram_test_flag(zram, index, ZRAM_HUGE);
+	account->size = zram_get_obj_size(zram, index);
+}
+
+static void zram_memcg_stats_apply(struct zram *zram,
+				   const struct zram_memcg_account *account, bool add)
+{
+	struct zram_memcg_stats_entry *entry;
+	unsigned long flags;
+	u64 zram_compressed_size = 0;
+
+	if (!account || !account->allocated || !account->cgroup_id)
+		return;
+
+	spin_lock_irqsave(&zram->memcg_stats_lock, flags);
+	entry = zram_memcg_stats_find_locked(zram, account->cgroup_id);
+	if (!entry) {
+		spin_unlock_irqrestore(&zram->memcg_stats_lock, flags);
+		return;
+	}
+
+	if (account->wb) {
+		zram_memcg_stats_update(&entry->writeback_pages, 1, add);
+		zram_memcg_stats_update(&entry->writeback_original_size,
+					PAGE_SIZE, add);
+		zram_memcg_stats_update(&entry->writeback_size, PAGE_SIZE, add);
+	} else {
+		zram_memcg_stats_update(&entry->resident_pages, 1, add);
+		zram_memcg_stats_update(&entry->zram_original_size, PAGE_SIZE, add);
+		if (!account->same)
+			zram_compressed_size = account->size ? account->size : PAGE_SIZE;
+		zram_memcg_stats_update(&entry->zram_compressed_size,
+					zram_compressed_size, add);
+	}
+	if (account->same)
+		zram_memcg_stats_update(&entry->same_pages, 1, add);
+	if (account->huge)
+		zram_memcg_stats_update(&entry->huge_pages, 1, add);
+	spin_unlock_irqrestore(&zram->memcg_stats_lock, flags);
+}
+
+static void zram_memcg_stats_add_current(struct zram *zram, u32 index)
+{
+	struct zram_memcg_account account;
+
+	zram_memcg_account_snapshot(zram, index, &account);
+	zram_memcg_stats_apply(zram, &account, true);
+}
+
+static void zram_memcg_stats_sub_current(struct zram *zram, u32 index)
+{
+	struct zram_memcg_account account;
+
+	zram_memcg_account_snapshot(zram, index, &account);
+	zram_memcg_stats_apply(zram, &account, false);
+}
+
+static void zram_memcg_stats_clear_all(struct zram *zram)
+{
+	struct zram_memcg_stats_entry *entry;
+	struct hlist_node *tmp;
+	unsigned long flags;
+	int bucket;
+
+	spin_lock_irqsave(&zram->memcg_stats_lock, flags);
+	hash_for_each_safe(zram->memcg_stats_table, bucket, tmp, entry, node) {
+		hash_del(&entry->node);
+		kfree(entry);
+	}
+	spin_unlock_irqrestore(&zram->memcg_stats_lock, flags);
+}
+
 #if PAGE_SIZE != 4096
 static inline bool is_partial_io(struct bio_vec *bvec)
 {
@@ -1212,6 +1370,7 @@ static int zram_writeback_pages(struct zram *zram, int mode,
 		blk_idx = 0;
 		written++;
 		atomic64_inc(&zram->stats.pages_stored);
+		zram_memcg_stats_add_current(zram, index);
 		spin_lock(&zram->wb_limit_lock);
 		if (zram->wb_limit_enable && zram->bd_wb_limit > 0)
 			zram->bd_wb_limit -=  1UL << (PAGE_SHIFT - 12);
@@ -1499,9 +1658,9 @@ int crystal_hybridswap_zram_io_stats(struct device *dev,
 int crystal_hybridswap_zram_memcg_stats(struct device *dev, u64 cgroup_id,
 		struct crystal_hybridswap_memcg_zram_stats *stats)
 {
+	struct zram_memcg_stats_entry *entry;
 	struct zram *zram;
-	unsigned long nr_pages;
-	unsigned long index;
+	unsigned long flags;
 
 	if (!dev || !stats || !cgroup_id)
 		return -EINVAL;
@@ -1514,53 +1673,25 @@ int crystal_hybridswap_zram_memcg_stats(struct device *dev, u64 cgroup_id,
 		return -ENODEV;
 	}
 
-	nr_pages = zram_pages_snapshot(zram);
-	for (index = 0; index < nr_pages; index++) {
-		u64 memcg_id;
-		size_t size;
-		bool wb;
-		bool same;
-		bool huge;
-
-		stats->scanned_pages++;
-		zram_slot_lock(zram, index);
-		if (!zram_allocated(zram, index)) {
-			zram_slot_unlock(zram, index);
-			cond_resched();
-			continue;
-		}
-
-		memcg_id = zram->table[index].memcg_id;
-		if (memcg_id != cgroup_id) {
-			zram_slot_unlock(zram, index);
-			cond_resched();
-			continue;
-		}
-
-		stats->matched_pages++;
-		wb = zram_test_flag(zram, index, ZRAM_WB);
-		same = zram_test_flag(zram, index, ZRAM_SAME);
-		huge = zram_test_flag(zram, index, ZRAM_HUGE);
-		size = zram_get_obj_size(zram, index);
-		if (wb) {
-			stats->writeback_pages++;
-			stats->writeback_original_size += PAGE_SIZE;
-			stats->writeback_size += PAGE_SIZE;
-		} else {
-			stats->resident_pages++;
-			stats->zram_original_size += PAGE_SIZE;
-			if (!same)
-				stats->zram_compressed_size += size ? size : PAGE_SIZE;
-		}
-		if (same)
-			stats->same_pages++;
-		if (huge)
-			stats->huge_pages++;
-		zram_slot_unlock(zram, index);
-		cond_resched();
+	spin_lock_irqsave(&zram->memcg_stats_lock, flags);
+	entry = zram_memcg_stats_find_locked(zram, cgroup_id);
+	if (entry) {
+		stats->resident_pages = atomic64_read(&entry->resident_pages);
+		stats->writeback_pages = atomic64_read(&entry->writeback_pages);
+		stats->same_pages = atomic64_read(&entry->same_pages);
+		stats->huge_pages = atomic64_read(&entry->huge_pages);
+		stats->zram_compressed_size =
+			atomic64_read(&entry->zram_compressed_size);
+		stats->zram_original_size =
+			atomic64_read(&entry->zram_original_size);
+		stats->writeback_size = atomic64_read(&entry->writeback_size);
+		stats->writeback_original_size =
+			atomic64_read(&entry->writeback_original_size);
 	}
+	spin_unlock_irqrestore(&zram->memcg_stats_lock, flags);
 	up_read(&zram->init_lock);
 
+	stats->matched_pages = stats->resident_pages + stats->writeback_pages;
 	return stats->matched_pages ? 0 : -ENODATA;
 }
 
@@ -2076,6 +2207,7 @@ static void zram_meta_free(struct zram *zram, u64 disksize)
 	/* Free all pages that are still in this zram device */
 	for (index = 0; index < num_pages; index++)
 		zram_free_page(zram, index);
+	zram_memcg_stats_clear_all(zram);
 
 	zs_destroy_pool(zram->mem_pool);
 	vfree(zram->table);
@@ -2112,6 +2244,7 @@ static void zram_free_page(struct zram *zram, size_t index)
 {
 	unsigned long handle;
 
+	zram_memcg_stats_sub_current(zram, index);
 	zram->table[index].memcg_id = 0;
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_TRACK_ENTRY_ACTIME
 	zram->table[index].ac_time = 0;
@@ -2418,6 +2551,7 @@ static void zram_commit_prepared_page(struct zram *zram, u32 index,
 
 	/* Update stats */
 	atomic64_inc(&zram->stats.pages_stored);
+	zram_memcg_stats_add_current(zram, index);
 }
 
 static int zram_write_page_with_memcg(struct zram *zram, struct page *page,
@@ -2425,6 +2559,9 @@ static int zram_write_page_with_memcg(struct zram *zram, struct page *page,
 {
 	struct zram_prepared_page prep;
 	int ret;
+
+	if (!zram_memcg_stats_ensure(zram, memcg_id, GFP_NOIO))
+		return -ENOMEM;
 
 	ret = zram_prepare_page(zram, page, &prep);
 	if (ret)
@@ -2893,6 +3030,7 @@ static int zram_recompress(struct zram *zram, u32 index, struct page *page,
 
 	atomic64_add(comp_len_new, &zram->stats.compr_data_size);
 	atomic64_inc(&zram->stats.pages_stored);
+	zram_memcg_stats_add_current(zram, index);
 
 	return 0;
 }
@@ -3412,6 +3550,8 @@ static int zram_add(void)
 
 	init_rwsem(&zram->init_lock);
 	spin_lock_init(&zram->ref_lock);
+	spin_lock_init(&zram->memcg_stats_lock);
+	hash_init(zram->memcg_stats_table);
 	refcount_set(&zram->refcount, 1);
 	init_completion(&zram->ref_completion);
 	zram->removing = false;

@@ -16,6 +16,7 @@
 #define _ZRAM_DRV_H_
 
 #include <linux/completion.h>
+#include <linux/hashtable.h>
 #include <linux/refcount.h>
 #include <linux/rwsem.h>
 #include <linux/spinlock.h>
@@ -158,6 +159,21 @@ struct zram_stats {
 #define ZRAM_MAX_COMPS	1U
 #endif
 
+#define ZRAM_MEMCG_STATS_HASH_BITS	8
+
+struct zram_memcg_stats_entry {
+	struct hlist_node node;
+	u64 cgroup_id;
+	atomic64_t resident_pages;
+	atomic64_t writeback_pages;
+	atomic64_t same_pages;
+	atomic64_t huge_pages;
+	atomic64_t zram_compressed_size;
+	atomic64_t zram_original_size;
+	atomic64_t writeback_size;
+	atomic64_t writeback_original_size;
+};
+
 struct zram {
 	struct zram_table_entry *table;
 	struct zs_pool *mem_pool;
@@ -176,6 +192,9 @@ struct zram {
 	unsigned long limit_pages;
 
 	struct zram_stats stats;
+	/* Protects memcg_stats_table and per-memcg cached counters. */
+	spinlock_t memcg_stats_lock;
+	DECLARE_HASHTABLE(memcg_stats_table, ZRAM_MEMCG_STATS_HASH_BITS);
 	/*
 	 * This is the limit on amount of *uncompressed* worth of data
 	 * we can store in a disk.

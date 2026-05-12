@@ -77,6 +77,18 @@
 	"memory.aging_anon,memory.swapd_pid,memory.psi," \
 	"memory.ub_ufs2zram_ratio,zram.max_comp_streams"
 
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
+#define CHS_LEGACY_SWAPD_MEMCGS_PARAM_ENABLED	1
+#define CHS_LEGACY_SWAPD_MEMCGS_PARAM_STATE	"enabled"
+#define CHS_LEGACY_SWAPD_MEMCGS_PARAM_VISIBILITY	"exposed"
+#else
+#define CHS_LEGACY_SWAPD_MEMCGS_PARAM_ENABLED	0
+#define CHS_LEGACY_SWAPD_MEMCGS_PARAM_STATE	"disabled"
+#define CHS_LEGACY_SWAPD_MEMCGS_PARAM_VISIBILITY	"hidden"
+#endif
+#define CHS_LEGACY_SWAPD_MEMCGS_PARAM_LIST \
+	"memory.swapd_memcgs_param,memory.swapd_single_memcg_param"
+
 enum chs_log_level {
 	CHS_LOG_ERR = 0,
 	CHS_LOG_WARN,

@@ -37,7 +37,6 @@ static bool memcg_css_offline_hook_registered;
 #define CHS_FORCE_SHRINK_RECLAIM_INACTIVE	0UL
 #define CHS_FORCE_SHRINK_RECLAIM_ALL		1UL
 #define CHS_FORCE_SHRINK_DEFAULT_BATCH		(1UL << 10)
-#define CHS_FORCE_SHRINK_MAX_TARGET_PAGES	(128UL * CHS_PAGES_PER_MB)
 #define CHS_FORCE_SHRINK_MAX_BATCH_PAGES	(16UL * CHS_PAGES_PER_MB)
 #define CHS_FORCE_SHRINK_MAX_QUEUED_PER_TYPE	4
 #define CHS_PF_SHRINK_ANON			PF__HOLE__02000000
@@ -363,11 +362,6 @@ static int memcg_force_shrink_parse(struct mem_cgroup *memcg, bool file,
 
 	if (parsed == 2 && user_batch > 0)
 		req_batch = user_batch;
-
-	if (need_reclaim > CHS_FORCE_SHRINK_MAX_TARGET_PAGES) {
-		need_reclaim = CHS_FORCE_SHRINK_MAX_TARGET_PAGES;
-		*clamped = true;
-	}
 
 	if (req_batch > CHS_FORCE_SHRINK_MAX_BATCH_PAGES) {
 		req_batch = CHS_FORCE_SHRINK_MAX_BATCH_PAGES;

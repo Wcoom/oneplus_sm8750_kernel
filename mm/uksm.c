@@ -5831,7 +5831,7 @@ static int __init uksm_init(void)
 
 	err = init_random_sampling();
 	if (err)
-		goto out_free2;
+		goto out_free1;
 
 	err = uksm_slab_init();
 	if (err)
@@ -5891,8 +5891,6 @@ out_free0:
 	uksm_slab_free();
 out_free1:
 	kfree(random_nums);
-out_free2:
-	kfree(uksm_scan_ladder);
 	return err;
 }
 

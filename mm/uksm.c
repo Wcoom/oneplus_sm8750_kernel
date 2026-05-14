@@ -5316,19 +5316,23 @@ static ssize_t cpu_ratios_store(struct kobject *kobj,
 	int i, cpuratios[SCAN_LADDER_SIZE], err;
 	unsigned long value;
 	struct scan_rung *rung;
-	char *p, *end = NULL;
+	char *buf_copy, *p, *end = NULL;
+	ssize_t ret = count;
 
-	p = kzalloc(count, GFP_KERNEL);
-	if (!p)
+	buf_copy = kzalloc(count, GFP_KERNEL);
+	if (!buf_copy)
 		return -ENOMEM;
 
+	p = buf_copy;
 	memcpy(p, buf, count);
 
 	for (i = 0; i < SCAN_LADDER_SIZE; i++) {
 		if (i != SCAN_LADDER_SIZE - 1) {
 			end = strchr(p, ' ');
-			if (!end)
-				return -EINVAL;
+			if (!end) {
+				ret = -EINVAL;
+				goto out;
+			}
 
 			*end = '\0';
 		}
@@ -5336,14 +5340,18 @@ static ssize_t cpu_ratios_store(struct kobject *kobj,
 		if (strstr(p, "MAX/")) {
 			p = strchr(p, '/') + 1;
 			err = kstrtoul(p, 10, &value);
-			if (err || value > TIME_RATIO_SCALE || !value)
-				return -EINVAL;
+			if (err || value > TIME_RATIO_SCALE || !value) {
+				ret = -EINVAL;
+				goto out;
+			}
 
 			cpuratios[i] = -(int) (TIME_RATIO_SCALE / value);
 		} else {
 			err = kstrtoul(p, 10, &value);
-			if (err || value > TIME_RATIO_SCALE || !value)
-				return -EINVAL;
+			if (err || value > TIME_RATIO_SCALE || !value) {
+				ret = -EINVAL;
+				goto out;
+			}
 
 			cpuratios[i] = value;
 		}
@@ -5357,7 +5365,9 @@ static ssize_t cpu_ratios_store(struct kobject *kobj,
 		rung->cpu_ratio = cpuratios[i];
 	}
 
-	return count;
+out:
+	kfree(buf_copy);
+	return ret;
 }
 UKSM_ATTR(cpu_ratios);
 

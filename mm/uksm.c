@@ -5629,8 +5629,10 @@ static int init_zeropage_hash_table(void)
 
 	zero_hash_table = kmalloc_array(HASH_STRENGTH_MAX, sizeof(u32),
 		GFP_KERNEL);
-	if (!zero_hash_table)
+	if (!zero_hash_table) {
+		__free_page(page);
 		return -ENOMEM;
+	}
 
 	for (i = 0; i < HASH_STRENGTH_MAX; i++)
 		zero_hash_table[i] = page_hash(page, i, 0);

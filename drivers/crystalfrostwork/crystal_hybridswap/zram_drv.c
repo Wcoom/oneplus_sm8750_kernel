@@ -1199,7 +1199,7 @@ static int zram_writeback_pages(struct zram *zram, int mode,
 	}
 
 	if (!zram->backing_dev) {
-		ret = -ENODEV;
+		ret = -ENXIO;
 		chs_log_ratelimited(CHS_LOG_WARN,
 				    "writeback skip no backing_dev mode=0x%x index=%lu nr_pages=%lu max_pages=%lu ret=%d\n",
 				    mode, index, nr_pages, max_pages, ret);
@@ -1265,7 +1265,7 @@ static int zram_writeback_pages(struct zram *zram, int mode,
 		spin_lock(&zram->wb_limit_lock);
 		if (zram->wb_limit_enable && !zram->bd_wb_limit) {
 			spin_unlock(&zram->wb_limit_lock);
-			ret = -EIO;
+			ret = -EDQUOT;
 			zram_slot_unlock(zram, index);
 			chs_log_ratelimited(CHS_LOG_WARN,
 					    "writeback skip limit exhausted mode=0x%x index=%lu written=%lu ret=%d\n",

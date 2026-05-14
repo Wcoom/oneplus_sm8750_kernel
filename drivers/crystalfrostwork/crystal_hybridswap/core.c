@@ -48,6 +48,16 @@ struct crystal_hybridswap_zram_target {
 	struct crystal_hybridswap_zram_pressure pressure;
 };
 
+struct crystal_hybridswap_writeback_target_selection {
+	int best;
+	int ret;
+	int eligible;
+	int no_writeback;
+	int no_backing;
+	int limit_exhausted;
+	int no_resident;
+};
+
 static int crystal_hybridswap_queue_writeback_internal(struct device *dev,
 		const char *mode, s64 pages, bool auto_req);
 static int crystal_hybridswap_queue_force_swapout_internal(
@@ -364,6 +374,99 @@ static void crystal_hybridswap_record_auto_reason(const char *reason)
 	strscpy(chs.last_auto_reason, reason && reason[0] ? reason : "none",
 		sizeof(chs.last_auto_reason));
 	mutex_unlock(&chs.state_lock);
+}
+
+static bool crystal_hybridswap_auto_result_needs_backoff(int ret,
+		s64 written_pages)
+{
+	return ret == -ENODATA || ret == -ENODEV || ret == -ENXIO ||
+		ret == -EDQUOT || ret == -ENOSPC || ret == -EOPNOTSUPP ||
+		(ret >= 0 && written_pages <= 0);
+}
+
+static const char *crystal_hybridswap_auto_failure_reason(int ret)
+{
+	switch (ret) {
+	case -ENODATA:
+		return "auto_writeback_no_data";
+	case -ENODEV:
+		return "auto_no_target";
+	case -ENXIO:
+		return "auto_no_backing_dev";
+	case -EDQUOT:
+		return "auto_writeback_limit";
+	case -ENOSPC:
+		return "auto_writeback_nospace";
+	case -EOPNOTSUPP:
+		return "auto_writeback_unsupported";
+	default:
+		return "auto_writeback_error";
+	}
+}
+
+static void crystal_hybridswap_auto_reset_failure_state(void)
+{
+	mutex_lock(&chs.state_lock);
+	chs.auto_last_failure_reason[0] = '\0';
+	chs.auto_last_failure_ret = 0;
+	chs.auto_last_failure_repeats = 0;
+	chs.auto_last_failure_log_jiffies = 0;
+	mutex_unlock(&chs.state_lock);
+}
+
+static bool crystal_hybridswap_auto_should_log_failure(const char *reason,
+		int ret, unsigned long now, u32 *repeats, bool *changed)
+{
+	bool do_log = false;
+	unsigned long interval;
+	bool state_changed;
+
+	mutex_lock(&chs.state_lock);
+	state_changed = chs.auto_last_failure_ret != ret ||
+		strncmp(chs.auto_last_failure_reason, reason,
+			sizeof(chs.auto_last_failure_reason));
+	if (state_changed) {
+		strscpy(chs.auto_last_failure_reason, reason,
+			sizeof(chs.auto_last_failure_reason));
+		chs.auto_last_failure_ret = ret;
+		chs.auto_last_failure_repeats = 0;
+		chs.auto_last_failure_log_jiffies = 0;
+	} else {
+		chs.auto_last_failure_repeats++;
+	}
+	interval = chs.auto_empty_skip_jiffies;
+	if (!interval)
+		interval = msecs_to_jiffies(
+			CHS_AUTO_POLICY_EMPTY_BACKOFF_BASE_MS);
+	if (state_changed || !chs.auto_last_failure_log_jiffies ||
+	    time_after_eq(now, chs.auto_last_failure_log_jiffies + interval)) {
+		chs.auto_last_failure_log_jiffies = now;
+		do_log = true;
+	}
+	if (repeats)
+		*repeats = chs.auto_last_failure_repeats;
+	if (changed)
+		*changed = state_changed;
+	mutex_unlock(&chs.state_lock);
+
+	return do_log;
+}
+
+static void crystal_hybridswap_auto_log_failure(int level, const char *reason,
+		int ret, const char *detail)
+{
+	u32 repeats = 0;
+	bool changed = false;
+
+	if (!crystal_hybridswap_auto_should_log_failure(reason, ret, jiffies,
+			&repeats, &changed))
+		return;
+
+	chs_log(changed ? level : CHS_LOG_DEBUG,
+		"auto_writeback stable_failure reason=%s ret=%d repeats=%u backoff_ms=%lld detail=%s\n",
+		reason, ret, repeats,
+		atomic64_read(&chs.stats.policy_empty_backoff_interval_ms),
+		detail && detail[0] ? detail : "none");
 }
 
 static s64 crystal_hybridswap_clamp_u64_to_s64(u64 val)
@@ -901,11 +1004,44 @@ static s64 crystal_hybridswap_zram_target_id(
 	return crystal_hybridswap_clamp_u64_to_s64(target->pressure.device_id);
 }
 
-static int crystal_hybridswap_select_writeback_target(
-		struct crystal_hybridswap_zram_target *targets, int count)
+static int crystal_hybridswap_writeback_selection_ret(
+		const struct crystal_hybridswap_writeback_target_selection *selection,
+		int count)
 {
-	int best = -1;
-	int eligible = 0;
+	if (!count)
+		return -ENODEV;
+	if (!selection)
+		return -ENODEV;
+	if (selection->eligible > 0)
+		return -EAGAIN;
+	if (selection->limit_exhausted && !selection->no_backing &&
+	    !selection->no_resident)
+		return -EDQUOT;
+	if (selection->no_backing && !selection->limit_exhausted &&
+	    !selection->no_resident)
+		return -ENXIO;
+	if (selection->no_resident && !selection->limit_exhausted &&
+	    !selection->no_backing)
+		return -ENODATA;
+	if (selection->no_writeback == count)
+		return -EOPNOTSUPP;
+	if (selection->limit_exhausted)
+		return -EDQUOT;
+	if (selection->no_backing)
+		return -ENXIO;
+	if (selection->no_resident)
+		return -ENODATA;
+	return -ENODEV;
+}
+
+static int crystal_hybridswap_select_writeback_target(
+		struct crystal_hybridswap_zram_target *targets, int count,
+		struct crystal_hybridswap_writeback_target_selection *selection)
+{
+	struct crystal_hybridswap_writeback_target_selection result = {
+		.best = -1,
+		.ret = -ENODEV,
+	};
 	u64 best_score = 0;
 	int i;
 
@@ -915,34 +1051,46 @@ static int crystal_hybridswap_select_writeback_target(
 	for (i = 0; i < count; i++) {
 		u64 score;
 
-		if (!targets[i].writeback)
+		if (!targets[i].writeback) {
+			result.no_writeback++;
 			continue;
+		}
 		if (!targets[i].pressure.valid || !targets[i].pressure.backing_dev) {
+			result.no_backing++;
 			atomic64_inc(&chs.stats.multi_zram_skip_no_backing);
 			continue;
 		}
 		if (targets[i].pressure.wb_limit_exhausted) {
+			result.limit_exhausted++;
 			atomic64_inc(&chs.stats.multi_zram_skip_limit);
 			continue;
 		}
 		score = targets[i].pressure.resident_pages +
 			targets[i].pressure.increase_pages;
 		if (!score) {
+			result.no_resident++;
 			atomic64_inc(&chs.stats.multi_zram_skip_no_resident);
 			continue;
 		}
-		eligible++;
-		if (best < 0 || score > best_score) {
-			best = i;
+		result.eligible++;
+		if (result.best < 0 || score > best_score) {
+			result.best = i;
 			best_score = score;
 		}
 	}
 
-	atomic64_set(&chs.stats.multi_zram_last_eligible, eligible);
-	if (best >= 0)
+	atomic64_set(&chs.stats.multi_zram_last_eligible, result.eligible);
+	if (result.best >= 0) {
 		atomic64_set(&chs.stats.multi_zram_last_selected,
-			crystal_hybridswap_zram_target_id(&targets[best]));
-	return best;
+			crystal_hybridswap_zram_target_id(&targets[result.best]));
+		result.ret = 0;
+	} else {
+		result.ret = crystal_hybridswap_writeback_selection_ret(&result,
+			count);
+	}
+	if (selection)
+		*selection = result;
+	return result.best;
 }
 
 static noinline_for_stack int crystal_hybridswap_get_zram_pressure(
@@ -1133,13 +1281,15 @@ static u64 crystal_hybridswap_auto_target_pages(unsigned int avail,
 static void crystal_hybridswap_auto_record_result(int ret, s64 written_pages,
 		bool per_memcg)
 {
+	bool backoff = crystal_hybridswap_auto_result_needs_backoff(ret,
+		written_pages);
+
 	atomic64_set(&chs.stats.last_auto_writeback_ret, ret);
 	atomic64_set(&chs.stats.last_auto_writeback_written_pages, written_pages);
 
 	mutex_lock(&chs.state_lock);
 	chs.auto_last_writeback_result = ret;
-	if (ret == -ENODATA || ret == -ENODEV ||
-	    (ret >= 0 && written_pages <= 0)) {
+	if (backoff) {
 		chs.auto_last_empty_jiffies = jiffies;
 		if (chs.auto_empty_skip_jiffies)
 			chs.auto_empty_skip_jiffies = min_t(unsigned long,
@@ -1152,19 +1302,24 @@ static void crystal_hybridswap_auto_record_result(int ret, s64 written_pages,
 		atomic64_inc(&chs.stats.policy_empty_rounds);
 		atomic64_set(&chs.stats.policy_empty_backoff_interval_ms,
 			     jiffies_to_msecs(chs.auto_empty_skip_jiffies));
-	} else if (ret >= 0) {
+	} else {
 		chs.auto_empty_skip_jiffies = 0;
 		atomic64_set(&chs.stats.policy_empty_backoff_interval_ms, 0);
-		chs.auto_policy_window_written_pages += written_pages;
-		atomic64_set(&chs.stats.policy_window_written_pages,
-			     crystal_hybridswap_clamp_u64_to_s64(
-			     chs.auto_policy_window_written_pages));
+		if (ret >= 0) {
+			chs.auto_policy_window_written_pages += written_pages;
+			atomic64_set(&chs.stats.policy_window_written_pages,
+				     crystal_hybridswap_clamp_u64_to_s64(
+				     chs.auto_policy_window_written_pages));
+		}
 	}
 	mutex_unlock(&chs.state_lock);
 
+	if (!backoff)
+		crystal_hybridswap_auto_reset_failure_state();
+
 	if (!per_memcg)
 		return;
-	if (ret == -ENODATA || ret == -ENODEV ||
+	if (ret == -ENODATA || ret == -ENODEV || ret == -ENXIO ||
 	    (ret >= 0 && written_pages <= 0))
 		atomic64_inc(&chs.stats.auto_per_memcg_no_data);
 	else if (ret < 0)
@@ -1296,10 +1451,16 @@ static bool crystal_hybridswap_policy_suspended(void)
 
 static bool crystal_hybridswap_has_zram_writeback(void)
 {
-	bool has_zram;
+	struct crystal_hybridswap_zram *entry;
+	bool has_zram = false;
 
 	mutex_lock(&chs.zram_lock);
-	has_zram = !list_empty(&chs.zram_list);
+	list_for_each_entry(entry, &chs.zram_list, node) {
+		if (entry->dev && entry->zram && entry->writeback) {
+			has_zram = true;
+			break;
+		}
+	}
 	mutex_unlock(&chs.zram_lock);
 
 	return has_zram;
@@ -1606,15 +1767,16 @@ static void crystal_hybridswap_policy_workfn(struct work_struct *work)
 	ret = crystal_hybridswap_queue_writeback_internal(NULL,
 		CHS_INTERNAL_WB_MODE, (s64)pages_to_write, true);
 	if (ret) {
-		chs_log_ratelimited(CHS_LOG_WARN,
-			"auto_policy global_fallback queue failed pages=%llu ret=%d\n",
-			pages_to_write, ret);
 		atomic64_inc(&chs.stats.policy_writeback_skipped);
 		atomic64_inc(&chs.stats.auto_writeback_skipped);
-		reason = "auto_writeback_error";
-		crystal_hybridswap_report_pressure(CHS_PRESSURE_CRITICAL,
-						   reason);
-		next_delay = crystal_hybridswap_auto_policy_delay(true);
+		reason = crystal_hybridswap_auto_failure_reason(ret);
+		crystal_hybridswap_report_pressure(
+			ret == -ENOSPC ? CHS_PRESSURE_CRITICAL : CHS_PRESSURE_MEDIUM,
+			reason);
+		backoff_left = crystal_hybridswap_auto_result_needs_backoff(ret, 0) ?
+			crystal_hybridswap_empty_backoff_left(jiffies) : 0;
+		next_delay = backoff_left ? backoff_left :
+			crystal_hybridswap_auto_policy_delay(true);
 		goto out_reschedule;
 	}
 
@@ -1855,6 +2017,7 @@ static void crystal_hybridswap_writeback_workfn(struct work_struct *work)
 	struct zram *zram;
 	crystal_hybridswap_zram_writeback_t writeback;
 	char mode[CHS_WB_MODE_MAX];
+	char detail[160];
 	s64 pages;
 	bool force;
 	bool auto_req;
@@ -1895,11 +2058,19 @@ static void crystal_hybridswap_writeback_workfn(struct work_struct *work)
 		if (auto_req)
 			crystal_hybridswap_auto_record_result(ret, 0, false);
 		crystal_hybridswap_record_writeback(mode, pages, ret, 0);
-		chs_log(CHS_LOG_ERR,
-			"writeback skipped no device mode=%s pages=%lld force=%d\n",
-			mode, pages, force);
+		if (auto_req) {
+			scnprintf(detail, sizeof(detail),
+				"mode=%s pages=%lld force=%d", mode, pages, force);
+			crystal_hybridswap_auto_log_failure(CHS_LOG_INFO,
+				crystal_hybridswap_auto_failure_reason(ret), ret,
+				detail);
+		} else {
+			chs_log(CHS_LOG_ERR,
+				"writeback skipped no device mode=%s pages=%lld force=%d\n",
+				mode, pages, force);
+		}
 		crystal_hybridswap_report_pressure(CHS_PRESSURE_CRITICAL,
-						   "writeback_nodev");
+					   "writeback_nodev");
 		goto out_put;
 	}
 
@@ -1911,11 +2082,21 @@ static void crystal_hybridswap_writeback_workfn(struct work_struct *work)
 		if (auto_req)
 			crystal_hybridswap_auto_record_result(ret, 0, false);
 		crystal_hybridswap_record_writeback(mode, 0, ret, 0);
-		chs_log_ratelimited(CHS_LOG_INFO,
-			"writeback skipped daily quota dev=%s mode=%s force=%d auto=%d\n",
-			dev_name(dev), mode, force, auto_req);
+		if (auto_req) {
+			scnprintf(detail, sizeof(detail),
+				"dev=%s mode=%s force=%d quota_remaining_pages=%lld",
+				dev_name(dev), mode, force,
+				atomic64_read(&chs.stats.writeback_quota_remaining_pages));
+			crystal_hybridswap_auto_log_failure(CHS_LOG_INFO,
+				crystal_hybridswap_auto_failure_reason(ret), ret,
+				detail);
+		} else {
+			chs_log_ratelimited(CHS_LOG_INFO,
+				"writeback skipped daily quota dev=%s mode=%s force=%d auto=%d\n",
+				dev_name(dev), mode, force, auto_req);
+		}
 		crystal_hybridswap_report_pressure(CHS_PRESSURE_MEDIUM,
-			"writeback_quota");
+					   "writeback_quota");
 		goto out_put;
 	}
 
@@ -1935,25 +2116,50 @@ static void crystal_hybridswap_writeback_workfn(struct work_struct *work)
 	if (ret == -ENODATA) {
 		atomic64_inc(&chs.stats.writeback_skipped);
 		atomic64_inc(&chs.stats.writeback_no_data);
-		chs_log_ratelimited(CHS_LOG_INFO,
+		if (auto_req) {
+			scnprintf(detail, sizeof(detail),
+				"dev=%s mode=%s requested=%lld force=%d scanned=%lu eligible=%lu written=%lld filtered=%lu reason=no_matching_pages",
+				dev_name(dev), mode, pages, force,
+				wb_stats.scanned_pages, wb_stats.eligible_pages,
+				written_pages, wb_stats.unknown_or_filtered_pages);
+			crystal_hybridswap_auto_log_failure(CHS_LOG_INFO,
+				crystal_hybridswap_auto_failure_reason(ret), ret,
+				detail);
+		} else {
+			chs_log_ratelimited(CHS_LOG_INFO,
 				    "writeback no data dev=%s mode=%s requested=%lld force=%d reason=no_matching_pages\n",
 				    dev_name(dev), mode, pages, force);
+		}
 		crystal_hybridswap_report_pressure(CHS_PRESSURE_LOW,
-						   "writeback_no_data");
+					   "writeback_no_data");
 	} else if (ret < 0) {
 		atomic64_inc(&chs.stats.writeback_error);
-		chs_log(CHS_LOG_ERR,
-			"writeback error dev=%s mode=%s pages=%lld written=%lld ret=%d force=%d\n",
-			dev_name(dev), mode, pages, written_pages, ret, force);
+		if (auto_req && crystal_hybridswap_auto_result_needs_backoff(ret,
+				written_pages)) {
+			scnprintf(detail, sizeof(detail),
+				"dev=%s mode=%s pages=%lld written=%lld force=%d scanned=%lu eligible=%lu filtered=%lu",
+				dev_name(dev), mode, pages, written_pages, force,
+				wb_stats.scanned_pages, wb_stats.eligible_pages,
+				wb_stats.unknown_or_filtered_pages);
+			crystal_hybridswap_auto_log_failure(CHS_LOG_WARN,
+				crystal_hybridswap_auto_failure_reason(ret), ret,
+				detail);
+		} else {
+			chs_log(CHS_LOG_ERR,
+				"writeback error dev=%s mode=%s pages=%lld written=%lld ret=%d force=%d\n",
+				dev_name(dev), mode, pages, written_pages, ret, force);
+		}
 		crystal_hybridswap_report_pressure(CHS_PRESSURE_CRITICAL,
-						   "writeback_error");
+					   "writeback_error");
 	} else if (ret > 0) {
 		atomic64_inc(&chs.stats.writeback_success);
+		if (auto_req)
+			crystal_hybridswap_auto_record_result(ret, written_pages, false);
 		chs_log_ratelimited(CHS_LOG_INFO,
 				    "writeback success dev=%s mode=%s requested=%lld written=%d force=%d\n",
 				    dev_name(dev), mode, pages, ret, force);
 		crystal_hybridswap_report_pressure(CHS_PRESSURE_LOW,
-						   "writeback_success");
+					   "writeback_success");
 	} else {
 		ret = -ENODATA;
 		atomic64_inc(&chs.stats.writeback_skipped);
@@ -1961,11 +2167,22 @@ static void crystal_hybridswap_writeback_workfn(struct work_struct *work)
 		if (auto_req)
 			crystal_hybridswap_auto_record_result(ret, 0, false);
 		crystal_hybridswap_record_writeback(mode, pages, ret, 0);
-		chs_log_ratelimited(CHS_LOG_INFO,
+		if (auto_req) {
+			scnprintf(detail, sizeof(detail),
+				"dev=%s mode=%s requested=%lld force=%d scanned=%lu eligible=%lu filtered=%lu reason=zero_written",
+				dev_name(dev), mode, pages, force,
+				wb_stats.scanned_pages, wb_stats.eligible_pages,
+				wb_stats.unknown_or_filtered_pages);
+			crystal_hybridswap_auto_log_failure(CHS_LOG_INFO,
+				crystal_hybridswap_auto_failure_reason(ret), ret,
+				detail);
+		} else {
+			chs_log_ratelimited(CHS_LOG_INFO,
 				    "writeback no data dev=%s mode=%s requested=%lld force=%d reason=zero_written\n",
 				    dev_name(dev), mode, pages, force);
+		}
 		crystal_hybridswap_report_pressure(CHS_PRESSURE_LOW,
-						   "writeback_no_data");
+					   "writeback_no_data");
 	}
 
 out_put:
@@ -2592,9 +2809,14 @@ static int crystal_hybridswap_queue_writeback_internal(struct device *dev,
 {
 	struct crystal_hybridswap_zram_target *targets = NULL;
 	struct crystal_hybridswap_zram *entry = NULL;
+	struct crystal_hybridswap_writeback_target_selection selection = {
+		.best = -1,
+		.ret = -ENODEV,
+	};
 	struct zram *zram = NULL;
 	crystal_hybridswap_zram_writeback_t writeback = NULL;
 	char wb_mode[CHS_WB_MODE_MAX];
+	char detail[160];
 	s64 pending_pages;
 	int count = 0;
 	int selected = -1;
@@ -2610,9 +2832,19 @@ static int crystal_hybridswap_queue_writeback_internal(struct device *dev,
 		atomic64_inc(&chs.stats.writeback_queued);
 		atomic64_inc(&chs.stats.writeback_skipped);
 		crystal_hybridswap_record_writeback(wb_mode, pages, -ENODEV, 0);
-		chs_log_ratelimited(CHS_LOG_ERR,
-			"queue writeback skipped no workqueue mode=%s pages=%lld\n",
-			wb_mode, pages);
+		if (auto_req) {
+			scnprintf(detail, sizeof(detail),
+				"mode=%s pages=%lld reason=no_workqueue", wb_mode,
+				pages);
+			crystal_hybridswap_auto_record_result(-ENODEV, 0, false);
+			crystal_hybridswap_auto_log_failure(CHS_LOG_INFO,
+				crystal_hybridswap_auto_failure_reason(-ENODEV),
+				-ENODEV, detail);
+		} else {
+			chs_log_ratelimited(CHS_LOG_ERR,
+				"queue writeback skipped no workqueue mode=%s pages=%lld\n",
+				wb_mode, pages);
+		}
 		return -ENODEV;
 	}
 
@@ -2627,7 +2859,7 @@ static int crystal_hybridswap_queue_writeback_internal(struct device *dev,
 		count = crystal_hybridswap_collect_zram_targets(targets,
 			CHS_MAX_ZRAM_TARGETS);
 		selected = crystal_hybridswap_select_writeback_target(targets,
-			count);
+			count, &selection);
 		if (selected >= 0) {
 			dev = targets[selected].dev;
 			writeback = targets[selected].writeback;
@@ -2666,12 +2898,30 @@ static int crystal_hybridswap_queue_writeback_internal(struct device *dev,
 	atomic64_inc(&chs.stats.writeback_queued);
 
 	if (!dev || !writeback) {
+		if (!ret)
+			ret = selected >= 0 ? -EAGAIN : selection.ret;
 		atomic64_inc(&chs.stats.writeback_skipped);
-		crystal_hybridswap_record_writeback(wb_mode, pages, -ENODEV, 0);
-		chs_log_ratelimited(CHS_LOG_ERR,
-			"queue writeback skipped no eligible zram mode=%s pages=%lld auto=%d registered=%d selected=%d\n",
-			wb_mode, pages, auto_req, count, selected);
-		ret = -ENODEV;
+		crystal_hybridswap_record_writeback(wb_mode, pages, ret, 0);
+		scnprintf(detail, sizeof(detail),
+			"mode=%s pages=%lld registered=%d selected=%d eligible=%d no_writeback=%d no_backing=%d limit=%d no_resident=%d",
+			wb_mode, pages, count, selected, selection.eligible,
+			selection.no_writeback, selection.no_backing,
+			selection.limit_exhausted, selection.no_resident);
+		if (auto_req) {
+			crystal_hybridswap_auto_record_result(ret, 0, false);
+			if (crystal_hybridswap_auto_result_needs_backoff(ret, 0))
+				crystal_hybridswap_auto_log_failure(CHS_LOG_INFO,
+					crystal_hybridswap_auto_failure_reason(ret), ret,
+					detail);
+			else
+				chs_log_ratelimited(CHS_LOG_WARN,
+					"queue writeback skipped %s auto=%d ret=%d\n",
+					detail, auto_req, ret);
+		} else {
+			chs_log_ratelimited(CHS_LOG_ERR,
+				"queue writeback skipped %s auto=%d ret=%d\n",
+				detail, auto_req, ret);
+		}
 		goto out_free_targets;
 	}
 
@@ -2912,15 +3162,19 @@ static int __init crystal_hybridswap_init(void)
 		sizeof(chs.pending_writeback_mode));
 	chs.pending_writeback_auto = false;
 	chs.last_writeback_mode[0] = '\0';
+	chs.auto_last_failure_reason[0] = '\0';
 	chs.auto_last_empty_jiffies = 0;
 	chs.auto_empty_skip_jiffies = 0;
 	chs.auto_policy_window_start = 0;
+	chs.auto_last_failure_log_jiffies = 0;
 	chs.auto_policy_window_written_pages = 0;
 	chs.quota_window_start = jiffies;
+	chs.auto_last_failure_repeats = 0;
 	chs.quota_used_pages = 0;
 	crystal_hybridswap_update_quota_stats_locked(CHS_DEFAULT_QUOTA_DAY,
 		CHS_DEFAULT_QUOTA_DAY);
 	chs.auto_last_writeback_result = 0;
+	chs.auto_last_failure_ret = 0;
 	memset(&chs.last_zram_pressure, 0, sizeof(chs.last_zram_pressure));
 	chs.loop_device[0] = '\0';
 	strscpy(chs.last_force_swapin_memcg, "none",

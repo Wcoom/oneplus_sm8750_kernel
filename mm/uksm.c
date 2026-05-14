@@ -5576,8 +5576,10 @@ static inline int cal_positive_negative_costs(void)
 		return -ENOMEM;
 
 	p2 = alloc_page(GFP_KERNEL);
-	if (!p2)
+	if (!p2) {
+		__free_page(p1);
 		return -ENOMEM;
+	}
 
 	addr1 = kmap_atomic(p1);
 	addr2 = kmap_atomic(p2);

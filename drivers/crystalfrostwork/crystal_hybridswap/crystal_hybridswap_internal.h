@@ -624,13 +624,17 @@ struct crystal_hybridswap_state {
 	int last_pressure_ret;
 	char last_pressure_reason[CHS_PRESSURE_REASON_MAX];
 	char last_auto_reason[CHS_PRESSURE_REASON_MAX];
+	char auto_last_failure_reason[CHS_PRESSURE_REASON_MAX];
 	unsigned long auto_last_empty_jiffies;
 	unsigned long auto_empty_skip_jiffies;
 	unsigned long auto_policy_window_start;
+	unsigned long auto_last_failure_log_jiffies;
 	u64 auto_policy_window_written_pages;
 	unsigned long quota_window_start;
+	u32 auto_last_failure_repeats;
 	u64 quota_used_pages;
 	s64 auto_last_writeback_result;
+	s64 auto_last_failure_ret;
 	struct crystal_hybridswap_zram_pressure last_zram_pressure;
 	struct dentry *debugfs_root;
 	struct crystal_hybridswap_stats stats;

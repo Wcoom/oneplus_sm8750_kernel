@@ -5026,12 +5026,19 @@ static struct ksm_stable_node *uksm_check_stable_tree(unsigned long start_pfn,
 	struct rb_node *node;
 
 	for (node = rb_first(root_stable_treep); node; node = rb_next(node)) {
-		struct ksm_stable_node *stable_node;
+		struct tree_node *tree_node;
+		struct rb_node *subnode;
 
-		stable_node = rb_entry(node, struct ksm_stable_node, node);
-		if (stable_node->kpfn >= start_pfn &&
-		    stable_node->kpfn < end_pfn)
-			return stable_node;
+		tree_node = rb_entry(node, struct tree_node, node);
+		for (subnode = rb_first(&tree_node->sub_root); subnode;
+		     subnode = rb_next(subnode)) {
+			struct ksm_stable_node *stable_node;
+
+			stable_node = rb_entry(subnode, struct ksm_stable_node, node);
+			if (stable_node->kpfn >= start_pfn &&
+			    stable_node->kpfn < end_pfn)
+				return stable_node;
+		}
 	}
 	return NULL;
 }

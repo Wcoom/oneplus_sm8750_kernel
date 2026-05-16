@@ -4595,6 +4595,7 @@ check_folio:
 	VM_BUG_ON(!folio_test_anon(folio) ||
 			(pte_write(pte) && !PageAnonExclusive(page)));
 	set_ptes(vma->vm_mm, address, ptep, pte, nr_pages);
+	folio_activate_on_mapped(folio);
 	arch_do_swap_page_nr(vma->vm_mm, vma, address,
 			pte, pte, nr_pages);
 
@@ -5010,6 +5011,7 @@ vm_fault_t do_set_pmd(struct vm_fault *vmf, struct page *page)
 		deposit_prealloc_pte(vmf);
 
 	set_pmd_at(vma->vm_mm, haddr, vmf->pmd, entry);
+	folio_activate_on_mapped(folio);
 
 	update_mmu_cache_pmd(vma, haddr, vmf->pmd);
 
@@ -5067,6 +5069,7 @@ void set_pte_range(struct vm_fault *vmf, struct folio *folio,
 		folio_add_file_rmap_ptes(folio, page, nr, vma);
 	}
 	set_ptes(vma->vm_mm, addr, vmf->pte, entry, nr);
+	folio_activate_on_mapped(folio);
 
 	/* no need to invalidate: a not-present page won't be cached */
 	update_mmu_cache_range(vmf, vma, addr, vmf->pte, nr);

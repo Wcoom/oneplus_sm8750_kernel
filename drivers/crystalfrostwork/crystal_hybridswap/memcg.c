@@ -3,6 +3,7 @@
 
 #include <linux/cgroup.h>
 #include <linux/errno.h>
+#include <linux/err.h>
 #include <linux/kernel.h>
 #include <linux/math64.h>
 #include <linux/memcontrol.h>
@@ -217,6 +218,29 @@ static int memcg_collect_snapshots(struct crystal_hybridswap_memcg **out)
 
 	*out = snapshots;
 	return copied;
+}
+
+static int memcg_snapshot_at(struct crystal_hybridswap_memcg *snapshot,
+		loff_t index)
+{
+	struct crystal_hybridswap_memcg *entry;
+	loff_t pos = 0;
+	int ret = -ENOENT;
+
+	if (!snapshot || index < 0)
+		return -EINVAL;
+
+	mutex_lock(&memcg_lock);
+	list_for_each_entry(entry, &memcg_list, node) {
+		if (pos++ != index)
+			continue;
+		memcg_snapshot_copy(snapshot, entry);
+		ret = 0;
+		break;
+	}
+	mutex_unlock(&memcg_lock);
+
+	return ret;
 }
 
 static void memcg_css_offline(void *data, struct cgroup_subsys_state *css,
@@ -1370,55 +1394,95 @@ static int memcg_swap_stat_show(struct seq_file *m, void *v)
 	return 0;
 }
 
+static void *memcg_total_info_per_app_start(struct seq_file *m, loff_t *pos)
+{
+	struct crystal_hybridswap_memcg *snapshot;
+	int ret;
+
+	if (*pos == 0)
+		return SEQ_START_TOKEN;
+
+	snapshot = kmalloc(sizeof(*snapshot), GFP_KERNEL);
+	if (!snapshot)
+		return ERR_PTR(-ENOMEM);
+
+	ret = memcg_snapshot_at(snapshot, *pos - 1);
+	if (ret) {
+		kfree(snapshot);
+		return ret == -ENOENT ? NULL : ERR_PTR(ret);
+	}
+
+	return snapshot;
+}
+
+static void *memcg_total_info_per_app_next(struct seq_file *m, void *v,
+		loff_t *pos)
+{
+	struct crystal_hybridswap_memcg *snapshot = v;
+	int ret;
+
+	++*pos;
+	if (v == SEQ_START_TOKEN)
+		return memcg_total_info_per_app_start(m, pos);
+
+	ret = memcg_snapshot_at(snapshot, *pos - 1);
+	if (ret) {
+		kfree(snapshot);
+		return ret == -ENOENT ? NULL : ERR_PTR(ret);
+	}
+
+	return snapshot;
+}
+
+static void memcg_total_info_per_app_stop(struct seq_file *m, void *v)
+{
+	if (!v || v == SEQ_START_TOKEN || IS_ERR(v))
+		return;
+
+	kfree(v);
+}
+
 static int memcg_total_info_per_app_show(struct seq_file *m, void *v)
 {
-	struct crystal_hybridswap_memcg *snapshots;
-	int count;
-	int i;
+	struct crystal_hybridswap_memcg *entry = v;
+	struct crystal_hybridswap_memcg_zram_stats zram_stats;
+	s64 zram_compressed_kb = 0;
+	s64 zram_original_kb = 0;
+	s64 eswap_compressed_kb = 0;
+	s64 eswap_original_kb = 0;
+	int zram_ret;
 
-	seq_printf(m, "%-8s %-8s %-8s %-8s %-8s %-24s %-8s %-8s %-8s %-8s %-8s %-10s %-12s %-12s %-12s %-8s\n",
-		   "anon", "zram_c", "zram_p", "eswap_c", "eswap_p",
-		   "memcg_n", "score", "uid", "policy", "out_trig",
-		   "in_mb", "in_request", "in_req_pages",
-		   "in_eff_pages", "in_moved_pages", "in_ret");
-
-	count = memcg_collect_snapshots(&snapshots);
-	if (count < 0)
-		return count;
-
-	for (i = 0; i < count; i++) {
-		struct crystal_hybridswap_memcg *entry = &snapshots[i];
-		struct crystal_hybridswap_memcg_zram_stats zram_stats;
-		s64 zram_compressed_kb = 0;
-		s64 zram_original_kb = 0;
-		s64 eswap_compressed_kb = 0;
-		s64 eswap_original_kb = 0;
-		int zram_ret;
-
-		zram_ret = crystal_hybridswap_collect_memcg_zram_stats(
-			entry->cgroup_id, &zram_stats);
-		if (!zram_ret) {
-			zram_compressed_kb = zram_stats.zram_compressed_size >> 10;
-			zram_original_kb = zram_stats.zram_original_size >> 10;
-			eswap_compressed_kb = zram_stats.writeback_size >> 10;
-			eswap_original_kb = zram_stats.writeback_original_size >> 10;
-		}
-		seq_printf(m, "%-8d %-8lld %-8lld %-8lld %-8lld %-24s %-8lld %-8lld %-8d %-8lld %-8lld %-10lld %-12lld %-12lld %-12lld %-8lld\n",
-			   0, zram_compressed_kb, zram_original_kb,
-			   eswap_compressed_kb, eswap_original_kb,
-			   entry->name,
-			   atomic64_read(&entry->app_score),
-			   atomic64_read(&entry->app_uid),
-			   atomic_read(&entry->policy_level),
-			   atomic64_read(&entry->force_swapout_last_mb),
-			   memcg_pages_to_mb(atomic64_read(&entry->force_swapin_last_pages)),
-			   atomic64_read(&entry->force_swapin_last_request),
-			   atomic64_read(&entry->force_swapin_last_pages),
-			   atomic64_read(&entry->force_swapin_last_effective_pages),
-			   atomic64_read(&entry->force_swapin_last_batchin_pages),
-			   atomic64_read(&entry->force_swapin_last_ret));
+	if (v == SEQ_START_TOKEN) {
+		seq_printf(m, "%-8s %-8s %-8s %-8s %-8s %-24s %-8s %-8s %-8s %-8s %-8s %-10s %-12s %-12s %-12s %-8s\n",
+			   "anon", "zram_c", "zram_p", "eswap_c", "eswap_p",
+			   "memcg_n", "score", "uid", "policy", "out_trig",
+			   "in_mb", "in_request", "in_req_pages",
+			   "in_eff_pages", "in_moved_pages", "in_ret");
+		return 0;
 	}
-	kfree(snapshots);
+
+	zram_ret = crystal_hybridswap_collect_memcg_zram_stats(entry->cgroup_id,
+		&zram_stats);
+	if (!zram_ret) {
+		zram_compressed_kb = zram_stats.zram_compressed_size >> 10;
+		zram_original_kb = zram_stats.zram_original_size >> 10;
+		eswap_compressed_kb = zram_stats.writeback_size >> 10;
+		eswap_original_kb = zram_stats.writeback_original_size >> 10;
+	}
+	seq_printf(m, "%-8d %-8lld %-8lld %-8lld %-8lld %-24s %-8lld %-8lld %-8d %-8lld %-8lld %-10lld %-12lld %-12lld %-12lld %-8lld\n",
+		   0, zram_compressed_kb, zram_original_kb,
+		   eswap_compressed_kb, eswap_original_kb,
+		   entry->name,
+		   atomic64_read(&entry->app_score),
+		   atomic64_read(&entry->app_uid),
+		   atomic_read(&entry->policy_level),
+		   atomic64_read(&entry->force_swapout_last_mb),
+		   memcg_pages_to_mb(atomic64_read(&entry->force_swapin_last_pages)),
+		   atomic64_read(&entry->force_swapin_last_request),
+		   atomic64_read(&entry->force_swapin_last_pages),
+		   atomic64_read(&entry->force_swapin_last_effective_pages),
+		   atomic64_read(&entry->force_swapin_last_batchin_pages),
+		   atomic64_read(&entry->force_swapin_last_ret));
 
 	return 0;
 }
@@ -2030,6 +2094,9 @@ static struct cftype crystal_hybridswap_memcg_files[] = {
 	{
 		.name = "total_info_per_app",
 		.flags = CFTYPE_ONLY_ON_ROOT,
+		.seq_start = memcg_total_info_per_app_start,
+		.seq_next = memcg_total_info_per_app_next,
+		.seq_stop = memcg_total_info_per_app_stop,
 		.seq_show = memcg_total_info_per_app_show,
 	},
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS

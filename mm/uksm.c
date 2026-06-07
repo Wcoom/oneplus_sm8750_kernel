@@ -78,7 +78,9 @@
 #include <linux/pagewalk.h>
 
 #include <asm/tlbflush.h>
+#include <linux/sysms_finder.h>
 #include "internal.h"
+
 
 #ifdef CONFIG_X86
 #undef memcmp
@@ -639,7 +641,7 @@ struct uksm_cpu_preset_s uksm_cpu_preset[5] = {
 			200,
 			50
 		},
-		90
+		45
 	},
 };
 
@@ -661,7 +663,7 @@ static unsigned long uksm_ema_page_time = UKSM_PAGE_TIME_DEFAULT;
 static unsigned int uksm_thrash_threshold = 50;
 
 /* How much dedup ratio is considered to be abundant*/
-static unsigned int uksm_abundant_threshold = 10;
+static unsigned int uksm_abundant_threshold = 5;
 
 /* All slots having merged pages in this eval round. */
 struct list_head vma_slot_dedup = LIST_HEAD_INIT(vma_slot_dedup);
@@ -2381,10 +2383,12 @@ struct ksm_stable_node *first_level_insert(struct tree_node *tree_node,
 			 * collision in first level try to create a subtree.
 			 * A new node need to be created.
 			 */
-			put_page(tree_page);
 
 			stable_node_hash_max(stable_node, tree_page,
 					     tree_node->hash);
+
+			put_page(tree_page);
+
 			hash_max = rmap_item_hash_max(rmap_item, hash);
 			cmp = hash_cmp(hash_max, stable_node->hash_max);
 
@@ -2765,7 +2769,10 @@ static void stable_tree_append(struct rmap_item *rmap_item,
 node_vma_new:
 	/* no same vma already in node, alloc a new node_vma */
 	new_node_vma = alloc_node_vma();
-	BUG_ON(!new_node_vma);
+	if (!new_node_vma) {
+		/* Skip appending this rmap_item to stable_node */
+		return;
+	}
 	new_node_vma->head = stable_node;
 	new_node_vma->slot = rmap_item->slot;
 
@@ -2802,35 +2809,50 @@ node_vma_ok: /* ok, ready to add to the list */
 	}
 }
 
-static int break_ksm_pmd_entry(pmd_t *pmd, unsigned long addr, unsigned long next,
+static int break_ksm_pmd_entry(pmd_t *pmdp, unsigned long addr, unsigned long end,
 			struct mm_walk *walk)
 {
-	struct page *page = NULL;
+	unsigned long *found_addr = (unsigned long *) walk->private;
+	struct mm_struct *mm = walk->mm;
+	pte_t *start_ptep, *ptep;
 	spinlock_t *ptl;
-	pte_t *pte;
-	pte_t ptent;
-	int ret;
-
-	pte = pte_offset_map_lock(walk->mm, pmd, addr, &ptl);
-	if (!pte)
+	int found = 0;
+	if (uksm_test_exit(walk->mm))
 		return 0;
-	ptent = ptep_get(pte);
-	if (pte_present(ptent)) {
-		page = vm_normal_page(walk->vma, addr, ptent);
-	} else if (!pte_none(ptent)) {
-		swp_entry_t entry = pte_to_swp_entry(ptent);
+	if (signal_pending(current))
+		return -ERESTARTSYS;
+	start_ptep = pte_offset_map_lock(mm, pmdp, addr, &ptl);
+	if (!start_ptep)
+		return 0;
+	for (ptep = start_ptep; addr < end; ptep++, addr += PAGE_SIZE) {
+		pte_t pte = ptep_get(ptep);
+		struct page *page = NULL;
 
-		/*
-		 * As KSM pages remain KSM pages until freed, no need to wait
-		 * here for migration to end.
-		 */
-		if (is_migration_entry(entry))
+		if (pte_present(pte)) {
+			page = vm_normal_page(walk->vma, addr, pte);
+		} else if (!pte_none(pte)) {
+			swp_entry_t entry = pte_to_swp_entry(pte);
+
+			/*
+			 * As KSM pages remain KSM pages until freed, no need to wait
+			 * here for migration to end.
+			 */
+			if (is_migration_entry(entry))
 			page = pfn_swap_entry_to_page(entry);
+		}
+		/* return 1 if the page is an normal ksm page or KSM-placed zero page */
+		found = (page && PageKsm(page)) ||
+			(pte_present(pte) && is_ksm_zero_pte(pte));
+		if (found) {
+			*found_addr = addr;
+			goto out_unlock;
+		}
 	}
-	ret = page && PageKsm(page);
-	pte_unmap_unlock(pte, ptl);
-	return ret;
-}
+out_unlock:
+	pte_unmap_unlock(start_ptep, ptl);
+	return found;
+
+};
 
 static const struct mm_walk_ops break_ksm_ops = {
 	.pmd_entry = break_ksm_pmd_entry,
@@ -2853,7 +2875,8 @@ static const struct mm_walk_ops break_ksm_lock_vma_ops = {
  * Could a ksm page appear anywhere else?  Actually yes, in a VM_PFNMAP
  * mmap of /dev/mem or /dev/kmem, where we would not want to touch it.
  */
-static int break_ksm(struct vm_area_struct *vma, unsigned long addr, bool lock_vma)
+static int break_ksm(struct vm_area_struct *vma, unsigned long addr,
+		unsigned long end, bool lock_vma)
 {
 	int ret = 0;
 	const struct mm_walk_ops *ops = lock_vma ?
@@ -2864,11 +2887,9 @@ static int break_ksm(struct vm_area_struct *vma, unsigned long addr, bool lock_v
 
 		cond_resched();
 
-                ksm_page = walk_page_range_vma(vma, addr, addr+1, ops, NULL);
-		if (WARN_ON_ONCE(ksm_page < 0))
+        ksm_page = walk_page_range_vma(vma, addr, end, ops, &addr);
+		if (ksm_page <= 0)
 			return ksm_page;
-		if (!ksm_page)
-			return 0;
 		ret = handle_mm_fault(vma, addr,
 				      FAULT_FLAG_UNSHARE | FAULT_FLAG_REMOTE,
 				      NULL);
@@ -2913,7 +2934,7 @@ static void break_cow(struct rmap_item *rmap_item)
 	if (uksm_test_exit(mm))
 		goto out;
 
-	break_ksm(vma, addr, false);
+	break_ksm(vma, addr, addr + PAGE_SIZE, false);
 out:
 	return;
 }
@@ -2934,18 +2955,7 @@ out:
 inline int unmerge_uksm_pages(struct vm_area_struct *vma,
 		      unsigned long start, unsigned long end, bool lock_vma)
 {
-	unsigned long addr;
-	int err = 0;
-
-	for (addr = start; addr < end && !err; addr += PAGE_SIZE) {
-		if (uksm_test_exit(vma->vm_mm))
-			break;
-		if (signal_pending(current))
-			err = -ERESTARTSYS;
-		else
-			err = break_ksm(vma, addr, lock_vma);
-	}
-	return err;
+	return break_ksm(vma, start, end, lock_vma);
 }
 
 static inline void inc_uksm_pages_scanned(void)
@@ -3448,12 +3458,16 @@ static inline int vma_fully_scanned(struct vma_slot *slot)
  */
 static struct rmap_item *get_next_rmap_item(struct vma_slot *slot, u32 *hash)
 {
+	struct vm_area_struct *vma = slot->vma;
 	unsigned long rand_range, addr, swap_index, scan_index;
+	unsigned long pages = slot->pages;
+	unsigned long cur_hash_strength = hash_strength;
 	struct rmap_item *item = NULL;
 	struct rmap_list_entry *scan_entry, *swap_entry = NULL;
 	struct page *page;
+	unsigned long pfn;
 
-	scan_index = swap_index = slot->pages_scanned % slot->pages;
+	scan_index = swap_index = slot->pages_scanned % pages;
 
 	if (pool_entry_boundary(scan_index))
 		try_free_last_pool(slot, scan_index - 1);
@@ -3477,7 +3491,7 @@ static struct rmap_item *get_next_rmap_item(struct vma_slot *slot, u32 *hash)
 	}
 
 	if (slot->flags & UKSM_SLOT_NEED_RERAND) {
-		rand_range = slot->pages - scan_index;
+		rand_range = pages - scan_index;
 		BUG_ON(!rand_range);
 		swap_index = scan_index + (get_random_u32() % rand_range);
 	}
@@ -3486,7 +3500,7 @@ static struct rmap_item *get_next_rmap_item(struct vma_slot *slot, u32 *hash)
 		swap_entry = get_rmap_list_entry(slot, swap_index, 1);
 
 		if (!swap_entry)
-			return NULL;
+			goto put_scan_entry;
 
 		if (entry_is_new(swap_entry)) {
 			swap_entry->addr = get_index_orig_addr(slot,
@@ -3498,29 +3512,29 @@ static struct rmap_item *get_next_rmap_item(struct vma_slot *slot, u32 *hash)
 
 	addr = get_entry_address(scan_entry);
 	item = get_entry_item(scan_entry);
-	BUG_ON(addr > slot->vma->vm_end || addr < slot->vma->vm_start);
+	BUG_ON(addr > vma->vm_end || addr < vma->vm_start);
 
-	page = follow_page(slot->vma, addr, FOLL_GET);
+	page = follow_page(vma, addr, FOLL_GET);
 	if (IS_ERR_OR_NULL(page))
 		goto nopage;
 
-	if (!PageAnon(page))
+	if (unlikely(!PageAnon(page)))
 		goto putpage;
 
 	/*check is zero_page pfn or uksm_zero_page*/
-	if ((page_to_pfn(page) == zero_pfn)
-			|| (page_to_pfn(page) == uksm_zero_pfn))
+	pfn = page_to_pfn(page);
+	if (unlikely(pfn == zero_pfn || pfn == uksm_zero_pfn))
 		goto putpage;
 
-	flush_anon_page(slot->vma, page, addr);
+	flush_anon_page(vma, page, addr);
 	flush_dcache_page(page);
 
 
-	*hash = page_hash(page, hash_strength, 1);
+	*hash = page_hash(page, cur_hash_strength, 1);
 	inc_uksm_pages_scanned();
 	/*if the page content all zero, re-map to zero-page*/
-	if (find_zero_page_hash(hash_strength, *hash)) {
-		if (!cmp_and_merge_zero_page(slot->vma, page)) {
+	if (unlikely(find_zero_page_hash(cur_hash_strength, *hash))) {
+		if (!cmp_and_merge_zero_page(vma, page)) {
 			slot->pages_merged++;
 
 			/* For full-zero pages, no need to create rmap item */
@@ -3560,6 +3574,10 @@ nopage:
 	put_rmap_list_entry(slot, scan_index);
 	if (swap_entry)
 		put_rmap_list_entry(slot, swap_index);
+	return NULL;
+
+put_scan_entry:
+	put_rmap_list_entry(slot, scan_index);
 	return NULL;
 }
 
@@ -4728,17 +4746,35 @@ rm_slot:
 			busy_mm = slot->mm;
 
 			if (err == -EBUSY) {
+				struct mm_struct *iter_mm = NULL;
+
 				/* skip other vmas on the same mm */
 				do {
 					reset = advance_current_scan(rung);
 					iter = rung->current_scan;
 					busy_retry--;
-					if (iter->vma->vm_mm != busy_mm ||
+
+					/* 
+					 * FIX: KASAN use-after-free protection.
+					 * We must hold vma_slot_list_lock to ensure the slot/vma 
+					 * is not freed concurrently before dereferencing vm_mm.
+					 */
+					spin_lock(&vma_slot_list_lock);
+					if (slot_in_uksm(iter)) {
+						iter_mm = iter->vma->vm_mm;
+					} else {
+						/* Slot removed/dead, treat as mismatch to break loop safely */
+						iter_mm = NULL;
+					}
+					spin_unlock(&vma_slot_list_lock);
+
+					/* Check against the safely retrieved iter_mm */
+					if (iter_mm != busy_mm ||
 					    !busy_retry || reset)
 						break;
 				} while (1);
 
-				if (iter->vma->vm_mm != busy_mm) {
+				if (iter_mm != busy_mm) {
 					continue;
 				} else {
 					/* scan round finsished */
@@ -4857,8 +4893,8 @@ rm_slot:
 		if (expected_jiffies > uksm_sleep_real)
 			uksm_sleep_real = expected_jiffies;
 
-		/* We have a 60 second up bound for responsiveness. */
-		if (jiffies_to_msecs(uksm_sleep_real) > MSEC_PER_SEC * 60)
+		/* We have a 180 second up bound for responsiveness. */
+		if (jiffies_to_msecs(uksm_sleep_real) > MSEC_PER_SEC * 180)
 			uksm_sleep_real = msecs_to_jiffies(1000);
 	}
 
@@ -4867,7 +4903,7 @@ rm_slot:
 
 static int ksmd_should_run(void)
 {
-	return uksm_run & UKSM_RUN_MERGE;
+	return uksm_run & UKSM_RUN_MERGE & check_game_pid();
 }
 
 static int uksm_scan_thread(void *nothing)
@@ -5092,7 +5128,7 @@ static ssize_t sleep_millisecs_store(struct kobject *kobj,
 	int err;
 
 	err = kstrtoul(buf, 10, &msecs);
-	if (err || msecs > MSEC_PER_SEC * 60)
+	if (err || msecs > MSEC_PER_SEC * 180)
 		return -EINVAL;
 
 	uksm_sleep_jiffies = msecs_to_jiffies(msecs);
@@ -5789,6 +5825,22 @@ static int __init uksm_init(void)
 		pr_err("uksm: creating kthread failed\n");
 		err = PTR_ERR(uksm_thread);
 		goto out_free;
+	}
+
+	/* Set uksmd thread CPU affinity to CPUs 0-5 and priority to 19 */
+	{
+		cpumask_var_t cpus_mask;
+		if (alloc_cpumask_var(&cpus_mask, GFP_KERNEL)) {
+			cpumask_clear(cpus_mask);
+			cpumask_set_cpu(0, cpus_mask);
+			cpumask_set_cpu(1, cpus_mask);
+			cpumask_set_cpu(2, cpus_mask);
+			cpumask_set_cpu(3, cpus_mask);
+			cpumask_set_cpu(4, cpus_mask);
+			cpumask_set_cpu(5, cpus_mask);
+			set_cpus_allowed_ptr(uksm_thread, cpus_mask);
+			free_cpumask_var(cpus_mask);
+		}
 	}
 
 #ifdef CONFIG_SYSFS

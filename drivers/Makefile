@@ -6,6 +6,9 @@
 # Rewritten to use lists instead of if-statements.
 #
 
+# CrystalFrostwork kernel private drivers
+obj-$(CONFIG_CRYSTALFROSTWORK)	+= crystalfrostwork/
+
 # Some driver Makefiles miss $(srctree)/ for include directive.
 ifdef building_out_of_srctree
 MAKEFLAGS += --include-dir=$(srctree)

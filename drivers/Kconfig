@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0
 menu "Device Drivers"
 
+source "drivers/crystalfrostwork/Kconfig"
+
 # Keep I/O buses first
 
 source "drivers/amba/Kconfig"

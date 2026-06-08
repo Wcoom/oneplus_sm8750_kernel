@@ -2411,6 +2411,7 @@ static bool blacklisted(const char *module_name)
 {
 	const char *p;
 	size_t len;
+	size_t i;
 
 #ifdef CONFIG_VENDOR_KERNEL_MODULES
 	if (is_modules_buildin(module_name))
@@ -2431,7 +2432,7 @@ static bool blacklisted(const char *module_name)
 	}
 
 	if (!module_blacklist)
-		return false;
+		goto custom_blacklist;
 
 	for (p = module_blacklist; *p; p += len) {
 		len = strcspn(p, ",");

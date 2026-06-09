@@ -2390,46 +2390,34 @@ int __weak module_frob_arch_sections(Elf_Ehdr *hdr,
 static char *module_blacklist;
 static char *custom_module_blacklist[] = {
 #if IS_BUILTIN(CONFIG_CRYPTO_LZO)
-    "lzo", "lzo_rle",
+    "lzo", "lzo_rle", 
 #endif
-#if IS_BUILTIN(CONFIG_ZRAM)
-    "zram",
+#if IS_BUILTIN(CONFIG_CRYSTAL_HYBRIDSWAP)
+	"oplus_bsp_hybridswap_zram", "oplus_bsp_zram_opt", 
+	"oplus_bsp_fg_protect", "oplus_exit_mm_optimize", 
 #endif
 #if IS_BUILTIN(CONFIG_ZSMALLOC)
-    "zsmalloc",
+    "oplus_bsp_zsmalloc", 
 #endif
-#ifdef CONFIG_ZSMALLOC_OPLUS_COMPACTIBLE
-    "oplus_bsp_zsmalloc",
+#ifdef CONFIG_DEBLOAT_VENDOR_MODULES
+	/* Coresight, Do not disable the coresight core, as it is dependent on msm_kgsl. */
+	"coresight_tpda", "coresight_tgu", "coresight_trace_noc", 
+	"coresight_cti", "coresight_qmi", "coresight_dummy", 
+	"coresight_remote_etm", "coresight_tpdm", "coresight_uetm", 
+	"coresight_stm", "coresight_tmc_sec", 
+	"f_fs_ipc_log", "qcom_iommu_debug", "qti_battery_debug", 
+	"rdbg", "stm_heartbeat", "stm_p_ost", "stm_core", 
+	"stm_ftrace", "stm_console", "spmi_pmic_arb_debug", 
+#endif
+#ifdef CONFIG_STAR_BLACK_LIST
 #endif
 };
-
-#ifdef CONFIG_VENDOR_KERNEL_MODULES
-bool is_modules_buildin(const char *name);
-#endif
 
 static bool blacklisted(const char *module_name)
 {
 	const char *p;
 	size_t len;
-	size_t i;
-
-#ifdef CONFIG_VENDOR_KERNEL_MODULES
-	if (is_modules_buildin(module_name))
-		return true;
-#endif
-
-	if (strlen(CONFIG_KERNEL_MODULES_BLACKLIST)) {
-		for (p = CONFIG_KERNEL_MODULES_BLACKLIST; *p; p += len) {
-			len = strcspn(p, ",");
-			if (strlen(module_name) == len &&
-			    !memcmp(module_name, p, len)) {
-				pr_info("Skip load blacklist module: %s\n", module_name);
-				return true;
-			}
-			if (p[len] == ',')
-				len++;
-		}
-	}
+	int i;
 
 	if (!module_blacklist)
 		goto custom_blacklist;
@@ -2441,6 +2429,7 @@ static bool blacklisted(const char *module_name)
 		if (p[len] == ',')
 			len++;
 	}
+
 custom_blacklist:
 	for (i = 0; i < ARRAY_SIZE(custom_module_blacklist); i++)
 		if (!strcmp(module_name, custom_module_blacklist[i]))
@@ -2894,10 +2883,6 @@ static int early_mod_check(struct load_info *info, int flags)
 	 * Now that we know we have the correct module name, check
 	 * if it's blacklisted.
 	 */
-	if (blacklisted(info->name)) {
-		pr_err("Module %s is blacklisted\n", info->name);
-		return -EPERM;
-	}
 
 	err = rewrite_section_headers(info, flags);
 	if (err)
@@ -2995,6 +2980,11 @@ static int load_module(struct load_info *info, const char __user *uargs,
 	err = early_mod_check(info, flags);
 	if (err)
 		goto free_copy;
+    
+    if (blacklisted(info->name)) {
+		pr_err("Module %s is blacklisted\n", info->name);
+		goto free_copy;
+	}
 
 	/* Figure out module layout, and allocate all the memory. */
 	mod = layout_and_allocate(info, flags);

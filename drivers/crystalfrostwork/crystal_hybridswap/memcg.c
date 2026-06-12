@@ -16,6 +16,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/swap.h>
+#include <linux/vmstat.h>
 #include <linux/workqueue.h>
 #include <trace/hooks/mm.h>
 #include <trace/hooks/vmscan.h>
@@ -40,6 +41,8 @@ static bool memcg_css_offline_hook_registered;
 #define CHS_FORCE_SHRINK_DEFAULT_BATCH		(1UL << 10)
 #define CHS_FORCE_SHRINK_MAX_BATCH_PAGES	(16UL * CHS_PAGES_PER_MB)
 #define CHS_FORCE_SHRINK_MAX_QUEUED_PER_TYPE	4
+#define CHS_FORCE_SHRINK_FILE_LOW_PAGES \
+	(((unsigned long)SZ_512M + SZ_256M) >> PAGE_SHIFT)
 #define CHS_PF_SHRINK_ANON			PF__HOLE__02000000
 
 struct crystal_hybridswap_force_shrink_req {
@@ -359,6 +362,12 @@ static unsigned long memcg_force_shrink_lru_pages(struct mem_cgroup *memcg,
 		active ? NR_ACTIVE_ANON : NR_INACTIVE_ANON);
 }
 
+static bool memcg_force_shrink_file_low(void)
+{
+	return global_node_page_state(NR_INACTIVE_FILE) <
+		CHS_FORCE_SHRINK_FILE_LOW_PAGES;
+}
+
 static int memcg_force_shrink_parse(struct mem_cgroup *memcg, bool file,
 				    char *buf, unsigned long *reclaim_flag,
 				    unsigned long *target, unsigned long *batch,
@@ -579,6 +588,15 @@ static void memcg_force_shrink_workfn(struct work_struct *work)
 		req->file ? "file_only_no_swap" :
 		(hook_registered ? "anon_hook" : "best_effort"));
 
+	if (req->file && memcg_force_shrink_file_low()) {
+		ret = -EBUSY;
+		chs_log(CHS_LOG_INFO,
+			"force_shrink_file skip low inactive_file memcg=%s id=%llu threshold_pages=%lu\n",
+			req->memcg_name, req->cgroup_id,
+			CHS_FORCE_SHRINK_FILE_LOW_PAGES);
+		goto out;
+	}
+
 	while (reclaimed_total < req->target) {
 		unsigned long todo = min(req->batch,
 			req->target - reclaimed_total);
@@ -598,10 +616,17 @@ static void memcg_force_shrink_workfn(struct work_struct *work)
 		if (!reclaimed)
 			break;
 		reclaimed_total += reclaimed;
+		if (req->file && memcg_force_shrink_file_low()) {
+			chs_log(CHS_LOG_INFO,
+				"force_shrink_file stop low inactive_file memcg=%s id=%llu reclaimed=%lu threshold_pages=%lu\n",
+				req->memcg_name, req->cgroup_id, reclaimed_total,
+				CHS_FORCE_SHRINK_FILE_LOW_PAGES);
+			break;
+		}
 		cond_resched();
 	}
 
-	if (!reclaimed_total)
+	if (!reclaimed_total && !ret)
 		ret = -ENODATA;
 
 out:

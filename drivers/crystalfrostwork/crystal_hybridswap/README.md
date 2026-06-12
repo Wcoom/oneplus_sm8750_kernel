@@ -258,10 +258,17 @@ Common memcg nodes include:
 
 - `memory.force_swapout`
 - `memory.force_swapin`
+- `memory.force_shrink_anon_percent`
 - `memory.force_shrink_anon`
 - `memory.force_shrink_file`
 - `memory.swapd_pressure`
 - `memory.total_info_per_app`
+
+`memory.force_shrink_anon_percent` accepts a percentage from 1 to 100
+and requests enough anonymous reclaim to make zram/writeback pages reach
+that percentage of the memcg's local anonymous working set. The existing
+`memory.force_shrink_file` path keeps a global inactive-file reserve and
+stops early when the reserve would fall below 768 MiB.
 
 When `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM` is enabled, Crystal also exposes the legacy `memory.swapd_memcgs_param` root cgroup node and `memory.swapd_single_memcg_param` per-memcg node. When that option is disabled, these nodes are hidden and automatic memcg writeback is not controlled by the old score/ratio policy.
 

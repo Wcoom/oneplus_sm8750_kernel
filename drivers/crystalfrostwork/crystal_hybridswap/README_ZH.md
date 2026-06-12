@@ -258,10 +258,17 @@ echo '...' > /sys/fs/cgroup/memory/<cg_path>/memory.swapd_single_memcg_param
 
 - `memory.force_swapout`
 - `memory.force_swapin`
+- `memory.force_shrink_anon_percent`
 - `memory.force_shrink_anon`
 - `memory.force_shrink_file`
 - `memory.swapd_pressure`
 - `memory.total_info_per_app`
+
+`memory.force_shrink_anon_percent` 接受 1 到 100 的百分比，
+按当前 memcg 本地匿名页加 zram/writeback 页计算目标换出比例，
+只对尚未达到目标的差额发起匿名页回收。现有
+`memory.force_shrink_file` 路径会保留全局 inactive file 低水位，
+当继续回收可能低于 768 MiB 时拒绝或提前停止。
 
 启用 `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM` 时，Crystal 还会暴露旧 `memory.swapd_memcgs_param` 根 cgroup 节点和 `memory.swapd_single_memcg_param` per-memcg 节点。关闭该选项时，这些节点不暴露，自动 memcg 写回也不受旧 score/ratio 策略控制。
 

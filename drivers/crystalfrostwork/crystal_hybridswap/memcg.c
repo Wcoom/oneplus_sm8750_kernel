@@ -10,6 +10,7 @@
 #include <linux/mmzone.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/nodemask.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
 #include <linux/seq_file.h>
@@ -362,6 +363,30 @@ static unsigned long memcg_force_shrink_lru_pages(struct mem_cgroup *memcg,
 		active ? NR_ACTIVE_ANON : NR_INACTIVE_ANON);
 }
 
+static unsigned long
+memcg_force_shrink_lru_pages_local(struct mem_cgroup *memcg,
+				   enum node_stat_item idx)
+{
+	unsigned long pages = 0;
+	int nid;
+
+	for_each_node_state(nid, N_MEMORY) {
+		struct lruvec *lruvec;
+
+		lruvec = mem_cgroup_lruvec(memcg, NODE_DATA(nid));
+		pages += lruvec_page_state_local(lruvec, idx);
+	}
+
+	return pages;
+}
+
+static unsigned long
+memcg_force_shrink_anon_pages_local(struct mem_cgroup *memcg)
+{
+	return memcg_force_shrink_lru_pages_local(memcg, NR_INACTIVE_ANON) +
+		memcg_force_shrink_lru_pages_local(memcg, NR_ACTIVE_ANON);
+}
+
 static bool memcg_force_shrink_file_low(void)
 {
 	return global_node_page_state(NR_INACTIVE_FILE) <
@@ -648,46 +673,21 @@ out:
 	kfree(req);
 }
 
-static ssize_t memcg_force_shrink_write(struct kernfs_open_file *of, char *buf,
-				       size_t nbytes, bool file)
+static ssize_t memcg_force_shrink_queue(struct kernfs_open_file *of,
+					size_t nbytes,
+					struct crystal_hybridswap_memcg *entry,
+					bool file,
+					unsigned long reclaim_flag,
+					unsigned long target,
+					unsigned long batch,
+					bool clamped)
 {
 	struct crystal_hybridswap_force_shrink_req *req;
-	struct crystal_hybridswap_memcg *entry;
 	struct cgroup_subsys_state *css = of_css(of);
-	struct mem_cgroup *memcg;
 	atomic_t *queued_counter;
-	unsigned long reclaim_flag = 0;
-	unsigned long target = 0;
-	unsigned long batch = CHS_FORCE_SHRINK_DEFAULT_BATCH;
-	bool clamped = false;
 	int queued;
-	int ret;
 
-	entry = crystal_hybridswap_memcg_get(css, true);
-	if (!entry)
-		return -ENOMEM;
-
-	memcg = mem_cgroup_from_css(css);
-	if (!memcg) {
-		memcg_force_shrink_record_skip(entry, file, -EINVAL);
-		return nbytes;
-	}
-
-	ret = memcg_force_shrink_parse(memcg, file, buf, &reclaim_flag,
-					     &target, &batch, &clamped);
-	if (ret) {
-		s64 param = memcg_parse_compat_s64(buf);
-
-		memcg_force_shrink_record_request(entry, file, param, 0, batch);
-		memcg_force_shrink_record_skip(entry, file, ret);
-		chs_log(CHS_LOG_WARN,
-			"force_shrink_%s parse error memcg=%s raw=%s ret=%d\n",
-			memcg_force_shrink_type(file), entry->name, strim(buf), ret);
-		return nbytes;
-	}
-
-	memcg_force_shrink_record_request(entry, file, reclaim_flag, target,
-						 batch);
+	memcg_force_shrink_record_request(entry, file, reclaim_flag, target, batch);
 
 	chs_log(CHS_LOG_INFO,
 		"normal page batch %lu, nr_need_reclaim %lu, file %d memcg=%s flag=%lu%s\n",
@@ -759,6 +759,111 @@ static ssize_t memcg_force_shrink_write(struct kernfs_open_file *of, char *buf,
 		memcg_force_shrink_type(file), req->memcg_name, req->cgroup_id,
 		target, batch, queued);
 	return nbytes;
+}
+
+static ssize_t
+memcg_force_shrink_write(struct kernfs_open_file *of, char *buf,
+			 size_t nbytes, bool file)
+{
+	struct crystal_hybridswap_memcg *entry;
+	struct mem_cgroup *memcg;
+	unsigned long reclaim_flag = 0;
+	unsigned long target = 0;
+	unsigned long batch = CHS_FORCE_SHRINK_DEFAULT_BATCH;
+	bool clamped = false;
+	int ret;
+
+	entry = crystal_hybridswap_memcg_get(of_css(of), true);
+	if (!entry)
+		return -ENOMEM;
+
+	memcg = mem_cgroup_from_css(of_css(of));
+	if (!memcg) {
+		memcg_force_shrink_record_skip(entry, file, -EINVAL);
+		return nbytes;
+	}
+
+	ret = memcg_force_shrink_parse(memcg, file, buf, &reclaim_flag, &target,
+				       &batch, &clamped);
+	if (ret) {
+		s64 param = memcg_parse_compat_s64(buf);
+
+		memcg_force_shrink_record_request(entry, file, param, 0, batch);
+		memcg_force_shrink_record_skip(entry, file, ret);
+		chs_log(CHS_LOG_WARN,
+			"force_shrink_%s parse error memcg=%s raw=%s ret=%d\n",
+			memcg_force_shrink_type(file), entry->name, strim(buf), ret);
+		return nbytes;
+	}
+
+	return memcg_force_shrink_queue(of, nbytes, entry, file, reclaim_flag,
+				       target, batch, clamped);
+}
+
+static ssize_t memcg_force_shrink_anon_percent(struct kernfs_open_file *of,
+					       char *buf, size_t nbytes,
+					       loff_t off)
+{
+	struct crystal_hybridswap_memcg_zram_stats zram_stats;
+	struct crystal_hybridswap_memcg *entry;
+	struct mem_cgroup *memcg;
+	u64 anon_pages;
+	u64 swapped_pages = 0;
+	u64 desired_swapped;
+	u64 target_pages;
+	unsigned long target;
+	unsigned int percent = 0;
+	int zram_ret;
+
+	if (kstrtouint(strim(buf), 0, &percent) || !percent)
+		return nbytes;
+	if (percent > CHS_MAX_RATIO)
+		percent = CHS_MAX_RATIO;
+
+	entry = crystal_hybridswap_memcg_get(of_css(of), true);
+	if (!entry)
+		return -ENOMEM;
+
+	memcg = mem_cgroup_from_css(of_css(of));
+	if (!memcg) {
+		memcg_force_shrink_record_skip(entry, false, -EINVAL);
+		return nbytes;
+	}
+
+	zram_ret = crystal_hybridswap_collect_memcg_zram_stats(entry->cgroup_id,
+							       &zram_stats);
+	if (zram_ret && zram_ret != -ENODATA && zram_ret != -ENODEV) {
+		memcg_force_shrink_record_skip(entry, false, zram_ret);
+		chs_log(CHS_LOG_WARN,
+			"force_shrink_anon_percent skip memcg=%s percent=%u zram_ret=%d\n",
+			entry->name, percent, zram_ret);
+		return nbytes;
+	}
+	if (!zram_ret)
+		swapped_pages = zram_stats.resident_pages +
+			zram_stats.writeback_pages;
+
+	anon_pages = memcg_force_shrink_anon_pages_local(memcg) +
+		swapped_pages;
+	desired_swapped = mul_u64_u32_div(anon_pages, percent, 100);
+	if (desired_swapped <= swapped_pages)
+		target_pages = 0;
+	else
+		target_pages = desired_swapped - swapped_pages;
+
+	if (target_pages > ULONG_MAX)
+		target = ULONG_MAX;
+	else
+		target = target_pages;
+
+	chs_log(CHS_LOG_INFO,
+		"force_shrink_anon_percent memcg=%s percent=%u anon_pages=%llu swapped_pages=%llu target=%lu zram_ret=%d\n",
+		entry->name, percent, anon_pages, swapped_pages, target,
+		zram_ret);
+
+	return memcg_force_shrink_queue(of, nbytes, entry, false, percent,
+				       target, CHS_FORCE_SHRINK_DEFAULT_BATCH,
+				       false);
 }
 
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
@@ -2114,6 +2219,10 @@ void crystal_hybridswap_memcg_stats_show(struct seq_file *m)
 }
 
 static struct cftype crystal_hybridswap_memcg_files[] = {
+	{
+		.name = "force_shrink_anon_percent",
+		.write = memcg_force_shrink_anon_percent,
+	},
 	{ .name = "force_shrink_anon", .write = memcg_force_shrink_anon },
 	{ .name = "force_shrink_file", .write = memcg_force_shrink_file },
 	{

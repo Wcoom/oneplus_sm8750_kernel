@@ -9,6 +9,7 @@
 
 void crystal_hybridswap_stats_show(struct seq_file *m)
 {
+	struct chs_avail_buffer_view avail_buffer_view;
 	char last_mode[CHS_WB_MODE_MAX];
 	char auto_reason[CHS_PRESSURE_REASON_MAX];
 	char last_in_memcg[CHS_MEMCG_NAME_MAX];
@@ -30,6 +31,11 @@ void crystal_hybridswap_stats_show(struct seq_file *m)
 	u64 last_out_id;
 	int zram_io_ret;
 
+	avail_buffer_view.base_min =
+		atomic64_read(&chs.stats.avail_buffers_last_min);
+	avail_buffer_view.base_high =
+		atomic64_read(&chs.stats.avail_buffers_last_high);
+	chs_update_avail_buffer_view(&avail_buffer_view);
 	memset(&zram_io_stats, 0, sizeof(zram_io_stats));
 	zram_io_ret = crystal_hybridswap_collect_zram_io_stats(&zram_io_stats);
 
@@ -580,6 +586,28 @@ void crystal_hybridswap_stats_show(struct seq_file *m)
 		   atomic64_read(&chs.stats.avail_buffers_last_high));
 	seq_printf(m, "avail_buffers_last_free_swap_threshold_mb: %lld\n",
 		   atomic64_read(&chs.stats.avail_buffers_last_free_swap_threshold));
+	seq_printf(m, "erm_avail_buffer_default_enable: %d\n",
+		   CHS_ERM_AVAIL_BUFFER_DEFAULT_ENABLE);
+	seq_printf(m, "erm_avail_buffer_enable: %d\n",
+		   atomic_read(&chs.erm_avail_buffer_enable));
+	seq_printf(m, "erm_avail_buffer_valid: %d\n",
+		   atomic_read(&chs.erm_avail_buffer_valid));
+	seq_printf(m, "erm_min_avail_buffers_mb: %lld\n",
+		   atomic64_read(&chs.erm_min_avail_buffer));
+	seq_printf(m, "erm_high_avail_buffers_mb: %lld\n",
+		   atomic64_read(&chs.erm_high_avail_buffer));
+	seq_printf(m, "avail_buffers_effective_min_mb: %u\n",
+		   avail_buffer_view.effective_min);
+	seq_printf(m, "avail_buffers_effective_high_mb: %u\n",
+		   avail_buffer_view.effective_high);
+	seq_printf(m, "avail_buffers_effective_source: %s\n",
+		   avail_buffer_view.override_active ? "erm" : "base");
+	seq_printf(m, "erm_avail_buffer_enable_store: %lld\n",
+		   atomic64_read(&chs.stats.erm_avail_buffer_enable_store));
+	seq_printf(m, "erm_avail_buffer_writes: %lld\n",
+		   atomic64_read(&chs.stats.erm_avail_buffer_writes));
+	seq_printf(m, "erm_avail_buffer_last_ret: %lld\n",
+		   atomic64_read(&chs.stats.erm_avail_buffer_last_ret));
 	seq_printf(m, "avail_buffers_last_seen_avail_mb: %lld\n",
 		   atomic64_read(&chs.stats.avail_buffers_last_seen_avail));
 	seq_printf(m, "avail_buffers_last_free_swap_pages: %lld\n",

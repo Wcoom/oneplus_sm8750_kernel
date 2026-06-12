@@ -1441,7 +1441,37 @@ static bool crystal_hybridswap_auto_policy_configured(void)
 	return atomic64_read(&chs.stats.avail_buffers_last_avail) > 0 ||
 		atomic64_read(&chs.stats.avail_buffers_last_min) > 0 ||
 		atomic64_read(&chs.stats.avail_buffers_last_high) > 0 ||
-		atomic64_read(&chs.stats.avail_buffers_last_free_swap_threshold) > 0;
+		atomic64_read(&chs.stats.avail_buffers_last_free_swap_threshold) > 0 ||
+		(atomic_read(&chs.erm_avail_buffer_enable) &&
+		 atomic_read(&chs.erm_avail_buffer_valid));
+}
+
+void chs_update_avail_buffer_view(struct chs_avail_buffer_view *view)
+{
+	bool active = atomic_read(&chs.erm_avail_buffer_enable) &&
+		atomic_read(&chs.erm_avail_buffer_valid);
+	u64 erm_min;
+	u64 erm_high;
+
+	view->effective_min = view->base_min;
+	view->effective_high = view->base_high;
+
+	if (active) {
+		erm_min = atomic64_read(&chs.erm_min_avail_buffer);
+		erm_high = atomic64_read(&chs.erm_high_avail_buffer);
+		if (erm_min <= UINT_MAX && erm_high <= UINT_MAX) {
+			view->effective_min = erm_min;
+			view->effective_high = erm_high;
+		} else {
+			active = false;
+		}
+	}
+
+	atomic64_set(&chs.stats.avail_buffers_effective_min,
+		     view->effective_min);
+	atomic64_set(&chs.stats.avail_buffers_effective_high,
+		     view->effective_high);
+	view->override_active = active;
 }
 
 static bool crystal_hybridswap_policy_suspended(void)
@@ -1534,6 +1564,9 @@ static void crystal_hybridswap_policy_workfn(struct work_struct *work)
 	unsigned int avail;
 	unsigned int min_avail;
 	unsigned int high_avail;
+	unsigned int base_min_avail;
+	unsigned int base_high_avail;
+	struct chs_avail_buffer_view avail_buffer_view;
 	unsigned int cur_avail;
 	s64 free_swap_threshold;
 	u64 free_swap_pages;
@@ -1550,6 +1583,7 @@ static void crystal_hybridswap_policy_workfn(struct work_struct *work)
 	bool below_high;
 	bool free_swap_low;
 	bool zram_gate;
+	bool erm_override;
 	const char *reason = "avail_buffers_ok";
 	int ret;
 
@@ -1574,8 +1608,14 @@ static void crystal_hybridswap_policy_workfn(struct work_struct *work)
 	}
 
 	avail = atomic64_read(&chs.stats.avail_buffers_last_avail);
-	min_avail = atomic64_read(&chs.stats.avail_buffers_last_min);
-	high_avail = atomic64_read(&chs.stats.avail_buffers_last_high);
+	base_min_avail = atomic64_read(&chs.stats.avail_buffers_last_min);
+	base_high_avail = atomic64_read(&chs.stats.avail_buffers_last_high);
+	avail_buffer_view.base_min = base_min_avail;
+	avail_buffer_view.base_high = base_high_avail;
+	chs_update_avail_buffer_view(&avail_buffer_view);
+	min_avail = avail_buffer_view.effective_min;
+	high_avail = avail_buffer_view.effective_high;
+	erm_override = avail_buffer_view.override_active;
 	free_swap_threshold = atomic64_read(
 		&chs.stats.avail_buffers_last_free_swap_threshold);
 	cur_avail = crystal_hybridswap_current_avail_mb();
@@ -1631,10 +1671,11 @@ static void crystal_hybridswap_policy_workfn(struct work_struct *work)
 	}
 
 	chs_log_ratelimited(CHS_LOG_DEBUG,
-		"auto_policy run avail_cfg_mb=%u min_mb=%u high_mb=%u current_mb=%u free_swap_pages=%llu free_swap_mb=%llu free_swap_threshold_mb=%lld low=%d below_high=%d free_swap_low=%d zram_valid=%d zram_ratio=%u zram_effective=%lld zram_wm=%lld resident=%llu total=%llu increase=%llu gate=%d\n",
-		avail, min_avail, high_avail, cur_avail, free_swap_pages,
-		free_swap_mb, free_swap_threshold, low_buffer, below_high,
-		free_swap_low, zram_pressure->valid, zram_pressure->resident_ratio,
+		"auto_policy run avail_cfg_mb=%u base_min_mb=%u base_high_mb=%u min_mb=%u high_mb=%u erm_override=%d current_mb=%u free_swap_pages=%llu free_swap_mb=%llu free_swap_threshold_mb=%lld low=%d below_high=%d free_swap_low=%d zram_valid=%d zram_ratio=%u zram_effective=%lld zram_wm=%lld resident=%llu total=%llu increase=%llu gate=%d\n",
+		avail, base_min_avail, base_high_avail, min_avail, high_avail,
+		erm_override, cur_avail, free_swap_pages, free_swap_mb,
+		free_swap_threshold, low_buffer, below_high, free_swap_low,
+		zram_pressure->valid, zram_pressure->resident_ratio,
 		atomic64_read(&chs.stats.policy_zram_effective_ratio),
 		atomic64_read(&chs.stats.policy_zram_wm_ratio),
 		zram_pressure->resident_pages, zram_pressure->total_pages,
@@ -2599,6 +2640,11 @@ void crystal_hybridswap_stats_init(struct crystal_hybridswap_stats *stats)
 	atomic64_set(&stats->avail_buffers_last_min, 0);
 	atomic64_set(&stats->avail_buffers_last_high, 0);
 	atomic64_set(&stats->avail_buffers_last_free_swap_threshold, 0);
+	atomic64_set(&stats->avail_buffers_effective_min, 0);
+	atomic64_set(&stats->avail_buffers_effective_high, 0);
+	atomic64_set(&stats->erm_avail_buffer_enable_store, 0);
+	atomic64_set(&stats->erm_avail_buffer_writes, 0);
+	atomic64_set(&stats->erm_avail_buffer_last_ret, 0);
 	atomic64_set(&stats->avail_buffers_last_seen_avail, 0);
 	atomic64_set(&stats->avail_buffers_last_free_swap_pages, 0);
 	atomic64_set(&stats->pressure_registered, 0);
@@ -3142,8 +3188,13 @@ static int __init crystal_hybridswap_init(void)
 	atomic_set(&chs.swapd_pause, 0);
 	atomic_set(&chs.dev_life, 0);
 	atomic_set(&chs.loglevel, CHS_LOG_MAX);
+	atomic_set(&chs.erm_avail_buffer_enable,
+		   CHS_ERM_AVAIL_BUFFER_DEFAULT_ENABLE);
 	atomic64_set(&chs.quota_day, CHS_DEFAULT_QUOTA_DAY);
 	atomic64_set(&chs.stored_wm_ratio, CHS_DEFAULT_ZRAM_WM_RATIO);
+	atomic64_set(&chs.erm_min_avail_buffer, 0);
+	atomic64_set(&chs.erm_high_avail_buffer, 0);
+	atomic_set(&chs.erm_avail_buffer_valid, 0);
 	atomic_set(&chs.policy_suspended, 0);
 	atomic64_set(&chs.pending_policy_wakeups, 0);
 	atomic64_set(&chs.pending_writeback_pages, 0);

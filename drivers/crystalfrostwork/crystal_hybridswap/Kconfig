@@ -51,6 +51,20 @@ config CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
 	  is not exposed and the old score/ratio policy is not used to select or
 	  weight Crystal automatic memcg writeback candidates.
 
+config CRYSTAL_HYBRIDSWAP_ERM_AVAIL_BUFFER_DEFAULT_ON
+	bool "Enable ERM avail buffer override by default"
+	depends on CRYSTAL_HYBRIDSWAP
+	default y
+	help
+	  Enable the memory.erm_avail_buffer override path by default.  This lets
+	  an OSvelte/ERM userspace daemon provide effective min/high available
+	  memory watermarks while Crystal Hybridswap keeps its own zram, quota,
+	  device-life, backoff, and writeback target guards.
+
+	  The runtime memory.erm_avail_buffer_enable knob can still disable or
+	  re-enable the override path without changing the base memory.avail_buffers
+	  ABI values.
+
 config CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
 	bool "zram writeback support for Crystal Hybridswap"
 	depends on CRYSTAL_HYBRIDSWAP

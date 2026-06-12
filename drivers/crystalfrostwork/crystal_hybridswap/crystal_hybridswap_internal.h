@@ -89,12 +89,26 @@
 #define CHS_LEGACY_SWAPD_MEMCGS_PARAM_LIST \
 	"memory.swapd_memcgs_param,memory.swapd_single_memcg_param"
 
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ERM_AVAIL_BUFFER_DEFAULT_ON
+#define CHS_ERM_AVAIL_BUFFER_DEFAULT_ENABLE	1
+#else
+#define CHS_ERM_AVAIL_BUFFER_DEFAULT_ENABLE	0
+#endif
+
 enum chs_log_level {
 	CHS_LOG_ERR = 0,
 	CHS_LOG_WARN,
 	CHS_LOG_INFO,
 	CHS_LOG_DEBUG,
 	CHS_LOG_MAX,
+};
+
+struct chs_avail_buffer_view {
+	unsigned int base_min;
+	unsigned int base_high;
+	unsigned int effective_min;
+	unsigned int effective_high;
+	bool override_active;
 };
 
 #define CHS_LOG_PREFIX		"[HYB_ZRAM]"
@@ -463,6 +477,11 @@ struct crystal_hybridswap_stats {
 	atomic64_t avail_buffers_last_min;
 	atomic64_t avail_buffers_last_high;
 	atomic64_t avail_buffers_last_free_swap_threshold;
+	atomic64_t avail_buffers_effective_min;
+	atomic64_t avail_buffers_effective_high;
+	atomic64_t erm_avail_buffer_enable_store;
+	atomic64_t erm_avail_buffer_writes;
+	atomic64_t erm_avail_buffer_last_ret;
 	atomic64_t avail_buffers_last_seen_avail;
 	atomic64_t avail_buffers_last_free_swap_pages;
 	atomic64_t pressure_registered;
@@ -581,8 +600,12 @@ struct crystal_hybridswap_state {
 	atomic_t swapd_pause;
 	atomic_t dev_life;
 	atomic_t loglevel;
+	atomic_t erm_avail_buffer_enable;
 	atomic64_t quota_day;
 	atomic64_t stored_wm_ratio;
+	atomic64_t erm_min_avail_buffer;
+	atomic64_t erm_high_avail_buffer;
+	atomic_t erm_avail_buffer_valid;
 	atomic64_t pending_policy_wakeups;
 	atomic64_t pending_writeback_pages;
 	atomic64_t pending_force_swapout;
@@ -689,6 +712,7 @@ void crystal_hybridswap_record_force_swapout(const char *memcg_name,
 					     s64 compat_trigger_value);
 void crystal_hybridswap_copy_last_writeback_mode(char *buf, size_t len);
 void crystal_hybridswap_copy_last_auto_reason(char *buf, size_t len);
+void chs_update_avail_buffer_view(struct chs_avail_buffer_view *view);
 void crystal_hybridswap_queue_policy_wakeup(unsigned int avail,
 					   unsigned int min_avail,
 					   unsigned int high_avail,

@@ -1651,9 +1651,17 @@ static s64 swapd_pid_read(struct cgroup_subsys_state *css, struct cftype *cft)
 }
 #endif
 
+static void memcg_update_avail_buffer_view(struct chs_avail_buffer_view *view)
+{
+	view->base_min = atomic_read(&swapd_min_avail_buffers);
+	view->base_high = atomic_read(&swapd_high_avail_buffers);
+	chs_update_avail_buffer_view(view);
+}
+
 static ssize_t avail_buffers_write(struct kernfs_open_file *of, char *buf,
 				   size_t nbytes, loff_t off)
 {
+	struct chs_avail_buffer_view view;
 	unsigned int avail, min_avail, high_avail;
 	unsigned long long free_swap_threshold;
 
@@ -1668,13 +1676,89 @@ static ssize_t avail_buffers_write(struct kernfs_open_file *of, char *buf,
 	atomic64_set(&swapd_free_swap_threshold, free_swap_threshold);
 	atomic64_inc(&chs.stats.memcg_param_updates);
 	atomic64_inc(&chs.stats.avail_buffers_writes);
+	memcg_update_avail_buffer_view(&view);
 	crystal_hybridswap_queue_policy_wakeup(avail, min_avail, high_avail,
 						 free_swap_threshold);
 	return nbytes;
 }
 
+static int erm_avail_buffer_enable_write(struct cgroup_subsys_state *css,
+					 struct cftype *cft, s64 val)
+{
+	struct chs_avail_buffer_view view;
+
+	if (val != 0 && val != 1)
+		return -EINVAL;
+
+	atomic_set(&chs.erm_avail_buffer_enable, val);
+	atomic64_inc(&chs.stats.erm_avail_buffer_enable_store);
+	memcg_update_avail_buffer_view(&view);
+	crystal_hybridswap_update_auto_policy();
+	return 0;
+}
+
+static s64 erm_avail_buffer_enable_read(struct cgroup_subsys_state *css,
+					struct cftype *cft)
+{
+	return atomic_read(&chs.erm_avail_buffer_enable);
+}
+
+static void erm_avail_buffer_queue_policy_wakeup(void)
+{
+	unsigned int avail = atomic_read(&swapd_avail_buffers);
+	unsigned int min_avail = atomic_read(&swapd_min_avail_buffers);
+	unsigned int high_avail = atomic_read(&swapd_high_avail_buffers);
+	u64 free_swap_threshold = atomic64_read(&swapd_free_swap_threshold);
+
+	crystal_hybridswap_queue_policy_wakeup(avail, min_avail, high_avail,
+					       free_swap_threshold);
+}
+
+static ssize_t erm_avail_buffer_write(struct kernfs_open_file *of, char *buf,
+				      size_t nbytes, loff_t off)
+{
+	struct chs_avail_buffer_view view;
+	unsigned int min_avail;
+	unsigned int high_avail;
+	int ret = 0;
+
+	buf = strim(buf);
+	if (sscanf(buf, "%u %u", &min_avail, &high_avail) != 2) {
+		ret = -EINVAL;
+		goto out;
+	}
+	if (high_avail < min_avail || high_avail - min_avail < 64) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	atomic64_set(&chs.erm_min_avail_buffer, min_avail);
+	atomic64_set(&chs.erm_high_avail_buffer, high_avail);
+	atomic_set(&chs.erm_avail_buffer_valid, 1);
+	memcg_update_avail_buffer_view(&view);
+	if (atomic_read(&chs.erm_avail_buffer_enable))
+		erm_avail_buffer_queue_policy_wakeup();
+
+out:
+	atomic64_inc(&chs.stats.erm_avail_buffer_writes);
+	atomic64_set(&chs.stats.erm_avail_buffer_last_ret, ret);
+	return ret ? ret : nbytes;
+}
+
+static int erm_avail_buffer_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "[%lld-%lld]\n",
+		   atomic64_read(&chs.erm_min_avail_buffer),
+		   atomic64_read(&chs.erm_high_avail_buffer));
+	return 0;
+}
+
 static int avail_buffers_show(struct seq_file *m, void *v)
 {
+	struct chs_avail_buffer_view view;
+
+	memcg_update_avail_buffer_view(&view);
+
 	seq_printf(m, "avail_buffers: %u\n",
 		   atomic_read(&swapd_avail_buffers));
 	seq_printf(m, "min_avail_buffers: %u\n",
@@ -1683,15 +1767,31 @@ static int avail_buffers_show(struct seq_file *m, void *v)
 		   atomic_read(&swapd_high_avail_buffers));
 	seq_printf(m, "free_swap_threshold: %llu\n",
 		   (unsigned long long)atomic64_read(&swapd_free_swap_threshold));
+	seq_printf(m, "erm_avail_buffer_enable: %d\n",
+		   atomic_read(&chs.erm_avail_buffer_enable));
+	seq_printf(m, "erm_avail_buffer_valid: %d\n",
+		   atomic_read(&chs.erm_avail_buffer_valid));
+	seq_printf(m, "erm_min_avail_buffers: %lld\n",
+		   atomic64_read(&chs.erm_min_avail_buffer));
+	seq_printf(m, "erm_high_avail_buffers: %lld\n",
+		   atomic64_read(&chs.erm_high_avail_buffer));
+	seq_printf(m, "effective_min_avail_buffers: %u\n",
+		   view.effective_min);
+	seq_printf(m, "effective_high_avail_buffers: %u\n",
+		   view.effective_high);
+	seq_printf(m, "effective_avail_buffers_source: %s\n",
+		   view.override_active ? "erm" : "base");
 	return 0;
 }
 
 static int swapd_policy_stat_show(struct seq_file *m, void *v)
 {
+	struct chs_avail_buffer_view view;
 	char auto_reason[CHS_PRESSURE_REASON_MAX];
 	s64 last_free_swap_pages =
 		atomic64_read(&chs.stats.avail_buffers_last_free_swap_pages);
 
+	memcg_update_avail_buffer_view(&view);
 	crystal_hybridswap_copy_last_auto_reason(auto_reason,
 						    sizeof(auto_reason));
 
@@ -1813,6 +1913,28 @@ static int swapd_policy_stat_show(struct seq_file *m, void *v)
 		   atomic64_read(&chs.stats.avail_buffers_last_high));
 	seq_printf(m, "last_free_swap_threshold_mb: %lld\n",
 		   atomic64_read(&chs.stats.avail_buffers_last_free_swap_threshold));
+	seq_printf(m, "erm_avail_buffer_default_enable: %d\n",
+		   CHS_ERM_AVAIL_BUFFER_DEFAULT_ENABLE);
+	seq_printf(m, "erm_avail_buffer_enable: %d\n",
+		   atomic_read(&chs.erm_avail_buffer_enable));
+	seq_printf(m, "erm_avail_buffer_valid: %d\n",
+		   atomic_read(&chs.erm_avail_buffer_valid));
+	seq_printf(m, "erm_min_avail_buffers_mb: %lld\n",
+		   atomic64_read(&chs.erm_min_avail_buffer));
+	seq_printf(m, "erm_high_avail_buffers_mb: %lld\n",
+		   atomic64_read(&chs.erm_high_avail_buffer));
+	seq_printf(m, "effective_min_avail_buffers_mb: %u\n",
+		   view.effective_min);
+	seq_printf(m, "effective_high_avail_buffers_mb: %u\n",
+		   view.effective_high);
+	seq_printf(m, "effective_avail_buffers_source: %s\n",
+		   view.override_active ? "erm" : "base");
+	seq_printf(m, "erm_avail_buffer_enable_store: %lld\n",
+		   atomic64_read(&chs.stats.erm_avail_buffer_enable_store));
+	seq_printf(m, "erm_avail_buffer_writes: %lld\n",
+		   atomic64_read(&chs.stats.erm_avail_buffer_writes));
+	seq_printf(m, "erm_avail_buffer_last_ret: %lld\n",
+		   atomic64_read(&chs.stats.erm_avail_buffer_last_ret));
 	seq_printf(m, "last_seen_avail_mb: %lld\n",
 		   atomic64_read(&chs.stats.avail_buffers_last_seen_avail));
 	seq_printf(m, "last_free_swap_pages: %lld\n", last_free_swap_pages);
@@ -2291,6 +2413,18 @@ static struct cftype crystal_hybridswap_memcg_files[] = {
 		.flags = CFTYPE_ONLY_ON_ROOT,
 		.write = avail_buffers_write,
 		.seq_show = avail_buffers_show,
+	},
+	{
+		.name = "erm_avail_buffer_enable",
+		.flags = CFTYPE_ONLY_ON_ROOT,
+		.write_s64 = erm_avail_buffer_enable_write,
+		.read_s64 = erm_avail_buffer_enable_read,
+	},
+	{
+		.name = "erm_avail_buffer",
+		.flags = CFTYPE_ONLY_ON_ROOT,
+		.write = erm_avail_buffer_write,
+		.seq_show = erm_avail_buffer_show,
 	},
 	{
 		.name = "swapd_policy_stat",

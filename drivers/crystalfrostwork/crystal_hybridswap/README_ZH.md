@@ -262,6 +262,10 @@ echo '...' > /sys/fs/cgroup/memory/<cg_path>/memory.swapd_single_memcg_param
 - `memory.force_shrink_anon`
 - `memory.force_shrink_file`
 - `memory.swapd_pressure`
+- `memory.avail_buffers`
+- `memory.erm_avail_buffer_enable`
+- `memory.erm_avail_buffer`
+- `memory.swapd_policy_stat`
 - `memory.total_info_per_app`
 
 `memory.force_shrink_anon_percent` 接受 1 到 100 的百分比，
@@ -269,6 +273,18 @@ echo '...' > /sys/fs/cgroup/memory/<cg_path>/memory.swapd_single_memcg_param
 只对尚未达到目标的差额发起匿名页回收。现有
 `memory.force_shrink_file` 路径会保留全局 inactive file 低水位，
 当继续回收可能低于 768 MiB 时拒绝或提前停止。
+
+`memory.erm_avail_buffer_enable` 控制 OSvelte/ERM 可用内存水位覆盖
+是否参与自动策略，默认值由
+`CONFIG_CRYSTAL_HYBRIDSWAP_ERM_AVAIL_BUFFER_DEFAULT_ON` 决定，该选项
+默认启用。`memory.erm_avail_buffer` 接受两个 MiB 值：
+`min_avail high_avail`，并要求 `high_avail - min_avail >= 64`。
+启用且写入有效值后，Crystal 只用它们替换自动策略中的 effective
+`min_avail_buffers` 和 `high_avail_buffers`；`memory.avail_buffers`
+保存的 base 四元组、`free_swap_threshold`、`zram_wm_ratio`、quota、
+dev_life、zram gate、backoff/window throttle 和 `force_*` 接口均不被
+ERM 覆盖。`memory.swapd_policy_stat` 会显示 base、ERM override 和
+effective 条件来源。
 
 启用 `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM` 时，Crystal 还会暴露旧 `memory.swapd_memcgs_param` 根 cgroup 节点和 `memory.swapd_single_memcg_param` per-memcg 节点。关闭该选项时，这些节点不暴露，自动 memcg 写回也不受旧 score/ratio 策略控制。
 

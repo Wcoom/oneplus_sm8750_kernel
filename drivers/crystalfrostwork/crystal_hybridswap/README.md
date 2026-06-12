@@ -262,6 +262,10 @@ Common memcg nodes include:
 - `memory.force_shrink_anon`
 - `memory.force_shrink_file`
 - `memory.swapd_pressure`
+- `memory.avail_buffers`
+- `memory.erm_avail_buffer_enable`
+- `memory.erm_avail_buffer`
+- `memory.swapd_policy_stat`
 - `memory.total_info_per_app`
 
 `memory.force_shrink_anon_percent` accepts a percentage from 1 to 100
@@ -269,6 +273,18 @@ and requests enough anonymous reclaim to make zram/writeback pages reach
 that percentage of the memcg's local anonymous working set. The existing
 `memory.force_shrink_file` path keeps a global inactive-file reserve and
 stops early when the reserve would fall below 768 MiB.
+
+`memory.erm_avail_buffer_enable` controls whether OSvelte/ERM available
+memory watermark overrides participate in the automatic policy. Its default
+value comes from `CONFIG_CRYSTAL_HYBRIDSWAP_ERM_AVAIL_BUFFER_DEFAULT_ON`,
+which defaults to enabled. `memory.erm_avail_buffer` accepts two MiB values:
+`min_avail high_avail`, and requires `high_avail - min_avail >= 64`.
+When enabled and valid, Crystal uses them only as the effective
+`min_avail_buffers` and `high_avail_buffers` for automatic policy decisions.
+The base `memory.avail_buffers` tuple, `free_swap_threshold`,
+`zram_wm_ratio`, quota, dev_life, zram gate, backoff/window throttle, and
+`force_*` interfaces are not overridden by ERM. `memory.swapd_policy_stat`
+shows the base, ERM override, and effective condition source.
 
 When `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM` is enabled, Crystal also exposes the legacy `memory.swapd_memcgs_param` root cgroup node and `memory.swapd_single_memcg_param` per-memcg node. When that option is disabled, these nodes are hidden and automatic memcg writeback is not controlled by the old score/ratio policy.
 

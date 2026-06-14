@@ -2260,11 +2260,12 @@ static bool yield_to_task_hmbird(struct rq *rq, struct task_struct *to)
 #ifdef CONFIG_SMP
 /**
  * move_task_to_local_dsq - Move a task from a different rq to a local DSQ
- * @rq: rq to move the task into, currently locked
  * @p: task to move
  * @enq_flags: %HMBIRD_ENQ_*
+ * @src_rq: rq @p is moving from, currently locked
+ * @dst_rq: rq to move @p into, unlocked on entry and locked on return
  *
- * Move @p which is currently on a different rq to @rq's local DSQ. The caller
+ * Move @p which is currently on @src_rq to @dst_rq's local DSQ. The caller
  * must:
  *
  * 1. Start with exclusive access to @p either through its DSQ lock or
@@ -2275,51 +2276,56 @@ static bool yield_to_task_hmbird(struct rq *rq, struct task_struct *to)
  * 3. Remember task_rq(@p). Release the exclusive access so that we don't
  *    deadlock with dequeue.
  *
- * 4. Lock @rq and the task_rq from #3.
+ * 4. Drop @dst_rq, lock the task_rq from #3.
  *
  * 5. Call this function.
  *
  * Returns %true if @p was successfully moved. %false after racing dequeue and
- * losing.
+ * losing. On return, @src_rq is unlocked and @dst_rq is locked.
  */
-static bool move_task_to_local_dsq(struct rq *rq, struct task_struct *p,
-					u64 enq_flags)
+static bool move_task_to_local_dsq(struct task_struct *p, u64 enq_flags,
+				   struct rq *src_rq, struct rq *dst_rq)
 {
-	struct rq *task_rq;
-
-	lockdep_assert_rq_held(rq);
+	lockdep_assert_rq_held(src_rq);
 
 	/*
-	 * If dequeue got to @p while we were trying to lock both rq's, it'd
-	 * have cleared @get_hmbird_ts(p)->holding_cpu to -1. While other cpus may have
-	 * updated it to different values afterwards, as this operation can't be
+	 * If dequeue got to @p while we were trying to lock @src_rq, it'd have
+	 * cleared @get_hmbird_ts(p)->holding_cpu to -1. While other cpus may have updated
+	 * it to different values afterwards, as this operation can't be
 	 * preempted or recurse, @get_hmbird_ts(p)->holding_cpu can never become
 	 * raw_smp_processor_id() again before we're done. Thus, we can tell
 	 * whether we lost to dequeue by testing whether @get_hmbird_ts(p)->holding_cpu is
 	 * still raw_smp_processor_id().
 	 *
+	 * @p->rq couldn't have changed if we're still the holding cpu.
+	 *
 	 * See dispatch_dequeue() for the counterpart.
 	 */
-	if (unlikely(get_hmbird_ts(p)->holding_cpu != raw_smp_processor_id()))
+	if (unlikely(get_hmbird_ts(p)->holding_cpu != raw_smp_processor_id()) ||
+	    WARN_ON_ONCE(src_rq != task_rq(p))) {
+		raw_spin_rq_unlock(src_rq);
+		raw_spin_rq_lock(dst_rq);
 		return false;
+	}
 
-	/* @p->rq couldn't have changed if we're still the holding cpu */
-	task_rq = task_rq(p);
-	lockdep_assert_rq_held(task_rq);
-	deactivate_task(task_rq, p, 0);
-	set_task_cpu(p, cpu_of(rq));
-	get_hmbird_ts(p)->sticky_cpu = cpu_of(rq);
+	/* the following marks @p MIGRATING which excludes dequeue */
+	deactivate_task(src_rq, p, 0);
+	set_task_cpu(p, cpu_of(dst_rq));
+	get_hmbird_ts(p)->sticky_cpu = cpu_of(dst_rq);
+
+	raw_spin_rq_unlock(src_rq);
+	raw_spin_rq_lock(dst_rq);
 
 	/*
 	 * We want to pass hmbird-specific enq_flags but activate_task() will
 	 * truncate the upper 32 bit. As we own @rq, we can pass them through
 	 * @get_hmbird_rq(rq)->extra_enq_flags instead.
 	 */
-	hmbird_cond_deferred_err(EXTRA_FLAGS, get_hmbird_rq(rq)->extra_enq_flags,
+	hmbird_cond_deferred_err(EXTRA_FLAGS, get_hmbird_rq(dst_rq)->extra_enq_flags,
 					"task = %s\n", p->comm);
-	get_hmbird_rq(rq)->extra_enq_flags = enq_flags;
-	activate_task(rq, p, 0);
-	get_hmbird_rq(rq)->extra_enq_flags = 0;
+	get_hmbird_rq(dst_rq)->extra_enq_flags = enq_flags;
+	activate_task(dst_rq, p, 0);
+	get_hmbird_rq(dst_rq)->extra_enq_flags = 0;
 
 	return true;
 }
@@ -2544,12 +2550,11 @@ remote_rq:
 	raw_spin_unlock_irqrestore(&dsq->lock, flags);
 
 	rq_unpin_lock(rq, rf);
-	double_lock_balance(rq, task_rq);
+	raw_spin_rq_unlock(rq);
+	raw_spin_rq_lock(task_rq);
+
+	moved = move_task_to_local_dsq(p, 0, task_rq, rq);
 	rq_repin_lock(rq, rf);
-
-	moved = move_task_to_local_dsq(rq, p, 0);
-
-	double_unlock_balance(rq, task_rq);
 #endif /* CONFIG_SMP */
 	if (likely(moved)) {
 		slim_stats_record(TOTAL_DSP_CNT, 0, 0, 0);

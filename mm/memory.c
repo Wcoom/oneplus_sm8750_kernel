@@ -3635,12 +3635,18 @@ static bool wp_can_reuse_anon_folio(struct folio *folio,
 	 */
 	if (folio_test_ksm(folio) || folio_ref_count(folio) > 3)
 		return false;
-	if (!folio_test_lru(folio))
+	if (!folio_test_lru(folio)) {
+		/*
+		 * Assume folio is on lru_cache and holds a cache reference.
+		 */
+		if (folio_ref_count(folio) > 2 + folio_test_swapcache(folio))
+			return false;
 		/*
 		 * We cannot easily detect+handle references from
 		 * remote LRU caches or references to LRU folios.
 		 */
 		lru_add_drain();
+	}
 	if (folio_ref_count(folio) > 1 + folio_test_swapcache(folio))
 		return false;
 	if (!folio_trylock(folio))
@@ -4411,10 +4417,11 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 		 * If we want to map a page that's in the swapcache writable, we
 		 * have to detect via the refcount if we're really the exclusive
 		 * owner. Try removing the extra reference from the local LRU
-		 * caches if required.
+		 * caches only if that can plausibly make the folio reusable.
 		 */
 		if ((vmf->flags & FAULT_FLAG_WRITE) && folio == swapcache &&
-		    !folio_test_ksm(folio) && !folio_test_lru(folio))
+		    !folio_test_ksm(folio) && !folio_test_lru(folio) &&
+		    folio_ref_count(folio) <= 2 + folio_nr_pages(folio))
 			lru_add_drain();
 	}
 

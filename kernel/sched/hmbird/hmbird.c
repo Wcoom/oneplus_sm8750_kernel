@@ -821,6 +821,10 @@ static struct hmbird_dispatch_q *find_dsq_from_task(struct task_struct *p)
 
 bool consume_dispatch_q(struct rq *rq, struct rq_flags *rf,
 						struct hmbird_dispatch_q *dsq);
+static bool consume_dispatch_q_timeout(struct rq *rq, struct rq_flags *rf,
+					       struct hmbird_dispatch_q *dsq,
+					       u64 timeout_deadline,
+					       bool timeout_only);
 
 static void set_partial_rescue(bool p_state, bool l_over, bool b_over)
 {
@@ -990,12 +994,12 @@ static int consume_ux_dsq(struct rq *rq, struct rq_flags *rf)
 	return 0;
 }
 
-static void update_timeout_stats(struct rq *rq, struct hmbird_dispatch_q *dsq, u64 deadline)
+static bool refresh_dsq_timeout_locked(struct hmbird_dispatch_q *dsq, u64 deadline)
 {
 	struct hmbird_entity *entity;
-	unsigned long flags;
 
-	raw_spin_lock_irqsave(&dsq->lock, flags);
+	lockdep_assert_held(&dsq->lock);
+
 	if (list_empty(&dsq->fifo))
 		goto clear_timeout;
 
@@ -1003,21 +1007,12 @@ static void update_timeout_stats(struct rq *rq, struct hmbird_dispatch_q *dsq, u
 	if (time_before_eq(jiffies, entity->runnable_at + msecs_to_jiffies(deadline)))
 		goto clear_timeout;
 
-	raw_spin_unlock_irqrestore(&dsq->lock, flags);
-	hmbird_info_trace(
-				"dsq[%d] still timeout task-%s, jiffies = %lu, deadline = %lu, runnable at = %lu\n",
-				dsq_id_to_internal(dsq), entity->task->comm,
-				jiffies, msecs_to_jiffies(deadline), entity->runnable_at);
-	hmbird_info_systrace("C|9999|dsq_%d_timeout|%d\n", dsq_id_to_internal(dsq), 1);
-	return;
+	WRITE_ONCE(dsq->is_timeout, true);
+	return true;
 
 clear_timeout:
-	hmbird_info_trace("dsq[%d] clear timeout\n",
-				dsq_id_to_internal(dsq));
-	hmbird_info_systrace("C|9999|dsq_%d_timeout|%d\n", dsq_id_to_internal(dsq), 0);
-	dsq->is_timeout = false;
-	slim_stats_record(PCP_TIMEOUT_CNT, 0, 0, cpu_of(rq));
-	raw_spin_unlock_irqrestore(&dsq->lock, flags);
+	WRITE_ONCE(dsq->is_timeout, false);
+	return false;
 }
 
 static void systrace_output_rtime_state(struct hmbird_dispatch_q *dsq, int rtime)
@@ -1029,27 +1024,23 @@ static int consume_pcp_dsq(struct rq *rq, struct rq_flags *rf, bool any)
 {
 	bool is_timeout;
 	int cpu = cpu_of(rq);
-	unsigned long flags;
 	struct hmbird_dispatch_q *dsq = &per_cpu(pcp_ldsq, cpu);
 	struct pcp_sched_info *pcp = &per_cpu(pcp_info, cpu);
 
-	raw_spin_lock_irqsave(&dsq->lock, flags);
-	is_timeout = dsq->is_timeout;
-	raw_spin_unlock_irqrestore(&dsq->lock, flags);
-
 	/*
-	 * dsq->is_timeout may change here, let it be.
-	 * it won't cause serious problems.
-	 * the same for consume_dispatch_q later.
+	 * dsq->is_timeout is a hint. If it races with scan or refresh, a stale
+	 * value only causes an extra consume attempt or defers timeout handling to
+	 * the next pass.
 	 */
+	is_timeout = READ_ONCE(dsq->is_timeout);
 	if (!is_timeout && !any)
 		return 0;
 
-	if (consume_dispatch_q(rq, rf, dsq)) {
+	if (consume_dispatch_q_timeout(rq, rf, dsq,
+					is_timeout ? pcp_dsq_deadline : 0, false)) {
 		if (is_timeout) {
 			hmbird_info_trace("dsq[%d] consume a pcp timeout task\n",
 						dsq_id_to_internal(dsq));
-			update_timeout_stats(rq, dsq, pcp_dsq_deadline);
 			slim_stats_record(PCP_TIMEOUT_CNT, 0, 0, cpu);
 		}
 		slim_stats_record(PCP_LDSQ_CNT, 1, 0, cpu);
@@ -1189,7 +1180,6 @@ static int consume_timeout_dsq(struct rq *rq, struct rq_flags *rf, enum cpu_type
 {
 	int i;
 	bool is_timeout;
-	unsigned long flags;
 	struct cluster_ctx ctx;
 
 	if (gen_cluster_ctx(&ctx, type))
@@ -1200,20 +1190,13 @@ static int consume_timeout_dsq(struct rq *rq, struct rq_flags *rf, enum cpu_type
 		return 1;
 
 	for (i = ctx.lower; i < ctx.upper; i++) {
-		raw_spin_lock_irqsave(&gdsqs[i].lock, flags);
-		is_timeout = gdsqs[i].is_timeout;
-		raw_spin_unlock_irqrestore(&gdsqs[i].lock, flags);
-		/* gdsqs[i].is_timeout may change here, let it be... */
+		/* gdsqs[i].is_timeout is a hint; recheck under dsq->lock when consuming. */
+		is_timeout = READ_ONCE(gdsqs[i].is_timeout);
 		if (is_timeout) {
-			/*
-			 * consume_dispatch_q will acquire dsq-lock,
-			 * So cannot keep lock here, annoy enough.
-			 * may rewrite a consume_dispatch_q_locked, TODO.
-			 */
-			if (consume_dispatch_q(rq, rf, &gdsqs[i])) {
+			if (consume_dispatch_q_timeout(rq, rf, &gdsqs[i],
+						HMBIRD_BPF_DSQS_DEADLINE[i], true)) {
 				hmbird_info_trace("dsq[%d] consume a timeout task\n", i);
 				slim_stats_record(TIMEOUT_CNT, ctx.tidx, 0, 0);
-				update_timeout_stats(rq, &gdsqs[i], HMBIRD_BPF_DSQS_DEADLINE[i]);
 				return 1;
 			}
 		}
@@ -1533,7 +1516,7 @@ static bool scan_dsq_timeout(struct rq *rq, struct hmbird_dispatch_q *dsq, u64 d
 		return false;
 	}
 
-	dsq->is_timeout = true;
+	WRITE_ONCE(dsq->is_timeout, true);
 	dsq_id = dsq_id_to_internal(dsq);
 	hmbird_info_trace("dsq[%d] has timeout task-%s, jiffies = %lu, runnable at = %lu\n",
 			dsq_id, entity->task->comm, jiffies, entity->runnable_at);
@@ -2448,8 +2431,10 @@ static bool skip_too_much(int dsq_idx)
 	return false;
 }
 
-bool consume_dispatch_q(struct rq *rq, struct rq_flags *rf,
-					struct hmbird_dispatch_q *dsq)
+static bool consume_dispatch_q_timeout(struct rq *rq, struct rq_flags *rf,
+					       struct hmbird_dispatch_q *dsq,
+					       u64 timeout_deadline,
+					       bool timeout_only)
 {
 	struct hmbird_rq *hmbird_rq = get_hmbird_rq(rq);
 	struct hmbird_entity *entity;
@@ -2468,6 +2453,10 @@ retry:
 		return false;
 
 	raw_spin_lock_irqsave(&dsq->lock, flags);
+	if (timeout_only && !READ_ONCE(dsq->is_timeout)) {
+		raw_spin_unlock_irqrestore(&dsq->lock, flags);
+		return false;
+	}
 
 	list_for_each_entry(entity, &dsq->fifo, dsq_node.fifo) {
 		p = entity->task;
@@ -2524,6 +2513,8 @@ this_rq:
 	dsq->nr--;
 	hmbird_rq->local_dsq.nr++;
 	hse->dsq = &hmbird_rq->local_dsq;
+	if (timeout_deadline)
+		refresh_dsq_timeout_locked(dsq, timeout_deadline);
 	raw_spin_unlock_irqrestore(&dsq->lock, flags);
 	slim_stats_record(TOTAL_DSP_CNT, 0, 0, 0);
 	return true;
@@ -2547,6 +2538,8 @@ remote_rq:
 	task_unlink_from_dsq(p, dsq);
 	dsq->nr--;
 	hse->holding_cpu = raw_smp_processor_id();
+	if (timeout_deadline)
+		refresh_dsq_timeout_locked(dsq, timeout_deadline);
 	raw_spin_unlock_irqrestore(&dsq->lock, flags);
 
 	rq_unpin_lock(rq, rf);
@@ -2562,6 +2555,12 @@ remote_rq:
 	}
 	may_fit = NULL;
 	goto retry;
+}
+
+bool consume_dispatch_q(struct rq *rq, struct rq_flags *rf,
+					struct hmbird_dispatch_q *dsq)
+{
+	return consume_dispatch_q_timeout(rq, rf, dsq, 0, false);
 }
 
 

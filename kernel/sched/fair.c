@@ -9677,14 +9677,17 @@ static unsigned long scale_rt_capacity(int cpu)
 static void update_cpu_capacity(struct sched_domain *sd, int cpu)
 {
 	unsigned long capacity = scale_rt_capacity(cpu);
+	struct rq *rq = cpu_rq(cpu);
 	struct sched_group *sdg = sd->groups;
+
+	rq->cpu_capacity_orig = arch_scale_cpu_capacity(cpu);
 
 	if (!capacity)
 		capacity = 1;
 
 	trace_android_rvh_update_cpu_capacity(cpu, &capacity);
-	cpu_rq(cpu)->cpu_capacity = capacity;
-	trace_sched_cpu_capacity_tp(cpu_rq(cpu));
+	rq->cpu_capacity = capacity;
+	trace_sched_cpu_capacity_tp(rq);
 
 	sdg->sgc->capacity = capacity;
 	sdg->sgc->min_capacity = capacity;

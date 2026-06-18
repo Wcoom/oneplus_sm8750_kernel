@@ -14,8 +14,10 @@
 #include <linux/mm.h>
 #include <linux/mmzone.h>
 #include <linux/module.h>
+#include <linux/notifier.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/suspend.h>
 #include <linux/swap.h>
 #include <linux/vmstat.h>
 #include <linux/workqueue.h>
@@ -190,6 +192,38 @@ void crystal_hybridswap_resume_auto_policy(void)
 		atomic_dec(&chs.policy_suspended);
 	crystal_hybridswap_update_auto_policy();
 }
+
+bool crystal_hybridswap_system_sleeping(void)
+{
+	return atomic_read(&chs.system_sleeping) > 0;
+}
+
+static int crystal_hybridswap_pm_notifier(struct notifier_block *nb,
+					  unsigned long action, void *data)
+{
+	switch (action) {
+	case PM_HIBERNATION_PREPARE:
+	case PM_SUSPEND_PREPARE:
+	case PM_RESTORE_PREPARE:
+		atomic_set(&chs.system_sleeping, 1);
+		crystal_hybridswap_suspend_auto_policy_sync();
+		break;
+	case PM_POST_HIBERNATION:
+	case PM_POST_SUSPEND:
+	case PM_POST_RESTORE:
+		atomic_set(&chs.system_sleeping, 0);
+		crystal_hybridswap_resume_auto_policy();
+		break;
+	default:
+		break;
+	}
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block crystal_hybridswap_pm_nb = {
+	.notifier_call = crystal_hybridswap_pm_notifier,
+};
 
 static void crystal_hybridswap_record_writeback(const char *mode, s64 pages,
 						int ret, s64 written_pages)
@@ -3197,6 +3231,7 @@ static int __init crystal_hybridswap_init(void)
 	atomic64_set(&chs.erm_high_avail_buffer, 0);
 	atomic_set(&chs.erm_avail_buffer_valid, 0);
 	atomic_set(&chs.policy_suspended, 0);
+	atomic_set(&chs.system_sleeping, 0);
 	atomic64_set(&chs.pending_policy_wakeups, 0);
 	atomic64_set(&chs.pending_writeback_pages, 0);
 	atomic64_set(&chs.pending_force_swapout, 0);
@@ -3260,10 +3295,18 @@ static int __init crystal_hybridswap_init(void)
 	if (!chs.wq)
 		return -ENOMEM;
 
+	ret = register_pm_notifier(&crystal_hybridswap_pm_nb);
+	if (ret) {
+		destroy_workqueue(chs.wq);
+		chs.wq = NULL;
+		return ret;
+	}
+
 	crystal_hybridswap_debugfs_init();
 
 	ret = crystal_hybridswap_memcg_init();
 	if (ret) {
+		unregister_pm_notifier(&crystal_hybridswap_pm_nb);
 		crystal_hybridswap_debugfs_exit();
 		destroy_workqueue(chs.wq);
 		chs.wq = NULL;
@@ -3272,6 +3315,7 @@ static int __init crystal_hybridswap_init(void)
 
 	ret = zram_driver_init();
 	if (ret) {
+		unregister_pm_notifier(&crystal_hybridswap_pm_nb);
 		crystal_hybridswap_memcg_exit();
 		crystal_hybridswap_debugfs_exit();
 		destroy_workqueue(chs.wq);
@@ -3285,6 +3329,7 @@ static int __init crystal_hybridswap_init(void)
 
 static void __exit crystal_hybridswap_exit(void)
 {
+	unregister_pm_notifier(&crystal_hybridswap_pm_nb);
 	crystal_hybridswap_suspend_auto_policy_sync();
 	zram_driver_exit();
 	crystal_hybridswap_memcg_exit();

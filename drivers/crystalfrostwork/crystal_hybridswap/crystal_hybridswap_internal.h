@@ -624,6 +624,7 @@ struct crystal_hybridswap_state {
 	char pending_writeback_mode[CHS_WB_MODE_MAX];
 	bool pending_writeback_auto;
 	atomic_t policy_suspended;
+	atomic_t system_sleeping;
 	char last_writeback_mode[CHS_WB_MODE_MAX];
 	char loop_device[CHS_LOOP_DEVICE_MAX];
 	char last_force_swapin_memcg[CHS_MEMCG_NAME_MAX];
@@ -721,6 +722,7 @@ void crystal_hybridswap_queue_policy_wakeup(unsigned int avail,
 void crystal_hybridswap_update_auto_policy(void);
 void crystal_hybridswap_suspend_auto_policy_sync(void);
 void crystal_hybridswap_resume_auto_policy(void);
+bool crystal_hybridswap_system_sleeping(void);
 void crystal_hybridswap_drain_force_swapout(void);
 void crystal_hybridswap_clear_pending_writeback_locked(void);
 

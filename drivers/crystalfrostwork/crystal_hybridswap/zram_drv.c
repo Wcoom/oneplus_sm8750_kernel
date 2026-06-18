@@ -39,6 +39,7 @@
 #include <linux/debugfs.h>
 #include <linux/cpuhotplug.h>
 #include <linux/part_stat.h>
+#include <linux/sysms_finder.h>
 
 #include "zram_drv.h"
 #include "crystal_hybridswap_internal.h"
@@ -66,6 +67,12 @@ static int zram_read_page(struct zram *zram, struct page *page, u32 index,
 			  struct bio *parent);
 static int zram_read_compressed_page(struct zram *zram, u32 index,
 				     void *dst, size_t *size);
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
+static void zram_record_zms_io(struct zram *zram, u32 index,
+			       const struct zms_io *io);
+static void zram_zms_start_gc(struct zram *zram);
+static void zram_zms_stop_gc(struct zram *zram);
+#endif
 
 bool zram_try_get(struct zram *zram)
 {
@@ -734,6 +741,7 @@ static void reset_bdev(struct zram *zram)
 	if (!zram->backing_dev)
 		return;
 
+	zram_zms_stop_gc(zram);
 	zms_destroy(zram->zms);
 	zram->zms = NULL;
 	bdev = zram->bdev;
@@ -925,6 +933,7 @@ static int zram_set_backing_dev(struct zram *zram, const char *buf, size_t len,
 	zram->bdev = bdev;
 	zram->backing_dev = backing_dev;
 	zram->zms = zms;
+	zram_zms_start_gc(zram);
 	up_write(&zram->init_lock);
 
 	pr_info("setup backing device %s%s\n", path,
@@ -987,6 +996,11 @@ static ssize_t backing_dev_store(struct device *dev,
 #define INCOMPRESSIBLE_WRITEBACK	(1<<2)
 #define HYBRIDSWAP_NORMAL_WRITEBACK	(1<<3)
 #define ZRAM_WB_BATCH_MAX		32
+#define ZRAM_ZMS_GC_PERIODIC_INTERVAL	(15 * HZ)
+#define ZRAM_ZMS_GC_MIN_USED_BLOCKS	128UL
+#define ZRAM_ZMS_GC_PARTIAL_PCT		5UL
+#define ZRAM_ZMS_GC_CACHED_BLOCKS	1024UL
+#define ZRAM_ZMS_GC_FREE_PCT		10UL
 
 struct zram_wb_item {
 	u32 index;
@@ -994,6 +1008,133 @@ struct zram_wb_item {
 	size_t size;
 	unsigned long handle;
 };
+
+static bool zram_zms_gc_should_run(const struct zms_stats *stats)
+{
+	unsigned long partial_pct;
+	unsigned long free_pct;
+
+	if (!check_charging_state())
+		return false;
+
+	if (!stats || !stats->nr_blocks || !stats->used_blocks)
+		return false;
+
+	if (stats->used_blocks < ZRAM_ZMS_GC_MIN_USED_BLOCKS)
+		return false;
+
+	if (stats->pending_free)
+		return true;
+
+	if (stats->dirty_blocks)
+		return true;
+
+	if (stats->cached_blocks >= ZRAM_ZMS_GC_CACHED_BLOCKS)
+		return true;
+
+	if (!stats->partial_blocks)
+		return false;
+
+	partial_pct = stats->partial_blocks * 100 / stats->used_blocks;
+	if (partial_pct >= ZRAM_ZMS_GC_PARTIAL_PCT)
+		return true;
+
+	free_pct = stats->free_blocks * 100 / stats->nr_blocks;
+	return free_pct <= ZRAM_ZMS_GC_FREE_PCT;
+}
+
+static int zram_zms_gc_run_locked(struct zram *zram, const char *reason)
+{
+	struct zms_stats stats;
+	struct zms_io io;
+	int ret;
+
+	if (!zram->zms)
+		return 0;
+
+	ret = zms_get_stats(zram->zms, &stats);
+	if (ret)
+		return ret;
+
+	if (!zram_zms_gc_should_run(&stats))
+		return 0;
+
+	ret = zms_compact(zram->zms, GFP_NOIO, &io);
+	zram_record_zms_io(zram, 0, &io);
+	chs_log_ratelimited(ret ? CHS_LOG_WARN : CHS_LOG_INFO,
+			    "zms gc %s reason=%s used=%lu free=%lu partial=%lu cached=%lu pending=%lu dirty=%lu ret=%d\n",
+			    ret ? "failed" : "done", reason,
+			    stats.used_blocks, stats.free_blocks,
+			    stats.partial_blocks, stats.cached_blocks,
+			    stats.pending_free, stats.dirty_blocks, ret);
+	return ret;
+}
+
+static void zram_zms_gc_workfn(struct work_struct *work)
+{
+	struct zram *zram = container_of(work, struct zram, zms_gc_work);
+
+	if (READ_ONCE(zram->zms_gc_stopping))
+		goto out;
+
+	if (down_read_trylock(&zram->init_lock)) {
+		if (!READ_ONCE(zram->zms_gc_stopping) && init_done(zram))
+			zram_zms_gc_run_locked(zram, "scheduled");
+		up_read(&zram->init_lock);
+	}
+
+out:
+	atomic_set(&zram->zms_gc_pending, 0);
+}
+
+static void zram_zms_gc_periodic_workfn(struct work_struct *work)
+{
+	struct delayed_work *dwork = to_delayed_work(work);
+	struct zram *zram = container_of(dwork, struct zram,
+					 zms_gc_periodic_work);
+
+	if (READ_ONCE(zram->zms_gc_stopping))
+		return;
+
+	if (down_read_trylock(&zram->init_lock)) {
+		if (!READ_ONCE(zram->zms_gc_stopping) && init_done(zram))
+			zram_zms_gc_run_locked(zram, "periodic");
+		up_read(&zram->init_lock);
+	}
+
+	if (!READ_ONCE(zram->zms_gc_stopping))
+		queue_delayed_work(system_unbound_wq,
+				   &zram->zms_gc_periodic_work,
+				   ZRAM_ZMS_GC_PERIODIC_INTERVAL);
+}
+
+static void zram_zms_schedule_gc(struct zram *zram)
+{
+	if (READ_ONCE(zram->zms_gc_stopping))
+		return;
+
+	if (!zram->zms)
+		return;
+
+	if (atomic_cmpxchg(&zram->zms_gc_pending, 0, 1) == 0)
+		queue_work(system_unbound_wq, &zram->zms_gc_work);
+}
+
+static void zram_zms_start_gc(struct zram *zram)
+{
+	WRITE_ONCE(zram->zms_gc_stopping, false);
+	atomic_set(&zram->zms_gc_pending, 0);
+	queue_delayed_work(system_unbound_wq, &zram->zms_gc_periodic_work,
+			   ZRAM_ZMS_GC_PERIODIC_INTERVAL);
+}
+
+static void zram_zms_stop_gc(struct zram *zram)
+{
+	WRITE_ONCE(zram->zms_gc_stopping, true);
+	cancel_delayed_work_sync(&zram->zms_gc_periodic_work);
+	cancel_work_sync(&zram->zms_gc_work);
+	atomic_set(&zram->zms_gc_pending, 0);
+}
 
 static int zram_parse_writeback_mode(struct zram *zram, const char *buf,
 				     bool internal, int *mode, unsigned long *index,
@@ -1392,6 +1533,8 @@ scan_next:
 release_items:
 	kfree(items);
 release_init_lock:
+	if (written)
+		zram_zms_schedule_gc(zram);
 	up_read(&zram->init_lock);
 
 	if (wb_stats) {
@@ -3797,6 +3940,11 @@ static int zram_add(void)
 	zram->removing = false;
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
 	spin_lock_init(&zram->wb_limit_lock);
+	INIT_WORK(&zram->zms_gc_work, zram_zms_gc_workfn);
+	INIT_DELAYED_WORK(&zram->zms_gc_periodic_work,
+			  zram_zms_gc_periodic_workfn);
+	atomic_set(&zram->zms_gc_pending, 0);
+	zram->zms_gc_stopping = true;
 #endif
 
 	/* gendisk structure */

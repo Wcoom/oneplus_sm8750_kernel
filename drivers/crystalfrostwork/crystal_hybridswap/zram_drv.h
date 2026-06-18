@@ -24,6 +24,7 @@
 #include <linux/crypto.h>
 
 #include "zcomp.h"
+#include "zms.h"
 
 /*
  * Private zram has its own Kconfig symbols.  Some lightweight M= builds
@@ -109,6 +110,7 @@ struct zram_stats {
 	atomic64_t miss_free;		/* no. of missed free */
 #ifdef	CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
 	atomic64_t bd_count;		/* no. of pages in backing device */
+	atomic64_t bd_compr_data_size;	/* compressed bytes in backing device */
 	atomic64_t bd_reads;		/* no. of reads from backing device */
 	atomic64_t bd_writes;		/* no. of writes from backing device */
 	atomic64_t bd_read_sync_ios;	/* synchronous backing reads */
@@ -212,10 +214,7 @@ struct zram {
 	bool wb_limit_enable;
 	u64 bd_wb_limit;
 	struct block_device *bdev;
-	spinlock_t bitmap_lock;
-	unsigned long *bitmap;
-	unsigned long nr_pages;
-	unsigned long wb_alloc_cursor;
+	struct zms *zms;
 #endif
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MEMORY_TRACKING
 	struct dentry *debugfs_dir;

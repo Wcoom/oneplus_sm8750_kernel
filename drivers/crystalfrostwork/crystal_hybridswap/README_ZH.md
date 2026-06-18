@@ -16,7 +16,7 @@ Crystal Hybridswap 面向内存压力场景，适合希望继续使用标准 zra
 
 - 标准 zram 块设备，例如 `/dev/zramX`；
 - 标准 zram 控制和配置路径，例如 `/sys/class/zram-control` 和 `/sys/block/zramX`；
-- 带页级写回和 batch-in 能力的私有 zram 数据面；
+- 带 ZMS 压缩对象打包写回和 batch-in 能力的私有 zram 数据面；
 - Crystal 扩展的 sysfs、memcg、eventfd 和 debugfs 控制接口；
 - 自动和显式的 swapout / swapin 风格操作；
 - quota、压力、写回、batch-in 和最近操作快照等诊断信息。
@@ -27,7 +27,7 @@ Crystal Hybridswap 将标准 zram ABI 作为稳定外部契约。Crystal 专属�
 
 ## 为什么需要 Crystal Hybridswap
 
-Crystal Hybridswap 的目标，是保留 Hybridswap 对用户态有价值的外部使用契约，同时把强耦合的 vendor 内部状态机改写为更容易审计和维护的页级 zram 写回/读回设计。
+Crystal Hybridswap 的目标，是保留 Hybridswap 对用户态有价值的外部使用契约，同时把强耦合的 vendor 内部状态机改写为更容易审计和维护的 zram slot 写回/读回设计。
 
 OPPO 官方 Hybridswap 本身具有明确的功能价值。它提供了完整功能、成熟用户态 API、自动策略、per-memcg 控制，以及成体系的写回/读回能力。对于使用原始 vendor 内核的设备，这些能力是重要的，不应被简单否定。
 
@@ -39,7 +39,7 @@ Crystal 因此保留有利于部署和维护的用户可见部分，但重写内
 
 - 尽量保留标准 zram ABI 和常见 Hybridswap 风格控制接口；
 - 将兼容节点视为外部契约，而不是旧内部对象身份的承诺；
-- 使用页级 zram writeback/readback，不迁移旧 extent/rmap/fault-out 框架；
+- 使用 zram slot writeback/readback，并通过 ZMS 将压缩对象打包到 backing device，不迁移旧 extent/rmap/fault-out 框架；
 - batch-in 提交前进行页级 slot 快照校验；
 - 将 core worker、memcg、pressure、zram bridge 和 stats 职责拆成可审计层；
 - 通过明确计数器、操作快照和诊断报告暴露策略结果。
@@ -96,11 +96,11 @@ user space / cgroup / eventfd
 
 ### 2.3 私有 zram 数据面
 
-Crystal Hybridswap 使用页级 zram slot 状态，而不是 extent 级对象模型。重要状态包括：
+Crystal Hybridswap 使用 zram slot 状态，而不是 extent 级对象模型。写回 slot 指向内存中的 ZMS handle，ZMS 将压缩后的 zram 对象打包进 PAGE_SIZE backing block。重要状态包括：
 
 | 状态 | 含义 |
 |---|---|
-| `ZRAM_WB` | 页面已经写回到 backing device。 |
+| `ZRAM_WB` | 页面压缩对象已经由 ZMS 写回到 backing device。 |
 | `ZRAM_UNDER_WB` | 页面正在写回或 batch-in，不能被其他操作并发接管。 |
 | `ZRAM_IDLE` | 页面被标记为 idle，可被写回策略选中。 |
 | `ZRAM_HUGE` | 页面被视为 huge 或难压缩候选。 |
@@ -132,7 +132,7 @@ Crystal Hybridswap 使用页级 zram slot 状态，而不是 extent 级对象模
 
 #### writeback
 
-writeback 会按请求模式扫描 zram slot，例如 idle pages、huge pages、huge idle pages、incompressible pages 或指定 page index。符合条件的页面会被标记为写回中，写入 backing device，然后更新 slot 状态。
+writeback 会按请求模式扫描 zram slot，例如 idle pages、huge pages、huge idle pages、incompressible pages 或指定 page index。符合条件的压缩对象会被标记为写回中，由 ZMS 打包写入 backing device，然后更新 slot 状态。
 
 #### batch-in
 
@@ -358,9 +358,9 @@ Crystal 专属接口分为：
 |---|---|---|
 | 功能价值 | 保留实用 Hybridswap 用户体验，同时简化内部结构以适配通用内核维护。 | 提供完整且成熟的 Hybridswap 功能，包括自动策略、per-memcg 控制和成体系的写回/读回。 |
 | 外部契约 | 保留标准 zram ABI，并增加 Crystal 扩展节点。 | 使用 OPPO 专属 Hybridswap 行为和私有接口。 |
-| 内部状态模型 | 使用页级 zram slot 状态和明确的 writeback/batch-in 所有权。 | 使用 extent / rmap / object 风格模型，并包含 reclaim-in、batch-out、pre-out 和 fault-out 场景。 |
+| 内部状态模型 | 使用 zram slot 状态、ZMS 压缩对象打包存储和明确的 writeback/batch-in 所有权。 | 使用 extent / rmap / object 风格模型，并包含 reclaim-in、batch-out、pre-out 和 fault-out 场景。 |
 | 耦合关系 | 拆分 zram 数据面、core worker、memcg 策略、pressure 通知和 stats。 | 强耦合 zram slot 状态、backing storage、memcg 映射、rmap 条目和 extent 生命周期。 |
-| 写回/读回模型 | 通过页级操作写回和读回选中的 zram 页面，并进行 slot 快照校验。 | 使用围绕 extent 对象和场景状态迁移构建的官方 vendor reclaim 与恢复路径。 |
+| 写回/读回模型 | 写回选中的 zram 压缩对象，读回时通过 slot 快照校验恢复到 zram。 | 使用围绕 extent 对象和场景状态迁移构建的官方 vendor reclaim 与恢复路径。 |
 | 策略引擎 | 使用 Crystal core policy，关注压力、quota、节流和 multi-zram 选择。 | 使用与其内部状态耦合的官方 vendor 策略模型。 |
 | 维护模型 | 倾向显式所有权、更小分层、可审计计数器和局部化失败报告。 | 许多 readback、writeback、恢复和 memcg 变更都必须维护共享隐式不变量。 |
 | 诊断方式 | 区分标准 zram ABI、Crystal sysfs 统计、操作快照、debugfs 报告和内核日志。 | 使用官方 vendor 诊断模型。 |

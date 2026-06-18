@@ -212,8 +212,10 @@ struct zram {
 	bool wb_limit_enable;
 	u64 bd_wb_limit;
 	struct block_device *bdev;
+	spinlock_t bitmap_lock;
 	unsigned long *bitmap;
 	unsigned long nr_pages;
+	unsigned long wb_alloc_cursor;
 #endif
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MEMORY_TRACKING
 	struct dentry *debugfs_dir;

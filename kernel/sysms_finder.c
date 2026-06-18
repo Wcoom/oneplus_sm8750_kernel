@@ -47,3 +47,16 @@ bool check_game_pid(void)
 
 	return result;
 }
+
+bool check_charging_state(void)
+{
+	bool (*connecting_state_fn)(void);
+	unsigned long addr;
+
+	addr = lookup_symbol(SYMBOL_GET_CONNECTING_STATE);
+	if (!addr)
+		return false;
+
+	connecting_state_fn = (bool (*)(void))addr;
+	return connecting_state_fn();
+}

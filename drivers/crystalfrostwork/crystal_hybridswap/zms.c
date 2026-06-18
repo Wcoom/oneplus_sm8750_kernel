@@ -31,23 +31,27 @@
 #define ZMS_MIN_SIZE		ZMS_ALIGN
 #define ZMS_CLASS_SIZE		ZMS_ALIGN
 #define ZMS_MAX_CLASSES		(PAGE_SIZE / ZMS_CLASS_SIZE)
+#define ZMS_MAX_PAGES_PER_ZSPAGE 8U
 #define ZMS_BLOCK_RESERVED	1UL
 #define ZMS_COMPACT_SOURCE_PCT	30U
 #define ZMS_COMPACT_TARGET_PCT	80U
 
 struct zms_block {
-	unsigned long index;
 	unsigned int class_size;
+	unsigned int pages;
 	unsigned int slots;
 	unsigned int used;
 	unsigned long *bitmap;
 	void *data;
 	bool dirty;
 	struct list_head list;
+	unsigned long blocks[];
 };
 
 struct zms_class {
 	unsigned int size;
+	unsigned int pages_per_zspage;
+	unsigned int slots_per_zspage;
 	struct list_head partial;
 	struct list_head full;
 };
@@ -100,6 +104,40 @@ static sector_t zms_block_sector(unsigned long block)
 	return block * (PAGE_SIZE >> SECTOR_SHIFT);
 }
 
+static unsigned int zms_calculate_zspage_pages(unsigned int class_size)
+{
+	unsigned int i;
+	unsigned int best = 1;
+	unsigned int min_waste = UINT_MAX;
+
+	if (is_power_of_2(class_size))
+		return 1;
+
+	for (i = 1; i <= ZMS_MAX_PAGES_PER_ZSPAGE; i++) {
+		unsigned int waste = (i * PAGE_SIZE) % class_size;
+
+		if (waste < min_waste) {
+			min_waste = waste;
+			best = i;
+		}
+	}
+
+	return best;
+}
+
+static unsigned int zms_block_bytes(const struct zms_block *block)
+{
+	return block->pages << PAGE_SHIFT;
+}
+
+static struct page *zms_data_page(void *addr)
+{
+	if (is_vmalloc_addr(addr))
+		return vmalloc_to_page(addr);
+
+	return virt_to_page(addr);
+}
+
 static void zms_io_clear(struct zms_io *io)
 {
 	if (io)
@@ -147,26 +185,45 @@ static void zms_io_record(struct zms_io *io, unsigned int op,
 	}
 }
 
-static int zms_submit_block(struct zms *zms, struct zms_block *block,
-			    unsigned int op, gfp_t gfp, struct zms_io *io)
+static int zms_submit_page(struct zms *zms, struct zms_block *block,
+			   unsigned int page_idx, unsigned int op,
+			   gfp_t gfp, struct zms_io *io)
 {
 	struct page *page;
 	struct bio bio;
 	struct bio_vec bv;
+	void *data;
 	u64 start;
 	int ret;
 
 	(void)gfp;
-	page = virt_to_page(block->data);
+	data = (char *)block->data + (page_idx << PAGE_SHIFT);
+	page = zms_data_page(data);
 	bio_init(&bio, zms->bdev, &bv, 1, op | REQ_SYNC);
-	bio.bi_iter.bi_sector = zms_block_sector(block->index);
-	__bio_add_page(&bio, page, PAGE_SIZE, offset_in_page(block->data));
+	bio.bi_iter.bi_sector = zms_block_sector(block->blocks[page_idx]);
+	__bio_add_page(&bio, page, PAGE_SIZE, offset_in_page(data));
 
 	start = ktime_get_ns();
 	ret = submit_bio_wait(&bio);
-	zms_io_record(io, op, block->index, ktime_get_ns() - start, ret);
+	zms_io_record(io, op, block->blocks[page_idx],
+		      ktime_get_ns() - start, ret);
 	bio_uninit(&bio);
 	return ret;
+}
+
+static int zms_submit_block(struct zms *zms, struct zms_block *block,
+			    unsigned int op, gfp_t gfp, struct zms_io *io)
+{
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < block->pages; i++) {
+		ret = zms_submit_page(zms, block, i, op, gfp, io);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
 }
 
 static int zms_write_block(struct zms *zms, struct zms_block *block,
@@ -181,7 +238,7 @@ static int zms_write_block(struct zms *zms, struct zms_block *block,
 	if (!ret) {
 		block->dirty = false;
 		if (block->used == block->slots) {
-			free_page((unsigned long)block->data);
+			kvfree(block->data);
 			block->data = NULL;
 		}
 	}
@@ -195,7 +252,7 @@ static int zms_read_block(struct zms *zms, struct zms_block *block,
 	int ret;
 
 	if (!block->data) {
-		block->data = (void *)__get_free_page(gfp);
+		block->data = kvzalloc(zms_block_bytes(block), gfp);
 		if (!block->data)
 			return -ENOMEM;
 		allocated = true;
@@ -203,7 +260,7 @@ static int zms_read_block(struct zms *zms, struct zms_block *block,
 
 	ret = zms_submit_block(zms, block, REQ_OP_READ, gfp, io);
 	if (ret && allocated) {
-		free_page((unsigned long)block->data);
+		kvfree(block->data);
 		block->data = NULL;
 	}
 	return ret;
@@ -257,7 +314,7 @@ static void zms_free_block(struct zms_block *block)
 
 	kvfree(block->bitmap);
 	if (block->data)
-		free_page((unsigned long)block->data);
+		kvfree(block->data);
 	kfree(block);
 }
 
@@ -283,37 +340,42 @@ static struct zms_block *zms_alloc_block_locked(struct zms *zms,
 						gfp_t gfp)
 {
 	struct zms_block *block;
-	unsigned long block_index;
 	size_t bitmap_size;
+	unsigned int i;
 
-	block_index = zms_alloc_disk_block_locked(zms);
-	if (!block_index)
+	block = kzalloc(struct_size(block, blocks, class->pages_per_zspage), gfp);
+	if (!block)
 		return NULL;
 
-	block = kzalloc(sizeof(*block), gfp);
-	if (!block)
-		goto err_block;
-
-	block->slots = PAGE_SIZE / class->size;
+	block->pages = class->pages_per_zspage;
+	block->slots = class->slots_per_zspage;
 	bitmap_size = BITS_TO_LONGS(block->slots) * sizeof(unsigned long);
 	block->bitmap = kvzalloc(bitmap_size, gfp);
 	if (!block->bitmap)
-		goto err_zms_block;
+		goto err_block;
 
-	block->data = (void *)__get_free_page(gfp | __GFP_ZERO);
+	block->data = kvzalloc(zms_block_bytes(block), gfp);
 	if (!block->data)
-		goto err_zms_block;
+		goto err_block;
 
-	block->index = block_index;
+	for (i = 0; i < block->pages; i++) {
+		block->blocks[i] = zms_alloc_disk_block_locked(zms);
+		if (!block->blocks[i])
+			goto err_allocated_blocks;
+	}
+
 	block->class_size = class->size;
 	INIT_LIST_HEAD(&block->list);
 	list_add_tail(&block->list, &class->partial);
 	return block;
 
-err_zms_block:
-	zms_free_block(block);
+err_allocated_blocks:
+	while (i > 0) {
+		i--;
+		zms_free_disk_block_locked(zms, block->blocks[i]);
+	}
 err_block:
-	zms_free_disk_block_locked(zms, block_index);
+	zms_free_block(block);
 	return NULL;
 }
 
@@ -416,8 +478,11 @@ static void zms_free_handle_locked(struct zms *zms, unsigned long handle)
 	}
 
 	if (!block->used) {
+		unsigned int i;
+
 		list_del(&block->list);
-		zms_free_disk_block_locked(zms, block->index);
+		for (i = 0; i < block->pages; i++)
+			zms_free_disk_block_locked(zms, block->blocks[i]);
 		zms_free_block(block);
 	}
 }
@@ -584,7 +649,8 @@ static int zms_compact_class_locked(struct zms *zms, struct zms_class *class,
 
 		if (!source->used) {
 			list_del(&source->list);
-			zms_free_disk_block_locked(zms, source->index);
+			for (slot = 0; slot < source->pages; slot++)
+				zms_free_disk_block_locked(zms, source->blocks[slot]);
 			zms_free_block(source);
 		} else {
 			break;
@@ -625,6 +691,11 @@ struct zms *zms_create(struct block_device *bdev, unsigned long nr_blocks,
 	INIT_WORK(&zms->free_work, zms_free_workfn);
 	for (i = 0; i < ARRAY_SIZE(zms->classes); i++) {
 		zms->classes[i].size = (i + 1) * ZMS_CLASS_SIZE;
+		zms->classes[i].pages_per_zspage =
+			zms_calculate_zspage_pages(zms->classes[i].size);
+		zms->classes[i].slots_per_zspage =
+			zms->classes[i].pages_per_zspage * PAGE_SIZE /
+			zms->classes[i].size;
 		INIT_LIST_HEAD(&zms->classes[i].partial);
 		INIT_LIST_HEAD(&zms->classes[i].full);
 	}
@@ -776,27 +847,27 @@ int zms_get_stats(struct zms *zms, struct zms_stats *stats)
 		bool class_used = false;
 
 		list_for_each_entry(block, &class->partial, list) {
-			stats->partial_blocks++;
+			stats->partial_blocks += block->pages;
 			stats->objects += block->used;
 			stats->packed_bytes += (u64)block->used * class->size;
 			if (block->dirty)
-				stats->dirty_blocks++;
+				stats->dirty_blocks += block->pages;
 			if (block->data)
-				stats->cached_blocks++;
+				stats->cached_blocks += block->pages;
 			if (!block->used)
-				stats->empty_blocks++;
+				stats->empty_blocks += block->pages;
 			class_used = true;
 		}
 		list_for_each_entry(block, &class->full, list) {
-			stats->full_blocks++;
+			stats->full_blocks += block->pages;
 			stats->objects += block->used;
 			stats->packed_bytes += (u64)block->used * class->size;
 			if (block->dirty)
-				stats->dirty_blocks++;
+				stats->dirty_blocks += block->pages;
 			if (block->data)
-				stats->cached_blocks++;
+				stats->cached_blocks += block->pages;
 			if (!block->used)
-				stats->empty_blocks++;
+				stats->empty_blocks += block->pages;
 			class_used = true;
 		}
 		if (class_used)
@@ -876,6 +947,8 @@ int zms_store(struct zms *zms, unsigned long handle, const void *src,
 	if (block->used == block->slots) {
 		ret = zms_write_block(zms, block, gfp, io);
 		if (ret) {
+			unsigned int block_page;
+
 			entry->block = NULL;
 			entry->offset = 0;
 			entry->size = 0;
@@ -886,7 +959,10 @@ int zms_store(struct zms *zms, unsigned long handle, const void *src,
 				zms_move_block_to_class_locked(block, class);
 			if (!block->used) {
 				list_del(&block->list);
-				zms_free_disk_block_locked(zms, block->index);
+				for (block_page = 0; block_page < block->pages;
+				     block_page++)
+					zms_free_disk_block_locked(zms,
+						block->blocks[block_page]);
 				zms_free_block(block);
 			}
 		}
@@ -929,7 +1005,7 @@ int zms_load(struct zms *zms, unsigned long handle, void *dst, size_t *size,
 		memcpy(dst, (char *)block->data + snapshot.offset, snapshot.size);
 		*size = snapshot.size;
 		if (!block->dirty && block->used == block->slots) {
-			free_page((unsigned long)block->data);
+			kvfree(block->data);
 			block->data = NULL;
 		}
 	}

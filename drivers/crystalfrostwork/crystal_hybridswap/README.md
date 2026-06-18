@@ -16,7 +16,7 @@ The module provides:
 
 - standard zram block devices such as `/dev/zramX`;
 - standard zram control and configuration paths such as `/sys/class/zram-control` and `/sys/block/zramX`;
-- a private zram data path with page-level writeback and batch-in support;
+- a private zram data path with ZMS packed compressed-object writeback and batch-in support;
 - Crystal-specific sysfs, memcg, eventfd, and debugfs control surfaces;
 - automatic and explicit swapout/swapin style operations;
 - diagnostics for quota, pressure, writeback, batch-in, and recent operation snapshots.
@@ -27,7 +27,7 @@ Crystal Hybridswap keeps the standard zram ABI as the stable external contract. 
 
 ## Why Crystal Hybridswap Exists
 
-Crystal Hybridswap exists to preserve the practical user-space contract of Hybridswap while replacing a tightly coupled vendor-internal state machine with a simpler page-level zram writeback/readback design.
+Crystal Hybridswap exists to preserve the practical user-space contract of Hybridswap while replacing a tightly coupled vendor-internal state machine with a simpler zram-slot writeback/readback design.
 
 The old OPPO official Hybridswap implementation has real functional value. It provides a complete Hybridswap feature set, a mature user-space API, automatic policy, per-memcg control, and an integrated writeback/readback system. For devices that use the original vendor kernel, those properties are important and should not be treated as accidental.
 
@@ -39,7 +39,7 @@ Crystal therefore keeps the user-visible parts that are useful for deployment an
 
 - preserve the standard zram ABI and common Hybridswap-style control interfaces where practical;
 - keep compatibility nodes as external contracts, not as commitments to old internal object identity;
-- use page-level zram writeback and readback instead of migrating the extent/rmap/fault-out framework;
+- use zram-slot writeback/readback with ZMS packed compressed-object storage instead of migrating the extent/rmap/fault-out framework;
 - validate page-level slot snapshots before committing batch-in data;
 - split core worker, memcg, pressure, zram bridge, and statistics responsibilities into auditable layers;
 - make policy outcomes visible through explicit counters, operation snapshots, and diagnostic reports.
@@ -96,7 +96,7 @@ user space / cgroup / eventfd
 
 ### 2.3 Private zram Data Plane
 
-Crystal Hybridswap uses page-level zram slot state rather than an extent-level object model. Important slot states include:
+Crystal Hybridswap uses zram slot state rather than an extent-level object model. Written-back slots point to volatile ZMS handles, and ZMS packs compressed zram objects into PAGE_SIZE backing blocks. Important slot states include:
 
 | State | Meaning |
 |---|---|
@@ -132,7 +132,7 @@ User-space reads and writes still go through the zram block device. Pages may st
 
 #### Writeback
 
-Writeback scans zram slots according to the requested mode, such as idle pages, huge pages, huge idle pages, incompressible pages, or a selected page index. Eligible pages are marked under writeback, written to the backing device, and then have their slot state updated.
+Writeback scans zram slots according to the requested mode, such as idle pages, huge pages, huge idle pages, incompressible pages, or a selected page index. Eligible compressed objects are marked under writeback, packed by ZMS into backing-device blocks, and then have their slot state updated.
 
 #### Batch-in
 
@@ -358,9 +358,9 @@ This section explains design differences for Crystal Hybridswap users. The main 
 |---|---|---|
 | Functional value | Keeps the practical Hybridswap user experience while simplifying internals for generic kernel maintenance. | Provides a complete and mature Hybridswap feature set with automatic policy, per-memcg controls, and integrated writeback/readback. |
 | External contract | Keeps standard zram ABI and adds Crystal extension nodes. | Uses OPPO-specific Hybridswap behavior and private interfaces. |
-| Internal state model | Uses page-level zram slot state and explicit writeback/batch-in ownership. | Uses an extent/rmap/object-style model with reclaim-in, batch-out, pre-out, and fault-out scenes. |
+| Internal state model | Uses zram slot state, ZMS compressed-object packing, and explicit writeback/batch-in ownership. | Uses an extent/rmap/object-style model with reclaim-in, batch-out, pre-out, and fault-out scenes. |
 | Coupling model | Separates zram data path, core worker, memcg policy, pressure notification, and statistics. | Strongly couples zram slot state, backing storage, memcg mapping, rmap entries, and extent lifetime. |
-| Writeback/readback model | Writes and reads back selected zram pages through page-level operations with slot snapshot validation. | Uses the original vendor reclaim and recovery paths built around extent objects and scene-specific state transitions. |
+| Writeback/readback model | Writes back selected compressed zram objects and restores pages through slot snapshot validation. | Uses the original vendor reclaim and recovery paths built around extent objects and scene-specific state transitions. |
 | Policy engine | Uses Crystal core policy with pressure, quota, throttling, and multi-zram selection. | Uses the official vendor policy model coupled to its internal state. |
 | Maintenance model | Favors explicit ownership, smaller layers, auditable counters, and localized failure reporting. | Requires many readback, writeback, recovery, and memcg changes to preserve shared implicit invariants. |
 | Diagnostics | Separates standard zram ABI, Crystal sysfs stats, operation snapshots, debugfs reports, and kernel logs. | Uses the official vendor diagnostics model. |

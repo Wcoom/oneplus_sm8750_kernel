@@ -70,10 +70,12 @@ config CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
 	depends on CRYSTAL_HYBRIDSWAP
 	default y
 	help
-	  Keep the upstream zram backing_dev/writeback/read_from_bdev page-level
-	  mechanism inside the private zram driver.  This is required by
+	  Keep backing_dev/writeback support inside the private zram driver.  The
+	  writeback data plane uses Crystal ZMS to pack compressed zram objects
+	  into PAGE_SIZE backing blocks with volatile in-memory metadata.  This is
+	  required by
 	  the migrated hybridswap data path so force_swapout and automatic
-	  policy writeback can move idle or incompressible zram pages to the
+	  policy writeback can move idle or incompressible zram objects to the
 	  configured backing device without reintroducing the old extent data
 	  plane.
 

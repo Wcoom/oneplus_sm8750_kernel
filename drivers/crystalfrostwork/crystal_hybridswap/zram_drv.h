@@ -20,6 +20,7 @@
 #include <linux/refcount.h>
 #include <linux/rwsem.h>
 #include <linux/spinlock.h>
+#include <linux/workqueue.h>
 #include <linux/zsmalloc.h>
 #include <linux/crypto.h>
 
@@ -215,6 +216,10 @@ struct zram {
 	u64 bd_wb_limit;
 	struct block_device *bdev;
 	struct zms *zms;
+	struct work_struct zms_gc_work;
+	struct delayed_work zms_gc_periodic_work;
+	atomic_t zms_gc_pending;
+	bool zms_gc_stopping;
 #endif
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MEMORY_TRACKING
 	struct dentry *debugfs_dir;

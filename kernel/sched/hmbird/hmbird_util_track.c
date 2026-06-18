@@ -493,42 +493,36 @@ done:
 
 static void slim_walt_irq_work(struct irq_work *irq_work)
 {
-	cpumask_t lock_cpus;
 	struct hmbird_sched_rq_stats *srq;
 	struct rq *rq;
 	int cpu;
-	int level = 0;
+	int freq_cpu;
 	u64 wc;
 	unsigned long flags;
 
-	cpumask_copy(&lock_cpus, cpu_possible_mask);
-
-	for_each_cpu(cpu, &lock_cpus) {
-		if (level == 0)
-			raw_spin_lock(&cpu_rq(cpu)->__lock);
-		else
-			raw_spin_lock_nested(&cpu_rq(cpu)->__lock, level);
-		level++;
-	}
-
 	wc = sched_clock();
 
-	for_each_cpu(cpu, &lock_cpus) {
+	for_each_possible_cpu(cpu) {
 		rq = cpu_rq(cpu);
+		raw_spin_lock(&rq->__lock);
 		hmbird_update_task_ravg(rq->curr, rq, TASK_UPDATE, wc);
+		raw_spin_unlock(&rq->__lock);
 	}
 
-	cpufreq_update_util(cpu_rq(0), HMBIRD_CPUFREQ_WINDOW_ROLLOVER);
-	spin_lock_irqsave(&new_sched_ravg_window_lock, flags);
-	if (unlikely(new_hmbird_sched_ravg_window != hmbird_sched_ravg_window)) {
-		srq = &per_cpu(hmbird_sched_rq_stats, smp_processor_id());
-		if (wc < srq->window_start + new_hmbird_sched_ravg_window)
-			hmbird_sched_ravg_window = new_hmbird_sched_ravg_window;
-	}
-	spin_unlock_irqrestore(&new_sched_ravg_window_lock, flags);
+	freq_cpu = cpumask_first(cpu_online_mask);
+	if (freq_cpu < nr_cpu_ids) {
+		rq = cpu_rq(freq_cpu);
+		raw_spin_lock(&rq->__lock);
+		cpufreq_update_util(rq, HMBIRD_CPUFREQ_WINDOW_ROLLOVER);
 
-	for_each_cpu(cpu, &lock_cpus) {
-		raw_spin_unlock(&cpu_rq(cpu)->__lock);
+		spin_lock_irqsave(&new_sched_ravg_window_lock, flags);
+		if (unlikely(new_hmbird_sched_ravg_window != hmbird_sched_ravg_window)) {
+			srq = &per_cpu(hmbird_sched_rq_stats, freq_cpu);
+			if (wc < srq->window_start + new_hmbird_sched_ravg_window)
+				hmbird_sched_ravg_window = new_hmbird_sched_ravg_window;
+		}
+		spin_unlock_irqrestore(&new_sched_ravg_window_lock, flags);
+		raw_spin_unlock(&rq->__lock);
 	}
 }
 static void hmbird_sched_init_rq(struct rq *rq)

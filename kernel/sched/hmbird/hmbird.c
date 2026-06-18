@@ -791,7 +791,6 @@ done:
 static struct hmbird_dispatch_q *find_dsq_from_task(struct task_struct *p)
 {
 	int idx;
-	unsigned long flags;
 	struct hmbird_dispatch_q *dsq;
 
 	if (!p)
@@ -808,12 +807,6 @@ static struct hmbird_dispatch_q *find_dsq_from_task(struct task_struct *p)
 		get_hmbird_ts(p)->gdsq_idx = idx;
 		slim_stats_record(GDSQ_CNT, 0, idx, 0);
 	}
-
-	raw_spin_lock_irqsave(&dsq->lock, flags);
-	if (list_empty(&dsq->fifo))
-		dsq->last_consume_at = jiffies;
-
-	raw_spin_unlock_irqrestore(&dsq->lock, flags);
 
 	return dsq;
 }
@@ -1497,8 +1490,11 @@ static bool scan_dsq_timeout(struct rq *rq, struct hmbird_dispatch_q *dsq, u64 d
 	struct hmbird_entity *entity;
 	int dsq_id;
 
+	if (!READ_ONCE(dsq->nr) || READ_ONCE(dsq->is_timeout))
+		return false;
+
 	raw_spin_lock(&dsq->lock);
-	if (list_empty(&dsq->fifo) || dsq->is_timeout) {
+	if (!dsq->nr || list_empty(&dsq->fifo) || dsq->is_timeout) {
 		raw_spin_unlock(&dsq->lock);
 		return false;
 	}
@@ -1532,21 +1528,24 @@ void scan_timeout(struct rq *rq)
 	int cpu = cpu_of(rq);
 	struct hmbird_dispatch_q *dsq;
 	unsigned long now = jiffies;
-	u64 *pcp_last_scan_at_ptr;
-	static u64 last_scan_at;
-	static DEFINE_PER_CPU(u64, pcp_last_scan_at);
+	unsigned long *pcp_last_scan_at_ptr;
+	unsigned long last_global_scan_at;
+	static unsigned long global_last_scan_at;
+	static DEFINE_PER_CPU(unsigned long, pcp_last_scan_at);
 
 	pcp_last_scan_at_ptr = &per_cpu(pcp_last_scan_at, cpu);
-	if (time_before_eq(now, (unsigned long)*pcp_last_scan_at_ptr))
+	if (time_before_eq(now, READ_ONCE(*pcp_last_scan_at_ptr)))
 		return;
-	*pcp_last_scan_at_ptr = now;
+	WRITE_ONCE(*pcp_last_scan_at_ptr, now);
 
 	dsq = &per_cpu(pcp_ldsq, cpu);
 	scan_dsq_timeout(rq, dsq, pcp_dsq_deadline);
 
-	if (time_before_eq(now, (unsigned long)last_scan_at))
+	last_global_scan_at = READ_ONCE(global_last_scan_at);
+	if (time_before_eq(now, last_global_scan_at))
 		return;
-	last_scan_at = now;
+	if (cmpxchg(&global_last_scan_at, last_global_scan_at, now) != last_global_scan_at)
+		return;
 
 	for (i = NON_PERIOD_START; i < NON_PERIOD_END; i++) {
 		dsq = &gdsqs[i];
@@ -1890,6 +1889,9 @@ static void dispatch_enqueue(struct hmbird_dispatch_q *dsq, struct task_struct *
 			raw_spin_lock_irqsave(&dsq->lock, flags);
 		}
 	}
+
+	if (!dsq->nr)
+		dsq->last_consume_at = jiffies;
 
 	if (enq_flags & HMBIRD_ENQ_DSQ_PRIQ) {
 		hse->dsq_flags |= HMBIRD_TASK_DSQ_ON_PRIQ;
@@ -2449,11 +2451,15 @@ static bool consume_dispatch_q_timeout(struct rq *rq, struct rq_flags *rf,
 	int skip = 0;
 
 retry:
-	if (list_empty(&dsq->fifo) && !rb_first_cached(&dsq->priq))
+	if (!READ_ONCE(dsq->nr))
 		return false;
 
 	raw_spin_lock_irqsave(&dsq->lock, flags);
 	if (timeout_only && !READ_ONCE(dsq->is_timeout)) {
+		raw_spin_unlock_irqrestore(&dsq->lock, flags);
+		return false;
+	}
+	if (!dsq->nr || (list_empty(&dsq->fifo) && !rb_first_cached(&dsq->priq))) {
 		raw_spin_unlock_irqrestore(&dsq->lock, flags);
 		return false;
 	}
@@ -4422,4 +4428,3 @@ void __init init_sched_hmbird_class(void)
 
 	panic_blk_init();
 }
-

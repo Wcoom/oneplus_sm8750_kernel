@@ -235,6 +235,7 @@ struct crystal_hybridswap_zram_io_stats {
 	u64 devices_count;
 	s64 last_device_index;
 	u64 bd_pages;
+	u64 bd_compressed_bytes;
 	u64 bd_read_pages;
 	u64 bd_write_pages;
 	u64 bd_read_sync_ios_count;

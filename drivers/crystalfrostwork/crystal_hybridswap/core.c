@@ -893,6 +893,7 @@ static void crystal_hybridswap_add_zram_io_stats(
 	dst->devices_count += src->devices_count;
 	dst->last_device_index = src->last_device_index;
 	dst->bd_pages += src->bd_pages;
+	dst->bd_compressed_bytes += src->bd_compressed_bytes;
 	dst->bd_read_pages += src->bd_read_pages;
 	dst->bd_write_pages += src->bd_write_pages;
 	dst->bd_read_sync_ios_count += src->bd_read_sync_ios_count;
@@ -3304,5 +3305,6 @@ module_init(crystal_hybridswap_init);
 module_exit(crystal_hybridswap_exit);
 
 MODULE_AUTHOR("阿菌•未霜");
+MODULE_AUTHOR("whitewhale");
 MODULE_DESCRIPTION("Compressed RAM Block Device with Crystal Hybridswap support");
 MODULE_LICENSE("GPL");

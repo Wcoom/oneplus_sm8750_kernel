@@ -1014,6 +1014,9 @@ static bool zram_zms_gc_should_run(const struct zms_stats *stats)
 	unsigned long partial_pct;
 	unsigned long free_pct;
 
+	if (crystal_hybridswap_system_sleeping())
+		return false;
+
 	if (!check_charging_state())
 		return false;
 
@@ -1050,6 +1053,9 @@ static int zram_zms_gc_run_locked(struct zram *zram, const char *reason)
 	int ret;
 
 	if (!zram->zms)
+		return 0;
+
+	if (crystal_hybridswap_system_sleeping())
 		return 0;
 
 	ret = zms_get_stats(zram->zms, &stats);
@@ -1111,6 +1117,9 @@ static void zram_zms_gc_periodic_workfn(struct work_struct *work)
 static void zram_zms_schedule_gc(struct zram *zram)
 {
 	if (READ_ONCE(zram->zms_gc_stopping))
+		return;
+
+	if (crystal_hybridswap_system_sleeping())
 		return;
 
 	if (!zram->zms)
@@ -1320,6 +1329,14 @@ static int zram_writeback_pages(struct zram *zram, int mode,
 	if (wb_stats)
 		memset(wb_stats, 0, sizeof(*wb_stats));
 
+	if (crystal_hybridswap_system_sleeping()) {
+		ret = -EBUSY;
+		chs_log_ratelimited(CHS_LOG_INFO,
+				    "writeback skip system_sleeping mode=0x%x index=%lu nr_pages=%lu max_pages=%lu ret=%d\n",
+				    mode, index, nr_pages, max_pages, ret);
+		goto out_stats;
+	}
+
 	down_read(&zram->init_lock);
 	if (!init_done(zram)) {
 		ret = -EINVAL;
@@ -1365,6 +1382,14 @@ static int zram_writeback_pages(struct zram *zram, int mode,
 	while (nr_pages != 0) {
 		unsigned int batch_limit;
 		unsigned int batch_count = 0;
+
+		if (crystal_hybridswap_system_sleeping()) {
+			ret = -EBUSY;
+			chs_log_ratelimited(CHS_LOG_INFO,
+				"writeback stop system_sleeping mode=0x%x scanned=%lu eligible=%lu written=%lu ret=%d\n",
+				mode, scanned, eligible, written, ret);
+			break;
+		}
 
 		if (max_pages && written >= max_pages)
 			break;
@@ -1573,6 +1598,16 @@ release_init_lock:
 	if (!written)
 		return 0;
 	return written > INT_MAX ? INT_MAX : (int)written;
+
+out_stats:
+	if (wb_stats) {
+		wb_stats->scanned_pages = scanned;
+		wb_stats->eligible_pages = eligible;
+		wb_stats->written_pages = written;
+		wb_stats->unknown_or_filtered_pages = unknown_or_filtered;
+	}
+
+	return ret;
 }
 
 int zram_writeback_device(struct device *dev, const char *mode,
@@ -2274,7 +2309,7 @@ static ssize_t compact_store(struct device *dev,
 
 	zs_compact(zram->mem_pool);
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
-	if (zram->zms) {
+	if (zram->zms && !crystal_hybridswap_system_sleeping()) {
 		struct zms_io io;
 		int err;
 
@@ -3594,7 +3629,8 @@ static int zram_flush(struct zram *zram)
 	int ret = 0;
 
 	down_read(&zram->init_lock);
-	if (init_done(zram) && zram->zms) {
+	if (init_done(zram) && zram->zms &&
+	    !crystal_hybridswap_system_sleeping()) {
 		ret = zms_flush_all(zram->zms, GFP_NOIO, &io);
 		zram_record_zms_io(zram, 0, &io);
 	}

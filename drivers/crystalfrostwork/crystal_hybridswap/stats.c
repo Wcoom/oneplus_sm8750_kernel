@@ -116,6 +116,8 @@ void crystal_hybridswap_stats_show(struct seq_file *m)
 	seq_printf(m, "zram_io_last_device_index: %lld\n",
 		   zram_io_stats.last_device_index);
 	seq_printf(m, "zram_bd_pages: %llu\n", zram_io_stats.bd_pages);
+	seq_printf(m, "zram_bd_compressed_bytes: %llu\n",
+		   zram_io_stats.bd_compressed_bytes);
 	seq_printf(m, "zram_bd_read_pages: %llu\n",
 		   zram_io_stats.bd_read_pages);
 	seq_printf(m, "zram_bd_write_pages: %llu\n",

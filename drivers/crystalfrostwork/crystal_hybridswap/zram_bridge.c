@@ -391,6 +391,8 @@ static ssize_t hybridswap_crystal_stat_show(struct device *dev,
 				 zram_io_stats.devices_count);
 	ret += sysfs_emit_at(buf, ret, "zram_bd_pages %llu\n",
 				 zram_io_stats.bd_pages);
+	ret += sysfs_emit_at(buf, ret, "zram_bd_compressed_bytes %llu\n",
+				 zram_io_stats.bd_compressed_bytes);
 	ret += sysfs_emit_at(buf, ret, "zram_bd_read_pages %llu\n",
 				 zram_io_stats.bd_read_pages);
 	ret += sysfs_emit_at(buf, ret, "zram_bd_write_pages %llu\n",

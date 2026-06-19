@@ -31,10 +31,10 @@
 #define ZMS_MIN_SIZE		ZMS_ALIGN
 #define ZMS_CLASS_SIZE		ZMS_ALIGN
 #define ZMS_MAX_CLASSES		(PAGE_SIZE / ZMS_CLASS_SIZE)
-#define ZMS_MAX_PAGES_PER_ZSPAGE 8U
 #define ZMS_BLOCK_RESERVED	1UL
 #define ZMS_COMPACT_SOURCE_PCT	30U
 #define ZMS_COMPACT_TARGET_PCT	80U
+#define ZMS_RECLAIM_BEFORE_ALLOC_MAX	64U
 
 struct zms_block {
 	unsigned int class_size;
@@ -72,6 +72,11 @@ struct zms {
 	unsigned long *pending_free;
 	struct zms_handle_entry *handles;
 	struct zms_class classes[ZMS_MAX_CLASSES];
+	unsigned long alloc_blocks;
+	unsigned long alloc_run_successes;
+	unsigned long alloc_run_failures;
+	unsigned long reclaim_before_alloc_calls;
+	unsigned long reclaim_before_alloc_handles;
 	spinlock_t pending_lock;
 	struct mutex lock;
 	struct work_struct free_work;
@@ -146,7 +151,7 @@ static void zms_io_clear(struct zms_io *io)
 
 static void zms_io_record(struct zms_io *io, unsigned int op,
 			  unsigned long block,
-			  u64 latency_ns, int ret)
+			  unsigned int pages, u64 latency_ns, int ret)
 {
 	if (!io)
 		return;
@@ -157,9 +162,10 @@ static void zms_io_record(struct zms_io *io, unsigned int op,
 	io->latency_ns = latency_ns;
 	io->ret = ret;
 	if (op == REQ_OP_WRITE) {
-		io->write_submitted++;
+		io->write_submitted += pages;
+		io->write_ios++;
 		if (ret)
-			io->write_failed++;
+			io->write_failed += pages;
 		if (U64_MAX - io->write_total_latency_ns < latency_ns)
 			io->write_total_latency_ns = U64_MAX;
 		else
@@ -170,9 +176,10 @@ static void zms_io_record(struct zms_io *io, unsigned int op,
 		io->write_last_latency_ns = latency_ns;
 		io->write_last_ret = ret;
 	} else {
-		io->read_submitted++;
+		io->read_submitted += pages;
+		io->read_ios++;
 		if (ret)
-			io->read_failed++;
+			io->read_failed += pages;
 		if (U64_MAX - io->read_total_latency_ns < latency_ns)
 			io->read_total_latency_ns = U64_MAX;
 		else
@@ -185,30 +192,67 @@ static void zms_io_record(struct zms_io *io, unsigned int op,
 	}
 }
 
-static int zms_submit_page(struct zms *zms, struct zms_block *block,
-			   unsigned int page_idx, unsigned int op,
-			   gfp_t gfp, struct zms_io *io)
+static unsigned int zms_contiguous_run(const struct zms_block *block,
+				       unsigned int start)
 {
-	struct page *page;
-	struct bio bio;
-	struct bio_vec bv;
-	void *data;
-	u64 start;
-	int ret;
+	unsigned int run = 1;
+
+	while (start + run < block->pages &&
+	       block->blocks[start + run] == block->blocks[start] + run)
+		run++;
+
+	return run;
+}
+
+static int zms_submit_run(struct zms *zms, struct zms_block *block,
+			  unsigned int page_idx, unsigned int nr_pages,
+			  unsigned int op, gfp_t gfp, struct zms_io *io)
+{
+	unsigned int done = 0;
 
 	(void)gfp;
-	data = (char *)block->data + (page_idx << PAGE_SHIFT);
-	page = zms_data_page(data);
-	bio_init(&bio, zms->bdev, &bv, 1, op | REQ_SYNC);
-	bio.bi_iter.bi_sector = zms_block_sector(block->blocks[page_idx]);
-	__bio_add_page(&bio, page, PAGE_SIZE, offset_in_page(data));
+	while (done < nr_pages) {
+		struct bio_vec bvecs[ZMS_MAX_PAGES_PER_ZSPAGE];
+		unsigned int submitted = 0;
+		struct bio bio;
+		u64 start;
+		int ret;
 
-	start = ktime_get_ns();
-	ret = submit_bio_wait(&bio);
-	zms_io_record(io, op, block->blocks[page_idx],
-		      ktime_get_ns() - start, ret);
-	bio_uninit(&bio);
-	return ret;
+		bio_init(&bio, zms->bdev, bvecs, ARRAY_SIZE(bvecs),
+			 op | REQ_SYNC);
+		bio.bi_iter.bi_sector =
+			zms_block_sector(block->blocks[page_idx + done]);
+
+		while (done + submitted < nr_pages) {
+			unsigned int cur = page_idx + done + submitted;
+			void *data = (char *)block->data +
+				(cur << PAGE_SHIFT);
+			struct page *page = zms_data_page(data);
+			int added;
+
+			added = bio_add_page(&bio, page, PAGE_SIZE,
+					     offset_in_page(data));
+			if (added != PAGE_SIZE)
+				break;
+			submitted++;
+		}
+
+		if (WARN_ON_ONCE(!submitted)) {
+			bio_uninit(&bio);
+			return -EIO;
+		}
+
+		start = ktime_get_ns();
+		ret = submit_bio_wait(&bio);
+		zms_io_record(io, op, block->blocks[page_idx + done],
+			      submitted, ktime_get_ns() - start, ret);
+		bio_uninit(&bio);
+		if (ret)
+			return ret;
+		done += submitted;
+	}
+
+	return 0;
 }
 
 static int zms_submit_block(struct zms *zms, struct zms_block *block,
@@ -217,10 +261,13 @@ static int zms_submit_block(struct zms *zms, struct zms_block *block,
 	unsigned int i;
 	int ret;
 
-	for (i = 0; i < block->pages; i++) {
-		ret = zms_submit_page(zms, block, i, op, gfp, io);
+	for (i = 0; i < block->pages; ) {
+		unsigned int run = zms_contiguous_run(block, i);
+
+		ret = zms_submit_run(zms, block, i, run, op, gfp, io);
 		if (ret)
 			return ret;
+		i += run;
 	}
 
 	return 0;
@@ -299,6 +346,61 @@ static unsigned long zms_alloc_disk_block_locked(struct zms *zms)
 	return 0;
 }
 
+static bool zms_alloc_disk_run_locked(struct zms *zms, unsigned long *blocks,
+				      unsigned int nr_blocks)
+{
+	unsigned long scan;
+	unsigned int pass;
+
+	if (!nr_blocks)
+		return false;
+	if (nr_blocks == 1) {
+		blocks[0] = zms_alloc_disk_block_locked(zms);
+		return blocks[0] != 0;
+	}
+	if (!zms->block_bitmap || zms->nr_blocks <= ZMS_BLOCK_RESERVED ||
+	    nr_blocks > zms->nr_blocks - ZMS_BLOCK_RESERVED)
+		return false;
+
+	scan = zms->next_block;
+	if (scan < ZMS_BLOCK_RESERVED || scan >= zms->nr_blocks)
+		scan = ZMS_BLOCK_RESERVED;
+
+	for (pass = 0; pass < 2; pass++) {
+		unsigned long end = pass ? zms->next_block : zms->nr_blocks;
+
+		if (end <= ZMS_BLOCK_RESERVED)
+			end = zms->nr_blocks;
+		while (scan + nr_blocks <= end) {
+			unsigned long next_set;
+
+			scan = find_next_zero_bit(zms->block_bitmap, end, scan);
+			if (scan + nr_blocks > end)
+				break;
+
+			next_set = find_next_bit(zms->block_bitmap,
+						 scan + nr_blocks, scan);
+			if (next_set >= scan + nr_blocks) {
+				unsigned int i;
+
+				for (i = 0; i < nr_blocks; i++) {
+					__set_bit(scan + i, zms->block_bitmap);
+					blocks[i] = scan + i;
+				}
+				zms->next_block = scan + nr_blocks;
+				if (zms->next_block >= zms->nr_blocks)
+					zms->next_block = ZMS_BLOCK_RESERVED;
+				return true;
+			}
+
+			scan = next_set + 1;
+		}
+		scan = ZMS_BLOCK_RESERVED;
+	}
+
+	return false;
+}
+
 static void zms_free_disk_block_locked(struct zms *zms, unsigned long block)
 {
 	if (WARN_ON_ONCE(block < ZMS_BLOCK_RESERVED || block >= zms->nr_blocks))
@@ -307,7 +409,7 @@ static void zms_free_disk_block_locked(struct zms *zms, unsigned long block)
 	WARN_ON_ONCE(!test_and_clear_bit(block, zms->block_bitmap));
 }
 
-static void zms_free_block(struct zms_block *block)
+static void zms_free_block(struct zms *zms, struct zms_block *block)
 {
 	if (!block)
 		return;
@@ -358,11 +460,20 @@ static struct zms_block *zms_alloc_block_locked(struct zms *zms,
 	if (!block->data)
 		goto err_block;
 
-	for (i = 0; i < block->pages; i++) {
-		block->blocks[i] = zms_alloc_disk_block_locked(zms);
-		if (!block->blocks[i])
-			goto err_allocated_blocks;
+	if (zms_alloc_disk_run_locked(zms, block->blocks, block->pages)) {
+		if (block->pages > 1)
+			zms->alloc_run_successes++;
+		i = block->pages;
+	} else {
+		if (block->pages > 1)
+			zms->alloc_run_failures++;
+		for (i = 0; i < block->pages; i++) {
+			block->blocks[i] = zms_alloc_disk_block_locked(zms);
+			if (!block->blocks[i])
+				goto err_allocated_blocks;
+		}
 	}
+	zms->alloc_blocks++;
 
 	block->class_size = class->size;
 	INIT_LIST_HEAD(&block->list);
@@ -375,8 +486,42 @@ err_allocated_blocks:
 		zms_free_disk_block_locked(zms, block->blocks[i]);
 	}
 err_block:
-	zms_free_block(block);
+	zms_free_block(zms, block);
 	return NULL;
+}
+
+static unsigned long zms_alloc_run_attempts(const struct zms *zms)
+{
+	return zms->alloc_run_successes + zms->alloc_run_failures;
+}
+
+static void zms_free_handle_locked(struct zms *zms, unsigned long handle);
+
+static unsigned int zms_reclaim_pending_locked(struct zms *zms,
+					       unsigned int max_handles)
+{
+	unsigned long handle = 1;
+	unsigned int reclaimed = 0;
+
+	while (!max_handles || reclaimed < max_handles) {
+		unsigned long flags;
+
+		spin_lock_irqsave(&zms->pending_lock, flags);
+		handle = find_next_bit(zms->pending_free, zms->nr_handles + 1,
+				       handle);
+		if (handle > zms->nr_handles) {
+			spin_unlock_irqrestore(&zms->pending_lock, flags);
+			break;
+		}
+		__clear_bit(handle, zms->pending_free);
+		spin_unlock_irqrestore(&zms->pending_lock, flags);
+
+		zms_free_handle_locked(zms, handle);
+		handle++;
+		reclaimed++;
+	}
+
+	return reclaimed;
 }
 
 static struct zms_block *zms_find_block_locked(struct zms *zms,
@@ -384,9 +529,20 @@ static struct zms_block *zms_find_block_locked(struct zms *zms,
 					       gfp_t gfp)
 {
 	struct zms_block *block;
+	unsigned int reclaimed;
 
 	if (!list_empty(&class->partial))
 		return list_first_entry(&class->partial, struct zms_block, list);
+
+	reclaimed = zms_reclaim_pending_locked(zms,
+					       ZMS_RECLAIM_BEFORE_ALLOC_MAX);
+	if (reclaimed) {
+		zms->reclaim_before_alloc_calls++;
+		zms->reclaim_before_alloc_handles += reclaimed;
+		if (!list_empty(&class->partial))
+			return list_first_entry(&class->partial,
+						struct zms_block, list);
+	}
 
 	block = zms_alloc_block_locked(zms, class, gfp);
 	if (!block)
@@ -483,31 +639,14 @@ static void zms_free_handle_locked(struct zms *zms, unsigned long handle)
 		list_del(&block->list);
 		for (i = 0; i < block->pages; i++)
 			zms_free_disk_block_locked(zms, block->blocks[i]);
-		zms_free_block(block);
+		zms_free_block(zms, block);
 	}
 }
 
 static void zms_reclaim_pending(struct zms *zms)
 {
-	unsigned long handle = 1;
-
 	mutex_lock(&zms->lock);
-	for (;;) {
-		unsigned long flags;
-
-		spin_lock_irqsave(&zms->pending_lock, flags);
-		handle = find_next_bit(zms->pending_free, zms->nr_handles + 1,
-				       handle);
-		if (handle > zms->nr_handles) {
-			spin_unlock_irqrestore(&zms->pending_lock, flags);
-			break;
-		}
-		__clear_bit(handle, zms->pending_free);
-		spin_unlock_irqrestore(&zms->pending_lock, flags);
-
-		zms_free_handle_locked(zms, handle);
-		handle++;
-	}
+	zms_reclaim_pending_locked(zms, 0);
 	mutex_unlock(&zms->lock);
 }
 
@@ -651,7 +790,7 @@ static int zms_compact_class_locked(struct zms *zms, struct zms_class *class,
 			list_del(&source->list);
 			for (slot = 0; slot < source->pages; slot++)
 				zms_free_disk_block_locked(zms, source->blocks[slot]);
-			zms_free_block(source);
+			zms_free_block(zms, source);
 		} else {
 			break;
 		}
@@ -809,12 +948,12 @@ void zms_destroy(struct zms *zms)
 		list_for_each_entry_safe(block, tmp, &zms->classes[i].partial,
 					 list) {
 			list_del(&block->list);
-			zms_free_block(block);
+			zms_free_block(zms, block);
 		}
 		list_for_each_entry_safe(block, tmp, &zms->classes[i].full,
 					 list) {
 			list_del(&block->list);
-			zms_free_block(block);
+			zms_free_block(zms, block);
 		}
 	}
 
@@ -835,6 +974,16 @@ int zms_get_stats(struct zms *zms, struct zms_stats *stats)
 	mutex_lock(&zms->lock);
 	stats->nr_blocks = zms->nr_blocks;
 	stats->nr_handles = zms->nr_handles;
+	stats->alloc_blocks = zms->alloc_blocks;
+	stats->alloc_run_successes = zms->alloc_run_successes;
+	stats->alloc_run_failures = zms->alloc_run_failures;
+	if (zms_alloc_run_attempts(zms))
+		stats->alloc_run_success_pct =
+			zms->alloc_run_successes * 100 /
+			zms_alloc_run_attempts(zms);
+	stats->reclaim_before_alloc_calls = zms->reclaim_before_alloc_calls;
+	stats->reclaim_before_alloc_handles =
+		zms->reclaim_before_alloc_handles;
 	stats->used_blocks = bitmap_weight(zms->block_bitmap, zms->nr_blocks);
 	stats->pending_free = bitmap_weight(zms->pending_free,
 					    zms->nr_handles + 1);
@@ -963,7 +1112,7 @@ int zms_store(struct zms *zms, unsigned long handle, const void *src,
 				     block_page++)
 					zms_free_disk_block_locked(zms,
 						block->blocks[block_page]);
-				zms_free_block(block);
+				zms_free_block(zms, block);
 			}
 		}
 	}

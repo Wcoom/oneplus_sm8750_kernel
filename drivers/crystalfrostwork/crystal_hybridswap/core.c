@@ -45,6 +45,7 @@ struct crystal_hybridswap_zram_target {
 	struct zram *zram;
 	crystal_hybridswap_zram_writeback_t writeback;
 	crystal_hybridswap_zram_force_writeback_t force_writeback;
+	crystal_hybridswap_zram_force_writeback_ext_t force_writeback_ext;
 	crystal_hybridswap_zram_batchin_t batchin;
 	unsigned long zram_increase_pages;
 	struct crystal_hybridswap_zram_pressure pressure;
@@ -93,12 +94,14 @@ static void crystal_hybridswap_add_pending_pages_locked(atomic64_t *counter,
 static int crystal_hybridswap_take_pending_writeback(struct device **dev,
 		struct zram **zram,
 		crystal_hybridswap_zram_writeback_t *writeback,
+		crystal_hybridswap_zram_writeback_ext_t *writeback_ext,
 		char *mode, size_t mode_size, s64 *pages, bool *force,
 		bool *auto_req)
 {
 	*dev = NULL;
 	*zram = NULL;
 	*writeback = NULL;
+	*writeback_ext = NULL;
 
 	*force = false;
 	*auto_req = false;
@@ -113,6 +116,7 @@ static int crystal_hybridswap_take_pending_writeback(struct device **dev,
 	*dev = chs.pending_writeback_dev;
 	*zram = chs.pending_writeback_zram;
 	*writeback = chs.pending_writeback_fn;
+	*writeback_ext = chs.pending_writeback_ext_fn;
 	if (*dev)
 		get_device(*dev);
 	strscpy(mode, chs.pending_writeback_mode[0] ?
@@ -121,6 +125,7 @@ static int crystal_hybridswap_take_pending_writeback(struct device **dev,
 	chs.pending_writeback_dev = NULL;
 	chs.pending_writeback_zram = NULL;
 	chs.pending_writeback_fn = NULL;
+	chs.pending_writeback_ext_fn = NULL;
 	chs.pending_writeback_mode[0] = '\0';
 	chs.pending_writeback_auto = false;
 	mutex_unlock(&chs.zram_lock);
@@ -161,6 +166,7 @@ void crystal_hybridswap_clear_pending_writeback_locked(void)
 	chs.pending_writeback_dev = NULL;
 	chs.pending_writeback_zram = NULL;
 	chs.pending_writeback_fn = NULL;
+	chs.pending_writeback_ext_fn = NULL;
 	chs.pending_writeback_mode[0] = '\0';
 	chs.pending_writeback_auto = false;
 	atomic64_set(&chs.pending_writeback_pages, 0);
@@ -883,6 +889,7 @@ static int crystal_hybridswap_collect_zram_targets(
 		targets[count].zram = entry->zram;
 		targets[count].writeback = entry->writeback;
 		targets[count].force_writeback = entry->force_writeback;
+		targets[count].force_writeback_ext = entry->force_writeback_ext;
 		targets[count].batchin = entry->batchin;
 		targets[count].zram_increase_pages = entry->zram_increase_pages;
 		get_device(targets[count].dev);
@@ -1985,7 +1992,7 @@ static void crystal_hybridswap_force_swapout_workfn(struct work_struct *work)
 		int err;
 
 		traversed++;
-		if (!targets[i].force_writeback)
+		if (!targets[i].force_writeback && !targets[i].force_writeback_ext)
 			continue;
 		if (!targets[i].pressure.valid || !targets[i].pressure.backing_dev) {
 			atomic64_inc(&chs.stats.multi_zram_skip_no_backing);
@@ -2019,9 +2026,16 @@ static void crystal_hybridswap_force_swapout_workfn(struct work_struct *work)
 			selected = crystal_hybridswap_zram_target_id(&targets[i]);
 
 		memset(&cur_stats, 0, sizeof(cur_stats));
-		err = targets[i].force_writeback(targets[i].dev,
-			CHS_INTERNAL_WB_MODE, dev_pages, req->target_cgroup_id,
-			&cur_stats);
+		if (targets[i].force_writeback_ext) {
+			err = targets[i].force_writeback_ext(targets[i].dev,
+				CHS_INTERNAL_WB_MODE, dev_pages,
+				req->target_cgroup_id, req->auto_req,
+				&cur_stats);
+		} else {
+			err = targets[i].force_writeback(targets[i].dev,
+				CHS_INTERNAL_WB_MODE, dev_pages,
+				req->target_cgroup_id, &cur_stats);
+		}
 		crystal_hybridswap_add_writeback_stats(&wb_stats, &cur_stats);
 		if (err < 0 && err != -ENODATA && !first_ret)
 			first_ret = err;
@@ -2092,6 +2106,7 @@ static void crystal_hybridswap_writeback_workfn(struct work_struct *work)
 	struct device *dev;
 	struct zram *zram;
 	crystal_hybridswap_zram_writeback_t writeback;
+	crystal_hybridswap_zram_writeback_ext_t writeback_ext;
 	char mode[CHS_WB_MODE_MAX];
 	char detail[160];
 	s64 pages;
@@ -2103,7 +2118,8 @@ static void crystal_hybridswap_writeback_workfn(struct work_struct *work)
 	int ret = 0;
 
 	if (crystal_hybridswap_take_pending_writeback(&dev, &zram, &writeback,
-						      mode, sizeof(mode), &pages, &force,
+						      &writeback_ext, mode,
+						      sizeof(mode), &pages, &force,
 						      &auto_req))
 		return;
 
@@ -2128,7 +2144,7 @@ static void crystal_hybridswap_writeback_workfn(struct work_struct *work)
 		goto out_put;
 	}
 
-	if (!dev || !writeback) {
+	if (!dev || (!writeback && !writeback_ext)) {
 		ret = -ENODEV;
 		atomic64_inc(&chs.stats.writeback_skipped);
 		if (auto_req)
@@ -2182,7 +2198,11 @@ static void crystal_hybridswap_writeback_workfn(struct work_struct *work)
 			    dev_name(dev), mode, pages, force,
 			    atomic64_read(&chs.stats.writeback_quota_remaining_pages));
 	memset(&wb_stats, 0, sizeof(wb_stats));
-	ret = writeback(dev, mode, pages > 0 ? pages : 1, &wb_stats);
+	if (writeback_ext)
+		ret = writeback_ext(dev, mode, pages > 0 ? pages : 1,
+				    auto_req, &wb_stats);
+	else
+		ret = writeback(dev, mode, pages > 0 ? pages : 1, &wb_stats);
 	written_pages = wb_stats.written_pages;
 	if (!written_pages && ret > 0)
 		written_pages = ret;
@@ -2896,6 +2916,7 @@ static int crystal_hybridswap_queue_writeback_internal(struct device *dev,
 	};
 	struct zram *zram = NULL;
 	crystal_hybridswap_zram_writeback_t writeback = NULL;
+	crystal_hybridswap_zram_writeback_ext_t writeback_ext = NULL;
 	char wb_mode[CHS_WB_MODE_MAX];
 	char detail[160];
 	s64 pending_pages;
@@ -2955,12 +2976,14 @@ static int crystal_hybridswap_queue_writeback_internal(struct device *dev,
 			dev = entry->dev;
 			zram = entry->zram;
 			writeback = entry->writeback;
+			writeback_ext = entry->writeback_ext;
 			pending_pages = atomic64_read(&chs.pending_writeback_pages);
 			crystal_hybridswap_clear_pending_writeback_locked();
 			atomic64_set(&chs.pending_writeback_pages, pending_pages);
 			chs.pending_writeback_dev = dev;
 			chs.pending_writeback_zram = zram;
 			chs.pending_writeback_fn = writeback;
+			chs.pending_writeback_ext_fn = writeback_ext;
 			strscpy(chs.pending_writeback_mode, wb_mode,
 				sizeof(chs.pending_writeback_mode));
 			chs.pending_writeback_auto = auto_req;
@@ -2969,6 +2992,7 @@ static int crystal_hybridswap_queue_writeback_internal(struct device *dev,
 		} else {
 			dev = NULL;
 			writeback = NULL;
+			writeback_ext = NULL;
 		}
 	}
 	mutex_unlock(&chs.zram_lock);
@@ -2978,7 +3002,7 @@ static int crystal_hybridswap_queue_writeback_internal(struct device *dev,
 
 	atomic64_inc(&chs.stats.writeback_queued);
 
-	if (!dev || !writeback) {
+	if (!dev || (!writeback && !writeback_ext)) {
 		if (!ret)
 			ret = selected >= 0 ? -EAGAIN : selection.ret;
 		atomic64_inc(&chs.stats.writeback_skipped);
@@ -3072,7 +3096,8 @@ static int crystal_hybridswap_queue_force_swapout_internal(
 	mutex_lock(&chs.zram_lock);
 	list_for_each_entry(entry, &chs.zram_list, node) {
 		registered++;
-		if (entry->dev && entry->force_writeback)
+		if (entry->dev &&
+		    (entry->force_writeback || entry->force_writeback_ext))
 			has_force_writeback = true;
 	}
 	if (has_force_writeback)
@@ -3242,6 +3267,7 @@ static int __init crystal_hybridswap_init(void)
 	chs.pending_writeback_dev = NULL;
 	chs.pending_writeback_zram = NULL;
 	chs.pending_writeback_fn = NULL;
+	chs.pending_writeback_ext_fn = NULL;
 	chs.pending_batchin_target_cgroup_id = 0;
 	chs.pending_batchin_app_score = 0;
 	chs.pending_batchin_memcg[0] = '\0';

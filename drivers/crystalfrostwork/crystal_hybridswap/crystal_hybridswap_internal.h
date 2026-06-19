@@ -304,9 +304,15 @@ struct crystal_hybridswap_auto_memcg_candidate {
 typedef int (*crystal_hybridswap_zram_writeback_t)(struct device *dev,
 		const char *mode, unsigned long nr_pages,
 		struct crystal_hybridswap_writeback_stats *stats);
+typedef int (*crystal_hybridswap_zram_writeback_ext_t)(struct device *dev,
+		const char *mode, unsigned long nr_pages, bool auto_req,
+		struct crystal_hybridswap_writeback_stats *stats);
 typedef int (*crystal_hybridswap_zram_force_writeback_t)(struct device *dev,
 		const char *mode, unsigned long nr_pages, u64 target_cgroup_id,
 		struct crystal_hybridswap_writeback_stats *stats);
+typedef int (*crystal_hybridswap_zram_force_writeback_ext_t)(struct device *dev,
+		const char *mode, unsigned long nr_pages, u64 target_cgroup_id,
+		bool auto_req, struct crystal_hybridswap_writeback_stats *stats);
 typedef int (*crystal_hybridswap_zram_batchin_t)(struct device *dev,
 		unsigned long nr_pages, u64 target_cgroup_id,
 		struct crystal_hybridswap_batchin_stats *stats);
@@ -510,7 +516,9 @@ struct crystal_hybridswap_zram {
 	struct device *dev;
 	struct zram *zram;
 	crystal_hybridswap_zram_writeback_t writeback;
+	crystal_hybridswap_zram_writeback_ext_t writeback_ext;
 	crystal_hybridswap_zram_force_writeback_t force_writeback;
+	crystal_hybridswap_zram_force_writeback_ext_t force_writeback_ext;
 	crystal_hybridswap_zram_batchin_t batchin;
 	unsigned long zram_increase_pages;
 	unsigned long registered_jiffies;
@@ -618,6 +626,7 @@ struct crystal_hybridswap_state {
 	struct device *pending_writeback_dev;
 	struct zram *pending_writeback_zram;
 	crystal_hybridswap_zram_writeback_t pending_writeback_fn;
+	crystal_hybridswap_zram_writeback_ext_t pending_writeback_ext_fn;
 	u64 pending_batchin_target_cgroup_id;
 	s64 pending_batchin_app_score;
 	char pending_batchin_memcg[CHS_MEMCG_NAME_MAX];
@@ -737,8 +746,16 @@ int zram_bind_backing_dev(struct device *dev, const char *buf, size_t len);
 int zram_writeback_device(struct device *dev, const char *mode,
 					       unsigned long nr_pages,
 		struct crystal_hybridswap_writeback_stats *stats);
+int zram_writeback_device_ext(struct device *dev, const char *mode,
+					       unsigned long nr_pages,
+					       bool auto_req,
+		struct crystal_hybridswap_writeback_stats *stats);
 int zram_force_writeback_device(struct device *dev, const char *mode,
 					       unsigned long nr_pages, u64 target_cgroup_id,
+					       struct crystal_hybridswap_writeback_stats *stats);
+int zram_force_writeback_device_ext(struct device *dev, const char *mode,
+					       unsigned long nr_pages, u64 target_cgroup_id,
+					       bool auto_req,
 					       struct crystal_hybridswap_writeback_stats *stats);
 int zram_batchin_device(struct device *dev, unsigned long nr_pages,
 		u64 target_cgroup_id,

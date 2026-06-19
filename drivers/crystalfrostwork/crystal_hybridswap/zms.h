@@ -8,6 +8,8 @@
 struct block_device;
 struct zms;
 
+#define ZMS_MAX_PAGES_PER_ZSPAGE 8U
+
 struct zms_io {
 	bool submitted;
 	bool write;
@@ -15,6 +17,7 @@ struct zms_io {
 	u64 latency_ns;
 	int ret;
 	unsigned int read_submitted;
+	unsigned int read_ios;
 	unsigned int read_failed;
 	u64 read_total_latency_ns;
 	u64 read_max_latency_ns;
@@ -22,6 +25,7 @@ struct zms_io {
 	u64 read_last_latency_ns;
 	int read_last_ret;
 	unsigned int write_submitted;
+	unsigned int write_ios;
 	unsigned int write_failed;
 	u64 write_total_latency_ns;
 	u64 write_max_latency_ns;
@@ -43,6 +47,12 @@ struct zms_stats {
 	unsigned long cached_blocks;
 	unsigned long empty_blocks;
 	unsigned long valid_classes;
+	unsigned long alloc_blocks;
+	unsigned long alloc_run_successes;
+	unsigned long alloc_run_failures;
+	unsigned long alloc_run_success_pct;
+	unsigned long reclaim_before_alloc_calls;
+	unsigned long reclaim_before_alloc_handles;
 	u64 stored_bytes;
 	u64 packed_bytes;
 };

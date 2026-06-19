@@ -902,7 +902,9 @@ int crystal_hybridswap_private_zram_register(struct device *dev,
 	entry->dev = dev;
 	entry->zram = zram;
 	entry->writeback = zram_writeback_device;
+	entry->writeback_ext = zram_writeback_device_ext;
 	entry->force_writeback = zram_force_writeback_device;
+	entry->force_writeback_ext = zram_force_writeback_device_ext;
 	entry->batchin = zram_batchin_device;
 	entry->registered_jiffies = jiffies;
 	INIT_LIST_HEAD(&entry->node);

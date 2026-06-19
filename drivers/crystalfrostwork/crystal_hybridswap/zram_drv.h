@@ -112,8 +112,8 @@ struct zram_stats {
 #ifdef	CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
 	atomic64_t bd_count;		/* no. of pages in backing device */
 	atomic64_t bd_compr_data_size;	/* compressed bytes in backing device */
-	atomic64_t bd_reads;		/* no. of reads from backing device */
-	atomic64_t bd_writes;		/* no. of writes from backing device */
+	atomic64_t bd_reads;		/* no. of logical pages read from backing device */
+	atomic64_t bd_writes;		/* no. of logical pages written to backing device */
 	atomic64_t bd_read_sync_ios;	/* synchronous backing reads */
 	atomic64_t bd_read_async_ios;	/* asynchronous backing read submits */
 	atomic64_t bd_read_failures;	/* synchronous backing read failures */
@@ -149,6 +149,16 @@ struct zram_stats {
 	atomic64_t batchin_max_ns;
 	atomic64_t batchin_slow_runs;
 	atomic64_t batchin_last_ret;
+	atomic64_t auto_wb_cold_age_ms;
+	atomic64_t auto_wb_scan_pages;
+	atomic64_t auto_wb_cold_selected;
+	atomic64_t auto_wb_hot_skipped;
+	atomic64_t auto_wb_kind_skipped;
+	atomic64_t auto_wb_idle_selected;
+	atomic64_t auto_wb_age_selected;
+	atomic64_t auto_wb_unknown_age_skipped;
+	atomic64_t auto_wb_last_age_ms;
+	atomic64_t auto_wb_max_age_ms;
 #endif
 };
 

@@ -434,6 +434,12 @@ static ssize_t hybridswap_crystal_stat_show(struct device *dev,
 				 zram_io_stats.batchin_snapshot_mismatch_pages);
 	ret += sysfs_emit_at(buf, ret, "zram_batchin_last_ret %lld\n",
 				 zram_io_stats.batchin_last_ret);
+	ret += sysfs_emit_at(buf, ret, "zram_batchin_zms_batches %llu\n",
+				 zram_io_stats.batchin_zms_batches);
+	ret += sysfs_emit_at(buf, ret, "zram_batchin_zms_items %llu\n",
+				 zram_io_stats.batchin_zms_items);
+	ret += sysfs_emit_at(buf, ret, "zram_batchin_zms_read_ios %llu\n",
+				 zram_io_stats.batchin_zms_read_ios);
 	ret += sysfs_emit_at(buf, ret, "zram_io_scan_errors_count %llu\n",
 				 zram_io_stats.scan_errors_count);
 	ret += sysfs_emit_at(buf, ret, "writeback_worker_runs %lld\n",

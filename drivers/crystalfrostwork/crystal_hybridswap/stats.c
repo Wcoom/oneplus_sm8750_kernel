@@ -188,6 +188,12 @@ void crystal_hybridswap_stats_show(struct seq_file *m)
 		   zram_io_stats.batchin_slow_runs_count);
 	seq_printf(m, "zram_batchin_last_ret: %lld\n",
 		   zram_io_stats.batchin_last_ret);
+	seq_printf(m, "zram_batchin_zms_batches: %llu\n",
+		   zram_io_stats.batchin_zms_batches);
+	seq_printf(m, "zram_batchin_zms_items: %llu\n",
+		   zram_io_stats.batchin_zms_items);
+	seq_printf(m, "zram_batchin_zms_read_ios: %llu\n",
+		   zram_io_stats.batchin_zms_read_ios);
 	seq_printf(m, "zram_io_scan_errors_count: %llu\n",
 		   zram_io_stats.scan_errors_count);
 	seq_printf(m, "enable_store: %lld\n",

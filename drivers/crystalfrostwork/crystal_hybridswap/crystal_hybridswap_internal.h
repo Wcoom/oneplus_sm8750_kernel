@@ -273,6 +273,9 @@ struct crystal_hybridswap_zram_io_stats {
 	u64 batchin_max_ns;
 	u64 batchin_slow_runs_count;
 	s64 batchin_last_ret;
+	u64 batchin_zms_batches;
+	u64 batchin_zms_items;
+	u64 batchin_zms_read_ios;
 	u64 scan_errors_count;
 };
 

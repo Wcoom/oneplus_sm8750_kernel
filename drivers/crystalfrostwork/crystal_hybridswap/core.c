@@ -984,6 +984,9 @@ static void crystal_hybridswap_add_zram_io_stats(
 	dst->batchin_slow_runs_count += src->batchin_slow_runs_count;
 	if (src->batchin_runs_count)
 		dst->batchin_last_ret = src->batchin_last_ret;
+	dst->batchin_zms_batches += src->batchin_zms_batches;
+	dst->batchin_zms_items += src->batchin_zms_items;
+	dst->batchin_zms_read_ios += src->batchin_zms_read_ios;
 	dst->scan_errors_count += src->scan_errors_count;
 }
 
@@ -1138,7 +1141,7 @@ static int crystal_hybridswap_select_writeback_target(
 static noinline_for_stack int crystal_hybridswap_get_zram_pressure(
 		struct crystal_hybridswap_zram_pressure *pressure)
 {
-	struct crystal_hybridswap_zram_target targets[CHS_MAX_ZRAM_TARGETS];
+	struct crystal_hybridswap_zram_target *targets;
 	int count;
 	int ret = -ENODEV;
 	int i;
@@ -1147,8 +1150,11 @@ static noinline_for_stack int crystal_hybridswap_get_zram_pressure(
 		return -EINVAL;
 
 	memset(pressure, 0, sizeof(*pressure));
+	targets = kcalloc(CHS_MAX_ZRAM_TARGETS, sizeof(*targets), GFP_KERNEL);
+	if (!targets)
+		return -ENOMEM;
 	count = crystal_hybridswap_collect_zram_targets(targets,
-		ARRAY_SIZE(targets));
+		CHS_MAX_ZRAM_TARGETS);
 	for (i = 0; i < count; i++) {
 		struct crystal_hybridswap_zram_pressure *cur = &targets[i].pressure;
 
@@ -1184,6 +1190,7 @@ static noinline_for_stack int crystal_hybridswap_get_zram_pressure(
 		mutex_unlock(&chs.state_lock);
 	}
 
+	kfree(targets);
 	return ret;
 }
 

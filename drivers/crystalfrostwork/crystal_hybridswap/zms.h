@@ -42,9 +42,27 @@ struct zms_stats {
 	unsigned long objects;
 	unsigned long pending_free;
 	unsigned long partial_blocks;
+	unsigned long low_blocks;
+	unsigned long mid_blocks;
+	unsigned long almost_full_blocks;
 	unsigned long full_blocks;
 	unsigned long dirty_blocks;
 	unsigned long cached_blocks;
+	unsigned long cache_limit_blocks;
+	unsigned long cache_blocks;
+	unsigned long cache_hits;
+	unsigned long cache_misses;
+	unsigned long cache_evictions;
+	unsigned long cache_ghost_limit;
+	unsigned long cache_ghost_entries;
+	unsigned long cache_ghost_hits;
+	unsigned long cache_ghost_misses;
+	unsigned long cache_ghost_evictions;
+	unsigned long read_merge_waits;
+	unsigned long read_merge_wakeups;
+	unsigned long read_merge_hits;
+	unsigned long read_merge_mismatch;
+	unsigned long read_merge_failures;
 	unsigned long empty_blocks;
 	unsigned long valid_classes;
 	unsigned long alloc_blocks;
@@ -57,8 +75,16 @@ struct zms_stats {
 	u64 packed_bytes;
 };
 
+struct zms_load_item {
+	unsigned long handle;
+	void *dst;
+	size_t expected_size;
+	size_t loaded_size;
+	int ret;
+};
+
 struct zms *zms_create(struct block_device *bdev, unsigned long nr_blocks,
-		       unsigned long nr_handles);
+			       unsigned long nr_handles);
 int zms_set_nr_handles(struct zms *zms, unsigned long nr_handles);
 void zms_destroy(struct zms *zms);
 int zms_get_stats(struct zms *zms, struct zms_stats *stats);
@@ -67,6 +93,8 @@ int zms_store(struct zms *zms, unsigned long handle, const void *src,
 	      size_t size, gfp_t gfp, struct zms_io *io);
 int zms_load(struct zms *zms, unsigned long handle, void *dst, size_t *size,
 	     gfp_t gfp, struct zms_io *io);
+int zms_load_batch(struct zms *zms, struct zms_load_item *items,
+		   unsigned int nr, gfp_t gfp, struct zms_io *io);
 void zms_free(struct zms *zms, unsigned long handle);
 int zms_flush_all(struct zms *zms, gfp_t gfp, struct zms_io *last_io);
 int zms_compact(struct zms *zms, gfp_t gfp, struct zms_io *io);

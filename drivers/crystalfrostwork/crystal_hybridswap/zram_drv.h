@@ -75,6 +75,7 @@ enum zram_pageflags {
 	ZRAM_HUGE,	/* Incompressible page */
 	ZRAM_IDLE,	/* not accessed page since last idle marking */
 	ZRAM_INCOMPRESSIBLE, /* none of the algorithms could compress it */
+	ZRAM_PREFETCHED, /* page was brought back by ZMS prefetch */
 
 	ZRAM_COMP_PRIORITY_BIT1, /* First bit of comp priority index */
 	ZRAM_COMP_PRIORITY_BIT2, /* Second bit of comp priority index */
@@ -152,6 +153,21 @@ struct zram_stats {
 		atomic64_t batchin_zms_batches;
 		atomic64_t batchin_zms_items;
 		atomic64_t batchin_zms_read_ios;
+		atomic64_t prefetch_runs;
+		atomic64_t prefetch_candidates;
+		atomic64_t prefetch_submitted;
+		atomic64_t prefetch_moved;
+		atomic64_t prefetch_skipped;
+		atomic64_t prefetch_read_errors;
+		atomic64_t prefetch_prepare_errors;
+		atomic64_t prefetch_snapshot_mismatch;
+		atomic64_t prefetch_no_data;
+		atomic64_t prefetch_alloc_failures;
+		atomic64_t prefetch_hits;
+		atomic64_t prefetch_invalidated;
+		atomic64_t under_wb_waits;
+		atomic64_t under_wb_wait_total_ns;
+		atomic64_t under_wb_wait_max_ns;
 		atomic64_t auto_wb_cold_age_ms;
 	atomic64_t auto_wb_scan_pages;
 	atomic64_t auto_wb_cold_selected;

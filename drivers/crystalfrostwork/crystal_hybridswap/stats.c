@@ -202,6 +202,12 @@ void crystal_hybridswap_stats_show(struct seq_file *m)
 		   zram_io_stats.prefetch_hits);
 	seq_printf(m, "zram_prefetch_hit_pct: %llu\n",
 		   zram_io_stats.prefetch_hit_pct);
+	seq_printf(m, "zram_prefetch_stale_hits: %llu\n",
+		   zram_io_stats.prefetch_stale_hits);
+	seq_printf(m, "zram_prefetch_expired: %llu\n",
+		   zram_io_stats.prefetch_expired);
+	seq_printf(m, "zram_prefetch_reclaimed: %llu\n",
+		   zram_io_stats.prefetch_reclaimed);
 	seq_printf(m, "zram_prefetch_invalidated: %llu\n",
 		   zram_io_stats.prefetch_invalidated);
 	seq_printf(m, "zram_prefetch_errors: %llu\n",

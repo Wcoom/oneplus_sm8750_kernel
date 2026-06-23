@@ -998,6 +998,9 @@ static void crystal_hybridswap_add_zram_io_stats(
 	dst->prefetch_no_data += src->prefetch_no_data;
 	dst->prefetch_alloc_failures += src->prefetch_alloc_failures;
 	dst->prefetch_hits += src->prefetch_hits;
+	dst->prefetch_stale_hits += src->prefetch_stale_hits;
+	dst->prefetch_expired += src->prefetch_expired;
+	dst->prefetch_reclaimed += src->prefetch_reclaimed;
 	dst->prefetch_invalidated += src->prefetch_invalidated;
 	dst->under_wb_waits += src->under_wb_waits;
 	dst->under_wb_wait_total_ns += src->under_wb_wait_total_ns;

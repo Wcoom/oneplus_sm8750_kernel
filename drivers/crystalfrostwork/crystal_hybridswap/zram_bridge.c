@@ -440,6 +440,28 @@ static ssize_t hybridswap_crystal_stat_show(struct device *dev,
 				 zram_io_stats.batchin_zms_items);
 	ret += sysfs_emit_at(buf, ret, "zram_batchin_zms_read_ios %llu\n",
 				 zram_io_stats.batchin_zms_read_ios);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_runs %llu\n",
+				 zram_io_stats.prefetch_runs);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_moved %llu\n",
+				 zram_io_stats.prefetch_moved);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_hits %llu\n",
+				 zram_io_stats.prefetch_hits);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_hit_pct %llu\n",
+				 zram_io_stats.prefetch_hit_pct);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_invalidated %llu\n",
+				 zram_io_stats.prefetch_invalidated);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_errors %llu\n",
+				 zram_io_stats.prefetch_read_errors +
+				 zram_io_stats.prefetch_prepare_errors +
+				 zram_io_stats.prefetch_snapshot_mismatch +
+				 zram_io_stats.prefetch_alloc_failures);
+	ret += sysfs_emit_at(buf, ret, "zram_under_wb_waits %llu\n",
+				 zram_io_stats.under_wb_waits);
+	ret += sysfs_emit_at(buf, ret,
+				 "zram_under_wb_wait_total_ns %llu\n",
+				 zram_io_stats.under_wb_wait_total_ns);
+	ret += sysfs_emit_at(buf, ret, "zram_under_wb_wait_max_ns %llu\n",
+				 zram_io_stats.under_wb_wait_max_ns);
 	ret += sysfs_emit_at(buf, ret, "zram_io_scan_errors_count %llu\n",
 				 zram_io_stats.scan_errors_count);
 	ret += sysfs_emit_at(buf, ret, "writeback_worker_runs %lld\n",

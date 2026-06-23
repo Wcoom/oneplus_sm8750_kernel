@@ -987,6 +987,25 @@ static void crystal_hybridswap_add_zram_io_stats(
 	dst->batchin_zms_batches += src->batchin_zms_batches;
 	dst->batchin_zms_items += src->batchin_zms_items;
 	dst->batchin_zms_read_ios += src->batchin_zms_read_ios;
+	dst->prefetch_runs += src->prefetch_runs;
+	dst->prefetch_candidates += src->prefetch_candidates;
+	dst->prefetch_submitted += src->prefetch_submitted;
+	dst->prefetch_moved += src->prefetch_moved;
+	dst->prefetch_skipped += src->prefetch_skipped;
+	dst->prefetch_read_errors += src->prefetch_read_errors;
+	dst->prefetch_prepare_errors += src->prefetch_prepare_errors;
+	dst->prefetch_snapshot_mismatch += src->prefetch_snapshot_mismatch;
+	dst->prefetch_no_data += src->prefetch_no_data;
+	dst->prefetch_alloc_failures += src->prefetch_alloc_failures;
+	dst->prefetch_hits += src->prefetch_hits;
+	dst->prefetch_invalidated += src->prefetch_invalidated;
+	dst->under_wb_waits += src->under_wb_waits;
+	dst->under_wb_wait_total_ns += src->under_wb_wait_total_ns;
+	dst->under_wb_wait_max_ns = max(dst->under_wb_wait_max_ns,
+					src->under_wb_wait_max_ns);
+	dst->prefetch_hit_pct = dst->prefetch_moved ?
+		mul_u64_u64_div_u64(dst->prefetch_hits, 100,
+				    dst->prefetch_moved) : 0;
 	dst->scan_errors_count += src->scan_errors_count;
 }
 

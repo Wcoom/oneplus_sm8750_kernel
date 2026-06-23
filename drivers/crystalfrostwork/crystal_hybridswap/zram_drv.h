@@ -252,10 +252,7 @@ struct zram {
 	u32 prefetch_last_fault_index;
 	u32 prefetch_prev_fault_index;
 	u64 prefetch_last_fault_memcg_id;
-	unsigned long prefetch_reclaim_next_index;
 	bool prefetch_fault_valid;
-	bool prefetch_reclaim_stopping;
-	struct delayed_work prefetch_reclaim_work;
 	struct block_device *bdev;
 	struct zms *zms;
 	struct work_struct zms_gc_work;

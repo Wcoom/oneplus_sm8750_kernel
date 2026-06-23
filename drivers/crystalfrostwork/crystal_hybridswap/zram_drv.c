@@ -53,6 +53,9 @@ static DEFINE_MUTEX(zram_index_mutex);
 static int zram_major;
 enum cpuhp_state zcomp_cpuhp_state = CPUHP_INVALID;
 static const char *default_compressor = CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP;
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
+static struct workqueue_struct *zram_read_wq;
+#endif
 
 /* Module params (documentation at end) */
 static unsigned int num_devices = 1;
@@ -74,9 +77,12 @@ static int zram_read_compressed_page(struct zram *zram, u32 index,
 #define ZRAM_ZMS_PREFETCH_MAX	2U
 #define ZRAM_PREFETCH_NEIGHBOR_SCAN_MAX	(ZRAM_ZMS_PREFETCH_MAX * 2U)
 #define ZRAM_PREFETCH_TTL_MS	1000UL
-#define ZRAM_PREFETCH_RECLAIM_BATCH	32U
-#define ZRAM_PREFETCH_RECLAIM_DELAY_MS	250UL
-#define ZRAM_PREFETCH_RECLAIM_RETRY_MS	1000UL
+
+static unsigned int zram_read_wq_max_active(void)
+{
+	return min_t(unsigned int, max_t(unsigned int, 2 * num_online_cpus(), 1),
+		     32);
+}
 
 static void zram_record_zms_io(struct zram *zram, u32 index,
 			       const struct zms_io *io);
@@ -92,10 +98,6 @@ static bool zram_writeback_snapshot_matches(struct zram *zram, u32 index,
 					    const struct zram_wb_snapshot *snapshot);
 static void zram_zms_start_gc(struct zram *zram);
 static void zram_zms_stop_gc(struct zram *zram);
-static void zram_prefetch_reclaim_start(struct zram *zram);
-static void zram_prefetch_reclaim_stop(struct zram *zram);
-static void zram_prefetch_reclaim_schedule(struct zram *zram,
-					   unsigned long delay_ms);
 static void zram_zms_maybe_prefetch(struct zram *zram, u32 index,
 				    unsigned long handle, u64 memcg_id,
 				    const struct zms_io *io);
@@ -975,7 +977,6 @@ static void reset_bdev(struct zram *zram)
 		return;
 
 	zram_zms_stop_gc(zram);
-	zram_prefetch_reclaim_stop(zram);
 	zms_destroy(zram->zms);
 	zram->zms = NULL;
 	bdev = zram->bdev;
@@ -1168,7 +1169,6 @@ static int zram_set_backing_dev(struct zram *zram, const char *buf, size_t len,
 	zram->backing_dev = backing_dev;
 	zram->zms = zms;
 	zram_zms_start_gc(zram);
-	zram_prefetch_reclaim_start(zram);
 	up_write(&zram->init_lock);
 
 	pr_info("setup backing device %s%s\n", path,
@@ -1438,204 +1438,15 @@ static bool zram_prefetch_expired_locked(struct zram *zram, u32 index)
 	       zram_prefetch_expired(zram, index);
 }
 
-static bool zram_prefetch_reclaim_candidate_locked(struct zram *zram, u32 index)
+static void zram_reclaim_prefetched_locked(struct zram *zram, u32 index)
 {
 	if (!zram_prefetch_expired_locked(zram, index))
-		return false;
-	if (!zram_allocated(zram, index) ||
-	    zram_test_flag(zram, index, ZRAM_WB) ||
-	    zram_test_flag(zram, index, ZRAM_SAME) ||
-	    zram_test_flag(zram, index, ZRAM_UNDER_WB))
-		return false;
+		return;
 
-	return true;
-}
-
-static int zram_prefetch_writeback_expired_locked(struct zram *zram, u32 index)
-{
-	struct zram_wb_snapshot snapshot;
-	struct zms_write_hint hint = {};
-	struct zms_io io;
-	unsigned long handle = (unsigned long)index + 1;
-	unsigned long data;
-	u64 memcg_id;
-	size_t size;
-	u32 prio;
-	bool huge;
-	bool incompressible;
-	int ret;
-
-	data = __get_free_page(GFP_NOIO);
-	if (!data)
-		return -ENOMEM;
-
-	zram_slot_lock(zram, index);
-	if (!zram_prefetch_reclaim_candidate_locked(zram, index)) {
-		zram_slot_unlock(zram, index);
-		ret = -EAGAIN;
-		goto out_free;
-	}
-
-	zram_set_flag(zram, index, ZRAM_UNDER_WB);
-	zram_set_flag(zram, index, ZRAM_IDLE);
-	ret = zram_read_compressed_page(zram, index, (void *)data, &size);
-	if (!ret)
-		zram_take_wb_snapshot(zram, index, &snapshot);
-	zram_slot_unlock(zram, index);
-	if (ret) {
-		zram_writeback_clear_under_wb(zram, index);
-		goto out_free;
-	}
-
-	hint.memcg_id = snapshot.memcg_id;
-	hint.size_class = zram_writeback_size_class(size);
-	ret = zms_store_with_hint(zram->zms, handle, (void *)data, size, &hint,
-				  GFP_NOIO, &io);
-	zram_record_zms_io(zram, index, &io);
-	if (ret) {
-		zram_writeback_clear_under_wb(zram, index);
-		goto out_free;
-	}
-
-	zram_slot_lock(zram, index);
-	if (!zram_writeback_snapshot_matches(zram, index, &snapshot) ||
-	    !zram_prefetch_expired_locked(zram, index)) {
-		zram_clear_flag_wake(zram, index, ZRAM_UNDER_WB);
-		zram_clear_flag(zram, index, ZRAM_IDLE);
-		zram_slot_unlock(zram, index);
-		zms_free(zram->zms, handle);
-		ret = -EAGAIN;
-		goto out_free;
-	}
-
-	memcg_id = zram->table[index].memcg_id;
-	prio = zram_get_priority(zram, index);
-	huge = zram_test_flag(zram, index, ZRAM_HUGE);
-	incompressible = zram_test_flag(zram, index, ZRAM_INCOMPRESSIBLE);
 	zram_clear_flag(zram, index, ZRAM_PREFETCHED);
 	zram->table[index].prefetch_jiffies = 0;
-	zram_free_page(zram, index);
-	zram_clear_flag_wake(zram, index, ZRAM_UNDER_WB);
-	zram_set_flag(zram, index, ZRAM_WB);
-	if (huge) {
-		zram_set_flag(zram, index, ZRAM_HUGE);
-		atomic64_inc(&zram->stats.huge_pages);
-	}
-	if (incompressible)
-		zram_set_flag(zram, index, ZRAM_INCOMPRESSIBLE);
-	zram_set_element(zram, index, handle);
-	zram_set_obj_size(zram, index, size);
-	zram_set_priority(zram, index, prio);
-	zram->table[index].memcg_id = memcg_id;
-	atomic64_inc(&zram->stats.pages_stored);
-	atomic64_inc(&zram->stats.bd_count);
-	atomic64_inc(&zram->stats.bd_writes);
-	atomic64_add(size, &zram->stats.bd_compr_data_size);
-	zram_memcg_stats_add_current(zram, index);
-	zram_slot_unlock(zram, index);
-	ret = 1;
-
-out_free:
-	free_page(data);
-	return ret;
-}
-
-static unsigned int zram_prefetch_reclaim_expired(struct zram *zram)
-{
-	unsigned long nr_pages = zram_pages_snapshot(zram);
-	unsigned long start = READ_ONCE(zram->prefetch_reclaim_next_index);
-	unsigned int reclaimed = 0;
-	unsigned long scanned = 0;
-	unsigned long index;
-
-	if (!nr_pages)
-		return 0;
-	if (start >= nr_pages)
-		start = 0;
-
-	index = start;
-	while (scanned < nr_pages && reclaimed < ZRAM_PREFETCH_RECLAIM_BATCH) {
-		bool candidate;
-		int ret;
-
-		if (!down_read_trylock(&zram->init_lock))
-			break;
-		if (!init_done(zram) || !zram->zms) {
-			up_read(&zram->init_lock);
-			break;
-		}
-		zram_slot_lock(zram, index);
-		candidate = zram_prefetch_reclaim_candidate_locked(zram, index);
-		zram_slot_unlock(zram, index);
-		up_read(&zram->init_lock);
-
-		if (candidate) {
-			if (!down_read_trylock(&zram->init_lock))
-				break;
-			if (!init_done(zram) || !zram->zms) {
-				up_read(&zram->init_lock);
-				break;
-			}
-			ret = zram_prefetch_writeback_expired_locked(zram, index);
-			up_read(&zram->init_lock);
-			if (ret > 0) {
-				atomic64_inc(&zram->stats.prefetch_expired);
-				atomic64_inc(&zram->stats.prefetch_reclaimed);
-				reclaimed++;
-			}
-		}
-
-		index++;
-		scanned++;
-		if (index >= nr_pages)
-			index = 0;
-	}
-
-	WRITE_ONCE(zram->prefetch_reclaim_next_index, index);
-	return reclaimed;
-}
-
-static void zram_prefetch_reclaim_workfn(struct work_struct *work)
-{
-	struct delayed_work *dwork = to_delayed_work(work);
-	struct zram *zram = container_of(dwork, struct zram,
-					 prefetch_reclaim_work);
-	unsigned int reclaimed = 0;
-
-	if (READ_ONCE(zram->prefetch_reclaim_stopping))
-		return;
-	if (crystal_hybridswap_system_sleeping())
-		return;
-
-	if (!READ_ONCE(zram->prefetch_reclaim_stopping))
-		reclaimed = zram_prefetch_reclaim_expired(zram);
-
-	if (reclaimed && !READ_ONCE(zram->prefetch_reclaim_stopping))
-		zram_prefetch_reclaim_schedule(zram,
-					       ZRAM_PREFETCH_RECLAIM_RETRY_MS);
-}
-
-static void zram_prefetch_reclaim_schedule(struct zram *zram,
-					   unsigned long delay_ms)
-{
-	if (!zram || READ_ONCE(zram->prefetch_reclaim_stopping))
-		return;
-
-	queue_delayed_work(system_unbound_wq,
-			   &zram->prefetch_reclaim_work,
-			   msecs_to_jiffies(delay_ms));
-}
-
-static void zram_prefetch_reclaim_start(struct zram *zram)
-{
-	WRITE_ONCE(zram->prefetch_reclaim_stopping, false);
-	WRITE_ONCE(zram->prefetch_reclaim_next_index, 0);
-}
-
-static void zram_prefetch_reclaim_stop(struct zram *zram)
-{
-	WRITE_ONCE(zram->prefetch_reclaim_stopping, true);
-	cancel_delayed_work_sync(&zram->prefetch_reclaim_work);
+	atomic64_inc(&zram->stats.prefetch_expired);
+	atomic64_inc(&zram->stats.prefetch_reclaimed);
 }
 
 static void zram_record_auto_wb_age(struct zram *zram, s64 age_ms)
@@ -1687,6 +1498,9 @@ static void zram_sort_writeback_batch(struct zram_wb_item *items,
 static bool zram_auto_writeback_page_cold(struct zram *zram, u32 index,
 					  ktime_t now)
 {
+	if (zram_prefetch_expired_locked(zram, index))
+		return true;
+
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_TRACK_ENTRY_ACTIME
 	ktime_t ac_time;
 	s64 age_ms;
@@ -2185,6 +1999,7 @@ scan_next:
 			huge = zram_test_flag(zram, cur_index, ZRAM_HUGE);
 			incompressible = zram_test_flag(zram, cur_index,
 							ZRAM_INCOMPRESSIBLE);
+			zram_reclaim_prefetched_locked(zram, cur_index);
 			zram_free_page(zram, cur_index);
 			zram_clear_flag_wake(zram, cur_index, ZRAM_UNDER_WB);
 			zram_set_flag(zram, cur_index, ZRAM_WB);
@@ -2732,7 +2547,7 @@ static int read_from_zms_sync(struct zram *zram, struct page *page,
 	work.index = index;
 
 	INIT_WORK_ONSTACK(&work.work, zram_zms_sync_read);
-	queue_work(system_unbound_wq, &work.work);
+	queue_work(zram_read_wq, &work.work);
 	flush_work(&work.work);
 	destroy_work_on_stack(&work.work);
 	return work.error;
@@ -4007,9 +3822,6 @@ static void zram_zms_prefetch_workfn(struct work_struct *work)
 		atomic64_inc(&zram->stats.prefetch_no_data);
 	if (ret == -ENOMEM)
 		atomic64_inc(&zram->stats.prefetch_alloc_failures);
-	if (moved)
-		zram_prefetch_reclaim_schedule(zram, ZRAM_PREFETCH_TTL_MS);
-
 	zram_put(zram);
 	kfree(prefetch);
 }
@@ -4932,9 +4744,7 @@ static void zram_reset_device(struct zram *zram)
 	zram->prefetch_last_fault_index = 0;
 	zram->prefetch_prev_fault_index = 0;
 	zram->prefetch_last_fault_memcg_id = 0;
-	zram->prefetch_reclaim_next_index = 0;
 	zram->prefetch_fault_valid = false;
-	zram->prefetch_reclaim_stopping = true;
 	reset_bdev(zram);
 
 	comp_algorithm_set(zram, ZRAM_PRIMARY_COMP, default_compressor);
@@ -5165,11 +4975,8 @@ static int zram_add(void)
 	INIT_WORK(&zram->zms_gc_work, zram_zms_gc_workfn);
 	INIT_DELAYED_WORK(&zram->zms_gc_periodic_work,
 			  zram_zms_gc_periodic_workfn);
-	INIT_DELAYED_WORK(&zram->prefetch_reclaim_work,
-			  zram_prefetch_reclaim_workfn);
 	atomic_set(&zram->zms_gc_pending, 0);
 	zram->zms_gc_stopping = true;
-	zram->prefetch_reclaim_stopping = true;
 #endif
 
 	/* gendisk structure */
@@ -5380,6 +5187,12 @@ static void destroy_devices(void)
 	idr_destroy(&zram_index_idr);
 	unregister_blkdev(zram_major, "zram");
 	cpuhp_remove_multi_state(zcomp_cpuhp_state);
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
+	if (zram_read_wq) {
+		destroy_workqueue(zram_read_wq);
+		zram_read_wq = NULL;
+	}
+#endif
 }
 
 int zram_driver_init(void)
@@ -5396,9 +5209,24 @@ int zram_driver_init(void)
 		return ret;
 	zcomp_cpuhp_state = ret;
 
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
+	zram_read_wq = alloc_workqueue("zram-read",
+				       WQ_UNBOUND | WQ_HIGHPRI |
+				       WQ_MEM_RECLAIM,
+				       zram_read_wq_max_active());
+	if (!zram_read_wq) {
+		cpuhp_remove_multi_state(zcomp_cpuhp_state);
+		return -ENOMEM;
+	}
+#endif
+
 	ret = class_register(&zram_control_class);
 	if (ret) {
 		pr_err("Unable to register zram-control class\n");
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
+		destroy_workqueue(zram_read_wq);
+		zram_read_wq = NULL;
+#endif
 		cpuhp_remove_multi_state(zcomp_cpuhp_state);
 		return ret;
 	}
@@ -5409,6 +5237,10 @@ int zram_driver_init(void)
 		pr_err("Unable to get major number\n");
 		zram_debugfs_destroy();
 		class_unregister(&zram_control_class);
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
+		destroy_workqueue(zram_read_wq);
+		zram_read_wq = NULL;
+#endif
 		cpuhp_remove_multi_state(zcomp_cpuhp_state);
 		return -EBUSY;
 	}

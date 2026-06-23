@@ -287,6 +287,9 @@ struct crystal_hybridswap_zram_io_stats {
 	u64 prefetch_no_data;
 	u64 prefetch_alloc_failures;
 	u64 prefetch_hits;
+	u64 prefetch_stale_hits;
+	u64 prefetch_expired;
+	u64 prefetch_reclaimed;
 	u64 prefetch_invalidated;
 	u64 prefetch_hit_pct;
 	u64 under_wb_waits;

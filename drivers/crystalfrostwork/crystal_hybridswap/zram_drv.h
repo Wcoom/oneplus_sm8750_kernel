@@ -96,6 +96,9 @@ struct zram_table_entry {
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_TRACK_ENTRY_ACTIME
 	ktime_t ac_time;
 #endif
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
+	unsigned long prefetch_jiffies;
+#endif
 };
 
 struct zram_stats {
@@ -164,6 +167,9 @@ struct zram_stats {
 		atomic64_t prefetch_no_data;
 		atomic64_t prefetch_alloc_failures;
 		atomic64_t prefetch_hits;
+		atomic64_t prefetch_stale_hits;
+		atomic64_t prefetch_expired;
+		atomic64_t prefetch_reclaimed;
 		atomic64_t prefetch_invalidated;
 		atomic64_t under_wb_waits;
 		atomic64_t under_wb_wait_total_ns;
@@ -243,6 +249,13 @@ struct zram {
 	spinlock_t wb_limit_lock;
 	bool wb_limit_enable;
 	u64 bd_wb_limit;
+	u32 prefetch_last_fault_index;
+	u32 prefetch_prev_fault_index;
+	u64 prefetch_last_fault_memcg_id;
+	unsigned long prefetch_reclaim_next_index;
+	bool prefetch_fault_valid;
+	bool prefetch_reclaim_stopping;
+	struct delayed_work prefetch_reclaim_work;
 	struct block_device *bdev;
 	struct zms *zms;
 	struct work_struct zms_gc_work;

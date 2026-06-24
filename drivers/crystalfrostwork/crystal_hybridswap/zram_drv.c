@@ -703,7 +703,7 @@ static s64 zram_ns_to_s64(u64 ns)
 }
 
 static inline void zram_fill_page(void *ptr, unsigned long len,
-					unsigned long value)
+				  unsigned long value)
 {
 	WARN_ON_ONCE(!IS_ALIGNED(len, sizeof(unsigned long)));
 	memset_l(ptr, value, len / sizeof(unsigned long));
@@ -2987,7 +2987,6 @@ static ssize_t zms_stat_show(struct device *dev,
 		"repair_on_free_source_frees: %lu\n"
 		"repair_on_free_skips: %lu\n"
 		"affinity_exact_hits: %lu\n"
-		"affinity_memcg_hits: %lu\n"
 		"affinity_active_hits: %lu\n"
 		"affinity_active_misses: %lu\n"
 		"affinity_fallbacks: %lu\n"
@@ -2996,6 +2995,12 @@ static ssize_t zms_stat_show(struct device *dev,
 		"alloc_run_successes: %lu\n"
 		"alloc_run_failures: %lu\n"
 		"alloc_run_success_pct: %lu\n"
+		"alloc_run_success_pages: %lu\n"
+		"alloc_run_partial_pages: %lu\n"
+		"alloc_run_fallback_pages: %lu\n"
+		"alloc_run_contiguous_page_pct: %lu\n"
+		"alloc_run_segments: %lu\n"
+		"alloc_run_avg_segment_pages: %lu\n"
 		"reclaim_before_alloc_calls: %lu\n"
 		"reclaim_before_alloc_handles: %lu\n"
 		"pending_free: %lu\n"
@@ -3024,7 +3029,6 @@ static ssize_t zms_stat_show(struct device *dev,
 		stats.repair_on_free_source_frees,
 		stats.repair_on_free_skips,
 		stats.affinity_exact_hits,
-		stats.affinity_memcg_hits,
 		stats.affinity_active_hits,
 		stats.affinity_active_misses,
 		stats.affinity_fallbacks,
@@ -3033,6 +3037,12 @@ static ssize_t zms_stat_show(struct device *dev,
 		stats.alloc_run_successes,
 		stats.alloc_run_failures,
 		stats.alloc_run_success_pct,
+		stats.alloc_run_success_pages,
+		stats.alloc_run_partial_pages,
+		stats.alloc_run_fallback_pages,
+		stats.alloc_run_contiguous_page_pct,
+		stats.alloc_run_segments,
+		stats.alloc_run_avg_segment_pages,
 		stats.reclaim_before_alloc_calls,
 		stats.reclaim_before_alloc_handles,
 		stats.pending_free,

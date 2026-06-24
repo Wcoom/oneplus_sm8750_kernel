@@ -31,8 +31,9 @@
 #define ZMS_MAX_CLASSES		(PAGE_SIZE / ZMS_CLASS_SIZE)
 #define ZMS_BLOCK_RESERVED	1UL
 #define ZMS_RECLAIM_BEFORE_ALLOC_MAX	64U
-#define ZMS_ACTIVE_AFFINITY_SLOTS	4U
-#define ZMS_REPAIR_ON_FREE_MAX_MOVES	8U
+#define ZMS_ACTIVE_AFFINITY_SLOTS	8U
+#define ZMS_MIXED_FREE_PCT		10U
+#define ZMS_REPAIR_ON_FREE_MAX_MOVES	4U
 #define ZMS_STAT_COUNTER_BATCH		32
 
 enum zms_fullness {
@@ -141,11 +142,14 @@ struct zms {
 	unsigned long repair_on_free_source_frees;
 	unsigned long repair_on_free_skips;
 	unsigned long affinity_exact_hits;
-	unsigned long affinity_memcg_hits;
 	unsigned long affinity_active_hits;
 	unsigned long affinity_active_misses;
 	unsigned long affinity_fallbacks;
 	unsigned long affinity_mixed_blocks;
+	unsigned long alloc_run_success_pages;
+	unsigned long alloc_run_partial_pages;
+	unsigned long alloc_run_fallback_pages;
+	unsigned long alloc_run_segments;
 	unsigned long valid_classes;
 	spinlock_t pending_lock;
 	struct mutex lock;
@@ -257,18 +261,6 @@ static bool zms_affinity_tag_equal(const struct zms_affinity_tag *tag,
 				   const struct zms_write_hint *hint)
 {
 	if (!tag || !tag->valid || !zms_hint_valid(hint))
-		return false;
-
-	return tag->memcg_id == hint->memcg_id &&
-	       tag->size_class == hint->size_class;
-}
-
-static bool zms_affinity_tag_memcg_match(const struct zms_affinity_tag *tag,
-					 const struct zms_write_hint *hint)
-{
-	if (!tag || !tag->valid || !zms_hint_valid(hint))
-		return false;
-	if (!tag->memcg_id || !hint->memcg_id)
 		return false;
 
 	return tag->memcg_id == hint->memcg_id &&
@@ -676,6 +668,80 @@ static bool zms_alloc_disk_run_locked(struct zms *zms, unsigned long *blocks,
 	return false;
 }
 
+static unsigned int zms_alloc_disk_partial_run_locked(struct zms *zms,
+						      unsigned long *blocks,
+						      unsigned int nr_blocks,
+						      unsigned int *segments)
+{
+	unsigned int allocated = 0;
+
+	while (allocated < nr_blocks) {
+		unsigned long best_start = 0;
+		unsigned int best_len = 0;
+		unsigned long scan;
+		unsigned int pass;
+		unsigned int remaining = nr_blocks - allocated;
+
+		if (!zms->block_bitmap || zms->nr_blocks <= ZMS_BLOCK_RESERVED)
+			break;
+
+		scan = zms->next_block;
+		if (scan < ZMS_BLOCK_RESERVED || scan >= zms->nr_blocks)
+			scan = ZMS_BLOCK_RESERVED;
+
+		for (pass = 0; pass < 2; pass++) {
+			unsigned long end = pass ? zms->next_block : zms->nr_blocks;
+
+			if (end <= ZMS_BLOCK_RESERVED)
+				end = zms->nr_blocks;
+
+			while (scan < end) {
+				unsigned long next_set;
+				unsigned int len;
+
+				scan = find_next_zero_bit(zms->block_bitmap, end, scan);
+				if (scan >= end)
+					break;
+
+				next_set = find_next_bit(zms->block_bitmap,
+							 min_t(unsigned long,
+							       end, scan + remaining),
+							 scan);
+				len = next_set - scan;
+				if (len > best_len) {
+					best_start = scan;
+					best_len = len;
+					if (best_len == remaining)
+						break;
+				}
+
+				scan = next_set + 1;
+			}
+
+			if (best_len == remaining)
+				break;
+			scan = ZMS_BLOCK_RESERVED;
+		}
+
+		if (!best_len)
+			break;
+
+		zms_stat_add(zms, ZMS_STAT_USED_BLOCKS, best_len);
+		while (best_len && allocated < nr_blocks) {
+			__set_bit(best_start, zms->block_bitmap);
+			blocks[allocated++] = best_start++;
+			best_len--;
+		}
+		if (segments)
+			(*segments)++;
+		zms->next_block = best_start;
+		if (zms->next_block >= zms->nr_blocks)
+			zms->next_block = ZMS_BLOCK_RESERVED;
+	}
+
+	return allocated;
+}
+
 static void zms_free_disk_block_locked(struct zms *zms, unsigned long block)
 {
 	if (WARN_ON_ONCE(block < ZMS_BLOCK_RESERVED || block >= zms->nr_blocks))
@@ -802,11 +868,53 @@ static struct zms_block *zms_find_available_block_locked(struct zms_class *class
 	return NULL;
 }
 
+static bool zms_block_available_locked(const struct zms_block *block)
+{
+	return block && block->listed && block->fullness != ZMS_FG_FULL &&
+	       !zms_block_pinned(block);
+}
+
+static bool zms_block_should_accept_mixed(const struct zms_block *block)
+{
+	unsigned int free_slots;
+	unsigned int free_pct;
+
+	if (!block || block->used >= block->slots)
+		return false;
+
+	free_slots = block->slots - block->used;
+	free_pct = free_slots * 100U / block->slots;
+
+	return free_slots <= 1 || free_pct <= ZMS_MIXED_FREE_PCT;
+}
+
+static struct zms_block *zms_find_mixed_fallback_block_locked(struct zms *zms,
+							     struct zms_class *class)
+{
+	int fullness;
+
+	for (fullness = ZMS_FG_ALMOST_FULL; fullness >= ZMS_FG_LOW; fullness--) {
+		struct zms_block *block;
+
+		list_for_each_entry(block, &class->fullness[fullness], list) {
+			if (!zms_block_available_locked(block))
+				continue;
+			if (!zms_block_should_accept_mixed(block))
+				continue;
+
+			return block;
+		}
+		if (fullness == ZMS_FG_LOW)
+			break;
+	}
+
+	return NULL;
+}
+
 static struct zms_block *zms_find_active_affinity_block_locked(struct zms *zms,
 						       struct zms_class *class,
 						       const struct zms_write_hint *hint)
 {
-	struct zms_block *memcg_match = NULL;
 	unsigned int i;
 
 	if (!zms_hint_valid(hint))
@@ -831,16 +939,6 @@ static struct zms_block *zms_find_active_affinity_block_locked(struct zms *zms,
 			zms_class_promote_active_block_locked(class, block);
 			return block;
 		}
-		if (!memcg_match &&
-		    zms_affinity_tag_memcg_match(&active->tag, hint))
-			memcg_match = block;
-	}
-
-	if (memcg_match) {
-		zms->affinity_memcg_hits++;
-		zms->affinity_active_hits++;
-		zms_class_promote_active_block_locked(class, memcg_match);
-		return memcg_match;
 	}
 
 	zms->affinity_active_misses++;
@@ -854,6 +952,10 @@ static struct zms_block *zms_alloc_block_locked(struct zms *zms,
 	struct zms_block *block;
 	size_t bitmap_size;
 	unsigned int i;
+	unsigned int partial = 0;
+	unsigned int fallback = 0;
+	unsigned int segments = 0;
+	bool full_run = false;
 
 	block = kzalloc(struct_size(block, blocks, class->pages_per_zspage), gfp);
 	if (!block)
@@ -878,16 +980,34 @@ static struct zms_block *zms_alloc_block_locked(struct zms *zms,
 
 	if (zms_alloc_disk_run_locked(zms, block->blocks, block->pages)) {
 		if (block->pages > 1)
-			zms->alloc_run_successes++;
+			full_run = true;
+		segments = block->pages > 1 ? 1 : 0;
 		i = block->pages;
 	} else {
 		if (block->pages > 1)
-			zms->alloc_run_failures++;
-		for (i = 0; i < block->pages; i++) {
+			partial = zms_alloc_disk_partial_run_locked(zms,
+								   block->blocks,
+								   block->pages,
+								   &segments);
+		for (i = partial; i < block->pages; i++) {
 			block->blocks[i] = zms_alloc_disk_block_locked(zms);
 			if (!block->blocks[i])
 				goto err_allocated_blocks;
+			fallback++;
+			if (block->pages > 1)
+				segments++;
 		}
+	}
+	if (block->pages > 1) {
+		if (full_run) {
+			zms->alloc_run_successes++;
+			zms->alloc_run_success_pages += block->pages;
+		} else {
+			zms->alloc_run_failures++;
+			zms->alloc_run_partial_pages += partial;
+			zms->alloc_run_fallback_pages += fallback;
+		}
+		zms->alloc_run_segments += segments;
 	}
 	zms->alloc_blocks++;
 
@@ -1106,6 +1226,12 @@ static struct zms_block *zms_find_block_locked(struct zms *zms,
 		return block;
 	affinity_missed = zms_hint_valid(hint);
 
+	if (affinity_missed) {
+		block = zms_find_mixed_fallback_block_locked(zms, class);
+		if (block)
+			return block;
+	}
+
 	block = zms_find_available_block_locked(class);
 	if (block) {
 		if (affinity_missed)
@@ -1121,6 +1247,11 @@ static struct zms_block *zms_find_block_locked(struct zms *zms,
 		block = zms_find_active_affinity_block_locked(zms, class, hint);
 		if (block)
 			return block;
+		if (affinity_missed) {
+			block = zms_find_mixed_fallback_block_locked(zms, class);
+			if (block)
+				return block;
+		}
 		block = zms_find_available_block_locked(class);
 		if (block) {
 			if (affinity_missed)
@@ -1632,7 +1763,6 @@ int zms_get_stats(struct zms *zms, struct zms_stats *stats)
 		zms->repair_on_free_source_frees;
 	stats->repair_on_free_skips = zms->repair_on_free_skips;
 	stats->affinity_exact_hits = zms->affinity_exact_hits;
-	stats->affinity_memcg_hits = zms->affinity_memcg_hits;
 	stats->affinity_active_hits = zms->affinity_active_hits;
 	stats->affinity_active_misses = zms->affinity_active_misses;
 	stats->affinity_fallbacks = zms->affinity_fallbacks;
@@ -1641,6 +1771,28 @@ int zms_get_stats(struct zms *zms, struct zms_stats *stats)
 		stats->alloc_run_success_pct =
 			zms->alloc_run_successes * 100 /
 			zms_alloc_run_attempts(zms);
+	stats->alloc_run_success_pages = zms->alloc_run_success_pages;
+	stats->alloc_run_partial_pages = zms->alloc_run_partial_pages;
+	stats->alloc_run_fallback_pages = zms->alloc_run_fallback_pages;
+	stats->alloc_run_segments = zms->alloc_run_segments;
+	if (zms->alloc_run_success_pages + zms->alloc_run_partial_pages +
+	    zms->alloc_run_fallback_pages) {
+		unsigned long contiguous = zms->alloc_run_success_pages +
+					   zms->alloc_run_partial_pages;
+		unsigned long total = contiguous +
+				      zms->alloc_run_fallback_pages;
+
+		stats->alloc_run_contiguous_page_pct =
+			contiguous * 100 / total;
+	}
+	if (zms->alloc_run_segments) {
+		unsigned long total = zms->alloc_run_success_pages +
+				      zms->alloc_run_partial_pages +
+				      zms->alloc_run_fallback_pages;
+
+		stats->alloc_run_avg_segment_pages =
+			total / zms->alloc_run_segments;
+	}
 	stats->reclaim_before_alloc_calls = zms->reclaim_before_alloc_calls;
 	stats->reclaim_before_alloc_handles =
 		zms->reclaim_before_alloc_handles;
@@ -2057,6 +2209,11 @@ int zms_peek_neighbors(struct zms *zms, unsigned long handle,
 
 	entry = zms->handles[handle];
 	block = entry.block;
+	if (block->fullness == ZMS_FG_LOW || block->fullness == ZMS_FG_MID) {
+		mutex_unlock(&zms->lock);
+		return 0;
+	}
+
 	for (slot = 0; slot < block->slots && found < max_handles; slot++) {
 		unsigned long neighbor = block->slot_handles[slot];
 

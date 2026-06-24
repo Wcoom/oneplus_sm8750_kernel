@@ -1002,10 +1002,6 @@ static void crystal_hybridswap_add_zram_io_stats(
 	dst->prefetch_expired += src->prefetch_expired;
 	dst->prefetch_reclaimed += src->prefetch_reclaimed;
 	dst->prefetch_invalidated += src->prefetch_invalidated;
-	dst->under_wb_waits += src->under_wb_waits;
-	dst->under_wb_wait_total_ns += src->under_wb_wait_total_ns;
-	dst->under_wb_wait_max_ns = max(dst->under_wb_wait_max_ns,
-					src->under_wb_wait_max_ns);
 	dst->prefetch_hit_pct = dst->prefetch_moved ?
 		mul_u64_u64_div_u64(dst->prefetch_hits, 100,
 				    dst->prefetch_moved) : 0;

@@ -461,13 +461,6 @@ static ssize_t hybridswap_crystal_stat_show(struct device *dev,
 				 zram_io_stats.prefetch_prepare_errors +
 				 zram_io_stats.prefetch_snapshot_mismatch +
 				 zram_io_stats.prefetch_alloc_failures);
-	ret += sysfs_emit_at(buf, ret, "zram_under_wb_waits %llu\n",
-				 zram_io_stats.under_wb_waits);
-	ret += sysfs_emit_at(buf, ret,
-				 "zram_under_wb_wait_total_ns %llu\n",
-				 zram_io_stats.under_wb_wait_total_ns);
-	ret += sysfs_emit_at(buf, ret, "zram_under_wb_wait_max_ns %llu\n",
-				 zram_io_stats.under_wb_wait_max_ns);
 	ret += sysfs_emit_at(buf, ret, "zram_io_scan_errors_count %llu\n",
 				 zram_io_stats.scan_errors_count);
 	ret += sysfs_emit_at(buf, ret, "writeback_worker_runs %lld\n",

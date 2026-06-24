@@ -292,9 +292,6 @@ struct crystal_hybridswap_zram_io_stats {
 	u64 prefetch_reclaimed;
 	u64 prefetch_invalidated;
 	u64 prefetch_hit_pct;
-	u64 under_wb_waits;
-	u64 under_wb_wait_total_ns;
-	u64 under_wb_wait_max_ns;
 	u64 scan_errors_count;
 };
 

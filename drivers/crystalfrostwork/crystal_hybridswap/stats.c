@@ -215,12 +215,6 @@ void crystal_hybridswap_stats_show(struct seq_file *m)
 		   zram_io_stats.prefetch_prepare_errors +
 		   zram_io_stats.prefetch_snapshot_mismatch +
 		   zram_io_stats.prefetch_alloc_failures);
-	seq_printf(m, "zram_under_wb_waits: %llu\n",
-		   zram_io_stats.under_wb_waits);
-	seq_printf(m, "zram_under_wb_wait_total_ns: %llu\n",
-		   zram_io_stats.under_wb_wait_total_ns);
-	seq_printf(m, "zram_under_wb_wait_max_ns: %llu\n",
-		   zram_io_stats.under_wb_wait_max_ns);
 	seq_printf(m, "zram_io_scan_errors_count: %llu\n",
 		   zram_io_stats.scan_errors_count);
 	seq_printf(m, "enable_store: %lld\n",

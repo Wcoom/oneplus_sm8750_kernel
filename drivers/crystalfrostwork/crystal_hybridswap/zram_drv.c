@@ -1210,7 +1210,6 @@ static ssize_t backing_dev_store(struct device *dev,
 #define INCOMPRESSIBLE_WRITEBACK	(1<<2)
 #define HYBRIDSWAP_NORMAL_WRITEBACK	(1<<3)
 #define ZRAM_WB_BATCH_MAX		32
-#define ZRAM_ZMS_WB_SIZE_ALIGN		16U
 #define ZRAM_ZMS_WB_MIN_FREE_BLOCKS \
 	(ZRAM_WB_BATCH_MAX * ZMS_MAX_PAGES_PER_ZSPAGE)
 #define ZRAM_AUTO_WB_COLD_AGE_MS	60000ULL
@@ -1449,7 +1448,7 @@ static void zram_record_auto_wb_age(struct zram *zram, s64 age_ms)
 
 static unsigned int zram_writeback_size_class(size_t size)
 {
-	return DIV_ROUND_UP(size, ZRAM_ZMS_WB_SIZE_ALIGN);
+	return zms_hint_size_class(size);
 }
 
 static int zram_writeback_item_cmp(const void *lhs, const void *rhs)

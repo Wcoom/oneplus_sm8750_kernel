@@ -3,12 +3,33 @@
 #define _CRYSTAL_HYBRIDSWAP_ZMS_H_
 
 #include <linux/gfp_types.h>
+#include <linux/kernel.h>
+#include <linux/mm.h>
 #include <linux/types.h>
 
 struct block_device;
 struct zms;
 
 #define ZMS_MAX_PAGES_PER_ZSPAGE 8U
+#define ZMS_ALIGN_SHIFT 4
+#define ZMS_ALIGN (1U << ZMS_ALIGN_SHIFT)
+#define ZMS_MIN_SIZE ZMS_ALIGN
+#define ZMS_CLASS_SIZE ZMS_ALIGN
+
+static inline unsigned int zms_size_to_class(size_t size)
+{
+	size_t aligned = ALIGN(max_t(size_t, size, ZMS_MIN_SIZE), ZMS_ALIGN);
+
+	return (aligned / ZMS_CLASS_SIZE) - 1;
+}
+
+static inline unsigned int zms_hint_size_class(size_t size)
+{
+	if (!size || size > PAGE_SIZE)
+		return 0;
+
+	return zms_size_to_class(size) + 1;
+}
 
 struct zms_io {
 	bool submitted;

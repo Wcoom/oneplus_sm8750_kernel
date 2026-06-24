@@ -78,7 +78,6 @@ struct zms_stats {
 	unsigned long repair_on_free_source_frees;
 	unsigned long repair_on_free_skips;
 	unsigned long affinity_exact_hits;
-	unsigned long affinity_memcg_hits;
 	unsigned long affinity_active_hits;
 	unsigned long affinity_active_misses;
 	unsigned long affinity_fallbacks;
@@ -89,6 +88,12 @@ struct zms_stats {
 	unsigned long alloc_run_successes;
 	unsigned long alloc_run_failures;
 	unsigned long alloc_run_success_pct;
+	unsigned long alloc_run_success_pages;
+	unsigned long alloc_run_partial_pages;
+	unsigned long alloc_run_fallback_pages;
+	unsigned long alloc_run_contiguous_page_pct;
+	unsigned long alloc_run_segments;
+	unsigned long alloc_run_avg_segment_pages;
 	unsigned long reclaim_before_alloc_calls;
 	unsigned long reclaim_before_alloc_handles;
 	u64 stored_bytes;

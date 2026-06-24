@@ -28,10 +28,6 @@
 
 #include "zms.h"
 
-#define ZMS_ALIGN_SHIFT		4
-#define ZMS_ALIGN		(1U << ZMS_ALIGN_SHIFT)
-#define ZMS_MIN_SIZE		ZMS_ALIGN
-#define ZMS_CLASS_SIZE		ZMS_ALIGN
 #define ZMS_MAX_CLASSES		(PAGE_SIZE / ZMS_CLASS_SIZE)
 #define ZMS_BLOCK_RESERVED	1UL
 #define ZMS_RECLAIM_BEFORE_ALLOC_MAX	64U
@@ -157,13 +153,6 @@ struct zms {
 	bool destroying;
 	bool statcounters_ready;
 };
-
-static unsigned int zms_size_to_class(size_t size)
-{
-	size_t aligned = ALIGN(max_t(size_t, size, ZMS_MIN_SIZE), ZMS_ALIGN);
-
-	return (aligned / ZMS_CLASS_SIZE) - 1;
-}
 
 static struct zms_class *zms_class_for_size(struct zms *zms, size_t size)
 {

@@ -697,31 +697,10 @@ static s64 zram_dev_id(struct zram *zram)
 	return zram->disk->first_minor;
 }
 
-#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
 static s64 zram_ns_to_s64(u64 ns)
 {
 	return ns > S64_MAX ? S64_MAX : (s64)ns;
 }
-
-static void zram_record_under_wb_wait(struct zram *zram, u64 start_ns)
-{
-	s64 delta;
-
-	if (!zram || !start_ns)
-		return;
-
-	delta = zram_ns_to_s64(ktime_get_ns() - start_ns);
-	atomic64_inc(&zram->stats.under_wb_waits);
-	atomic64_add(delta, &zram->stats.under_wb_wait_total_ns);
-	zram_atomic64_update_max(&zram->stats.under_wb_wait_max_ns, delta);
-}
-
-#else
-static void zram_record_under_wb_wait(struct zram *zram, u64 start_ns)
-{
-}
-
-#endif
 
 static inline void zram_fill_page(void *ptr, unsigned long len,
 					unsigned long value)
@@ -2376,12 +2355,6 @@ int crystal_hybridswap_zram_io_stats(struct device *dev,
 	stats->prefetch_hit_pct = stats->prefetch_moved ?
 		mul_u64_u64_div_u64(stats->prefetch_hits, 100,
 				    stats->prefetch_moved) : 0;
-	stats->under_wb_waits =
-		atomic64_read(&zram->stats.under_wb_waits);
-	stats->under_wb_wait_total_ns =
-		atomic64_read(&zram->stats.under_wb_wait_total_ns);
-	stats->under_wb_wait_max_ns =
-		atomic64_read(&zram->stats.under_wb_wait_max_ns);
 #endif
 	up_read(&zram->init_lock);
 
@@ -3345,12 +3318,9 @@ static int zram_read_page(struct zram *zram, struct page *page, u32 index,
 retry:
 	zram_slot_lock(zram, index);
 	if (zram_test_flag(zram, index, ZRAM_UNDER_WB)) {
-		u64 wait_start = ktime_get_ns();
-
 		zram_slot_unlock(zram, index);
 		wait_on_bit_io(&zram->table[index].flags, ZRAM_UNDER_WB,
 			       TASK_UNINTERRUPTIBLE);
-		zram_record_under_wb_wait(zram, wait_start);
 		goto retry;
 	}
 

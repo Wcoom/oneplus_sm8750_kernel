@@ -171,9 +171,6 @@ struct zram_stats {
 		atomic64_t prefetch_expired;
 		atomic64_t prefetch_reclaimed;
 		atomic64_t prefetch_invalidated;
-		atomic64_t under_wb_waits;
-		atomic64_t under_wb_wait_total_ns;
-		atomic64_t under_wb_wait_max_ns;
 		atomic64_t auto_wb_cold_age_ms;
 	atomic64_t auto_wb_scan_pages;
 	atomic64_t auto_wb_cold_selected;

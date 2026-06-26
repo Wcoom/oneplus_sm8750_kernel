@@ -23,14 +23,6 @@ static inline unsigned int zms_size_to_class(size_t size)
 	return (aligned / ZMS_CLASS_SIZE) - 1;
 }
 
-static inline unsigned int zms_hint_size_class(size_t size)
-{
-	if (!size || size > PAGE_SIZE)
-		return 0;
-
-	return zms_size_to_class(size) + 1;
-}
-
 struct zms_io {
 	bool submitted;
 	bool write;
@@ -73,15 +65,7 @@ struct zms_stats {
 	unsigned long read_merge_hits;
 	unsigned long read_merge_mismatch;
 	unsigned long read_merge_failures;
-	unsigned long repair_on_free_calls;
-	unsigned long repair_on_free_moves;
-	unsigned long repair_on_free_source_frees;
-	unsigned long repair_on_free_skips;
-	unsigned long affinity_exact_hits;
-	unsigned long affinity_active_hits;
-	unsigned long affinity_active_misses;
-	unsigned long affinity_fallbacks;
-	unsigned long affinity_mixed_blocks;
+	unsigned long load_cache_hit_pct;
 	unsigned long empty_blocks;
 	unsigned long valid_classes;
 	unsigned long alloc_blocks;
@@ -114,11 +98,6 @@ struct zms_load_ref {
 	void *private;
 };
 
-struct zms_write_hint {
-	u64 memcg_id;
-	u16 size_class;
-};
-
 struct zms *zms_create(struct block_device *bdev, unsigned long nr_blocks,
 			       unsigned long nr_handles);
 int zms_set_nr_handles(struct zms *zms, unsigned long nr_handles);
@@ -127,11 +106,10 @@ int zms_get_stats(struct zms *zms, struct zms_stats *stats);
 
 int zms_store(struct zms *zms, unsigned long handle, const void *src,
 	      size_t size, gfp_t gfp, struct zms_io *io);
-int zms_store_with_hint(struct zms *zms, unsigned long handle, const void *src,
-			size_t size, const struct zms_write_hint *hint,
-			gfp_t gfp, struct zms_io *io);
 int zms_load(struct zms *zms, unsigned long handle, void *dst, size_t *size,
 	     gfp_t gfp, struct zms_io *io);
+int zms_load_cached_ref(struct zms *zms, unsigned long handle,
+			struct zms_load_ref *ref, struct zms_io *io);
 int zms_load_ref(struct zms *zms, unsigned long handle, struct zms_load_ref *ref,
 		 gfp_t gfp, struct zms_io *io);
 void zms_put_ref(struct zms *zms, struct zms_load_ref *ref);

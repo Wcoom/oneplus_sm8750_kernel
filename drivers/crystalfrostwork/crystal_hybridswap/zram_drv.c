@@ -30,7 +30,6 @@
 #include <linux/device.h>
 #include <linux/highmem.h>
 #include <linux/slab.h>
-#include <linux/sort.h>
 #include <linux/backing-dev.h>
 #include <linux/string.h>
 #include <linux/vmalloc.h>
@@ -86,7 +85,6 @@ static unsigned int zram_read_wq_max_active(void)
 
 static void zram_record_zms_io(struct zram *zram, u32 index,
 			       const struct zms_io *io);
-static unsigned int zram_writeback_size_class(size_t size);
 static bool zram_test_flag(struct zram *zram, u32 index,
 			   enum zram_pageflags flag);
 static void zram_set_flag(struct zram *zram, u32 index,
@@ -1225,8 +1223,6 @@ struct zram_wb_item {
 	void *data;
 	size_t size;
 	unsigned long handle;
-	u64 memcg_id;
-	unsigned int size_class;
 	struct zram_wb_snapshot snapshot;
 };
 
@@ -1269,6 +1265,7 @@ static int zram_zms_gc_run_locked(struct zram *zram, const char *reason)
 	struct zms_stats stats;
 	struct zms_io io;
 	int ret;
+	int flush_ret;
 
 	if (!zram->zms)
 		return 0;
@@ -1282,6 +1279,18 @@ static int zram_zms_gc_run_locked(struct zram *zram, const char *reason)
 
 	if (!zram_zms_gc_should_run(&stats))
 		return 0;
+
+	if (stats.dirty_blocks) {
+		flush_ret = zms_flush_all(zram->zms, GFP_NOIO, &io);
+		zram_record_zms_io(zram, 0, &io);
+		if (flush_ret) {
+			chs_log_ratelimited(CHS_LOG_WARN,
+					    "zms gc flush failed reason=%s dirty=%lu ret=%d\n",
+					    reason, stats.dirty_blocks,
+					    flush_ret);
+			return flush_ret;
+		}
+	}
 
 	ret = zms_compact(zram->zms, GFP_NOIO, &io);
 	zram_record_zms_io(zram, 0, &io);
@@ -1444,33 +1453,6 @@ static void zram_record_auto_wb_age(struct zram *zram, s64 age_ms)
 			break;
 		old = prev;
 	}
-}
-
-static unsigned int zram_writeback_size_class(size_t size)
-{
-	return zms_hint_size_class(size);
-}
-
-static int zram_writeback_item_cmp(const void *lhs, const void *rhs)
-{
-	const struct zram_wb_item *a = lhs;
-	const struct zram_wb_item *b = rhs;
-
-	if (a->size_class != b->size_class)
-		return a->size_class < b->size_class ? -1 : 1;
-	if (a->memcg_id != b->memcg_id)
-		return a->memcg_id < b->memcg_id ? -1 : 1;
-	if (a->index != b->index)
-		return a->index < b->index ? -1 : 1;
-
-	return 0;
-}
-
-static void zram_sort_writeback_batch(struct zram_wb_item *items,
-				      unsigned int nr)
-{
-	if (nr > 1)
-		sort(items, nr, sizeof(*items), zram_writeback_item_cmp, NULL);
 }
 
 static bool zram_auto_writeback_page_cold(struct zram *zram, u32 index,
@@ -1885,10 +1867,6 @@ static int zram_writeback_pages(struct zram *zram, int mode,
 
 			items[batch_count].index = cur_index;
 			items[batch_count].handle = (unsigned long)cur_index + 1;
-			items[batch_count].memcg_id =
-				items[batch_count].snapshot.memcg_id;
-			items[batch_count].size_class =
-				zram_writeback_size_class(items[batch_count].size);
 			batch_count++;
 			eligible++;
 			if (auto_normal)
@@ -1902,12 +1880,9 @@ scan_next:
 		if (!batch_count)
 			continue;
 
-		zram_sort_writeback_batch(items, batch_count);
-
 		for (i = 0; i < batch_count; i++) {
 			struct zram_wb_item *item = &items[i];
 			struct zms_io io;
-			struct zms_write_hint hint;
 			u32 cur_index = item->index;
 			unsigned long handle = item->handle;
 			u64 wb_memcg_id;
@@ -1926,12 +1901,8 @@ scan_next:
 			}
 			zram_slot_unlock(zram, cur_index);
 
-			memset(&hint, 0, sizeof(hint));
-			hint.memcg_id = item->memcg_id;
-			hint.size_class = item->size_class;
-			err = zms_store_with_hint(zram->zms, item->handle,
-						  item->data, item->size,
-						  &hint, GFP_NOIO, &io);
+			err = zms_store(zram->zms, item->handle, item->data,
+					item->size, GFP_NOIO, &io);
 			zram_record_zms_io(zram, cur_index, &io);
 			if (err) {
 				ret = err;
@@ -2424,6 +2395,7 @@ struct zram_work {
 	struct zram *zram;
 	unsigned long handle;
 	size_t size;
+	u64 memcg_id;
 	u32 index;
 	u32 prio;
 	struct page *page;
@@ -2458,39 +2430,47 @@ static int zram_decode_zms_payload(struct zram *zram, struct page *page,
 	return ret;
 }
 
+static int zram_finish_zms_ref_read(struct zram *zram, struct page *page,
+				    struct zms_load_ref *ref,
+				    const struct zms_io *io,
+				    unsigned long handle, size_t size, u32 prio,
+				    u32 index, u64 memcg_id)
+{
+	int ret;
+
+	zram_record_zms_io(zram, index, io);
+	ret = zram_decode_zms_payload(zram, page, ref->data, ref->size,
+				      size, prio);
+	zms_put_ref(zram->zms, ref);
+
+	if (!ret)
+		atomic64_inc(&zram->stats.bd_reads);
+	if (!ret)
+		zram_zms_maybe_prefetch(zram, index, handle, memcg_id, io);
+	if (!ret)
+		zram_prefetch_note_fault(zram, index, memcg_id);
+	return ret;
+}
+
 static int zram_read_from_zms(struct zram *zram, struct page *page,
 			      unsigned long handle, size_t size, u32 prio,
-			      u32 index)
+			      u32 index, u64 memcg_id)
 {
 	struct zms_load_ref ref;
 	struct zms_io io;
-	u64 memcg_id = 0;
 	int ret;
 
 	if (!zram->zms || !handle || !size || size > PAGE_SIZE)
 		return -EIO;
 
-	zram_slot_lock(zram, index);
-	if (zram_test_flag(zram, index, ZRAM_WB) &&
-	    zram_get_element(zram, index) == handle)
-		memcg_id = zram->table[index].memcg_id;
-	zram_slot_unlock(zram, index);
-
 	ret = zms_load_ref(zram->zms, handle, &ref, GFP_NOIO, &io);
-	zram_record_zms_io(zram, index, &io);
-	if (!ret) {
-		ret = zram_decode_zms_payload(zram, page, ref.data, ref.size,
-					      size, prio);
-		zms_put_ref(zram->zms, &ref);
+	if (ret) {
+		zram_record_zms_io(zram, index, &io);
+		return ret;
 	}
 
-	if (!ret)
-		atomic64_inc(&zram->stats.bd_reads);
-	if (!ret)
-		zram_zms_maybe_prefetch(zram, index, handle, memcg_id, &io);
-	if (!ret)
-		zram_prefetch_note_fault(zram, index, memcg_id);
-	return ret;
+	return zram_finish_zms_ref_read(zram, page, &ref, &io, handle, size,
+					prio, index, memcg_id);
 }
 
 static void zram_zms_sync_read(struct work_struct *work)
@@ -2498,7 +2478,8 @@ static void zram_zms_sync_read(struct work_struct *work)
 	struct zram_work *zw = container_of(work, struct zram_work, work);
 
 	zw->error = zram_read_from_zms(zw->zram, zw->page, zw->handle,
-				       zw->size, zw->prio, zw->index);
+				       zw->size, zw->prio, zw->index,
+				       zw->memcg_id);
 }
 
 /*
@@ -2507,7 +2488,7 @@ static void zram_zms_sync_read(struct work_struct *work)
  */
 static int read_from_zms_sync(struct zram *zram, struct page *page,
 			      unsigned long handle, size_t size, u32 prio,
-			      u32 index)
+			      u32 index, u64 memcg_id)
 {
 	struct zram_work work;
 
@@ -2517,6 +2498,7 @@ static int read_from_zms_sync(struct zram *zram, struct page *page,
 	work.size = size;
 	work.prio = prio;
 	work.index = index;
+	work.memcg_id = memcg_id;
 
 	INIT_WORK_ONSTACK(&work.work, zram_zms_sync_read);
 	queue_work(zram_read_wq, &work.work);
@@ -2529,7 +2511,7 @@ static int read_from_zms_sync(struct zram *zram, struct page *page,
 static inline void reset_bdev(struct zram *zram) {};
 static int read_from_zms_sync(struct zram *zram, struct page *page,
 			      unsigned long handle, size_t size, u32 prio,
-			      u32 index)
+			      u32 index, u64 memcg_id)
 {
 	return -EIO;
 }
@@ -2982,15 +2964,7 @@ static ssize_t zms_stat_show(struct device *dev,
 		"read_merge_hits: %lu\n"
 		"read_merge_mismatch: %lu\n"
 		"read_merge_failures: %lu\n"
-		"repair_on_free_calls: %lu\n"
-		"repair_on_free_moves: %lu\n"
-		"repair_on_free_source_frees: %lu\n"
-		"repair_on_free_skips: %lu\n"
-		"affinity_exact_hits: %lu\n"
-		"affinity_active_hits: %lu\n"
-		"affinity_active_misses: %lu\n"
-		"affinity_fallbacks: %lu\n"
-		"affinity_mixed_blocks: %lu\n"
+		"load_cache_hit_pct: %lu\n"
 		"alloc_blocks: %lu\n"
 		"alloc_run_successes: %lu\n"
 		"alloc_run_failures: %lu\n"
@@ -3024,15 +2998,7 @@ static ssize_t zms_stat_show(struct device *dev,
 		stats.read_merge_hits,
 		stats.read_merge_mismatch,
 		stats.read_merge_failures,
-		stats.repair_on_free_calls,
-		stats.repair_on_free_moves,
-		stats.repair_on_free_source_frees,
-		stats.repair_on_free_skips,
-		stats.affinity_exact_hits,
-		stats.affinity_active_hits,
-		stats.affinity_active_misses,
-		stats.affinity_fallbacks,
-		stats.affinity_mixed_blocks,
+		stats.load_cache_hit_pct,
 		stats.alloc_blocks,
 		stats.alloc_run_successes,
 		stats.alloc_run_failures,
@@ -3320,7 +3286,10 @@ static int zram_read_page(struct zram *zram, struct page *page, u32 index,
 			  struct bio *parent)
 {
 	unsigned long handle;
+	struct zms_load_ref ref;
+	struct zms_io io;
 	size_t size;
+	u64 memcg_id;
 	u32 prio;
 	int ret;
 
@@ -3347,10 +3316,22 @@ retry:
 		handle = zram_get_element(zram, index);
 		size = zram_get_obj_size(zram, index);
 		prio = zram_get_priority(zram, index);
+		memcg_id = zram->table[index].memcg_id;
 		zram_set_flag(zram, index, ZRAM_UNDER_WB);
 		zram_slot_unlock(zram, index);
 
-		ret = read_from_zms_sync(zram, page, handle, size, prio, index);
+		if (zram->zms && handle && size && size <= PAGE_SIZE)
+			ret = zms_load_cached_ref(zram->zms, handle, &ref, &io);
+		else
+			ret = -EAGAIN;
+		if (!ret) {
+			ret = zram_finish_zms_ref_read(zram, page, &ref, &io,
+						       handle, size, prio, index,
+						       memcg_id);
+		} else if (ret == -EAGAIN) {
+			ret = read_from_zms_sync(zram, page, handle, size, prio,
+						 index, memcg_id);
+		}
 
 		zram_slot_lock(zram, index);
 		if (zram_test_flag(zram, index, ZRAM_UNDER_WB))

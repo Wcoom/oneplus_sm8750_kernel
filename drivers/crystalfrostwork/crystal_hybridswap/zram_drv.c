@@ -2453,8 +2453,8 @@ static int zram_finish_zms_ref_read(struct zram *zram, struct page *page,
 }
 
 static int zram_read_from_zms(struct zram *zram, struct page *page,
-			      unsigned long handle, size_t size, u32 prio,
-			      u32 index, u64 memcg_id)
+				      unsigned long handle, size_t size, u32 prio,
+				      u32 index, u64 memcg_id)
 {
 	struct zms_load_ref ref;
 	struct zms_io io;
@@ -2470,7 +2470,7 @@ static int zram_read_from_zms(struct zram *zram, struct page *page,
 	}
 
 	return zram_finish_zms_ref_read(zram, page, &ref, &io, handle, size,
-					prio, index, memcg_id);
+				       prio, index, memcg_id);
 }
 
 static void zram_zms_sync_read(struct work_struct *work)
@@ -2964,7 +2964,6 @@ static ssize_t zms_stat_show(struct device *dev,
 		"read_merge_hits: %lu\n"
 		"read_merge_mismatch: %lu\n"
 		"read_merge_failures: %lu\n"
-		"load_cache_hit_pct: %lu\n"
 		"alloc_blocks: %lu\n"
 		"alloc_run_successes: %lu\n"
 		"alloc_run_failures: %lu\n"
@@ -2998,7 +2997,6 @@ static ssize_t zms_stat_show(struct device *dev,
 		stats.read_merge_hits,
 		stats.read_merge_mismatch,
 		stats.read_merge_failures,
-		stats.load_cache_hit_pct,
 		stats.alloc_blocks,
 		stats.alloc_run_successes,
 		stats.alloc_run_failures,

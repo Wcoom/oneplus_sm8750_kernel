@@ -65,7 +65,6 @@ struct zms_stats {
 	unsigned long read_merge_hits;
 	unsigned long read_merge_mismatch;
 	unsigned long read_merge_failures;
-	unsigned long load_cache_hit_pct;
 	unsigned long empty_blocks;
 	unsigned long valid_classes;
 	unsigned long alloc_blocks;
@@ -111,7 +110,7 @@ int zms_load(struct zms *zms, unsigned long handle, void *dst, size_t *size,
 int zms_load_cached_ref(struct zms *zms, unsigned long handle,
 			struct zms_load_ref *ref, struct zms_io *io);
 int zms_load_ref(struct zms *zms, unsigned long handle, struct zms_load_ref *ref,
-		 gfp_t gfp, struct zms_io *io);
+			 gfp_t gfp, struct zms_io *io);
 void zms_put_ref(struct zms *zms, struct zms_load_ref *ref);
 int zms_load_batch(struct zms *zms, struct zms_load_item *items,
 		   unsigned int nr, gfp_t gfp, struct zms_io *io);

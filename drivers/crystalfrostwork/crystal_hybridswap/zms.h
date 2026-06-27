@@ -60,6 +60,7 @@ struct zms_stats {
 	unsigned long almost_full_blocks;
 	unsigned long full_blocks;
 	unsigned long dirty_blocks;
+	unsigned long dirty_pages;
 	unsigned long read_merge_waits;
 	unsigned long read_merge_wakeups;
 	unsigned long read_merge_hits;

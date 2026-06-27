@@ -2959,6 +2959,7 @@ static ssize_t zms_stat_show(struct device *dev,
 		"almost_full_blocks: %lu\n"
 		"full_blocks: %lu\n"
 		"dirty_blocks: %lu\n"
+		"dirty_pages: %lu\n"
 		"read_merge_waits: %lu\n"
 		"read_merge_wakeups: %lu\n"
 		"read_merge_hits: %lu\n"
@@ -2992,6 +2993,7 @@ static ssize_t zms_stat_show(struct device *dev,
 		stats.almost_full_blocks,
 		stats.full_blocks,
 		stats.dirty_blocks,
+		stats.dirty_pages,
 		stats.read_merge_waits,
 		stats.read_merge_wakeups,
 		stats.read_merge_hits,

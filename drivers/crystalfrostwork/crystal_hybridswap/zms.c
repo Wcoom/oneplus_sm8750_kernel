@@ -39,9 +39,14 @@
 #define ZMS_DIRTY_FLUSH_DELAY_MS	20U
 #define ZMS_HANDLE_LOCK_BITS		8
 #define ZMS_HANDLE_LOCKS		(1U << ZMS_HANDLE_LOCK_BITS)
-#define ZMS_PIN_FROZEN			(1 << 29)
+#define ZMS_PIN_DROP_DATA		(1 << 26)
+#define ZMS_PIN_DEFER_FREE		(1 << 27)
 #define ZMS_PIN_RELEASING		(1 << 28)
-#define ZMS_PIN_COUNT_MASK		(ZMS_PIN_RELEASING - 1)
+#define ZMS_PIN_FROZEN			(1 << 29)
+#define ZMS_PIN_COUNT_MASK		(ZMS_PIN_DROP_DATA - 1)
+#define ZMS_PIN_CLEANUP_MASK		(ZMS_PIN_DROP_DATA | ZMS_PIN_DEFER_FREE)
+#define ZMS_PIN_BLOCKED_MASK		(ZMS_PIN_CLEANUP_MASK | ZMS_PIN_RELEASING | \
+					 ZMS_PIN_FROZEN)
 
 enum zms_handle_flags {
 	ZMS_HANDLE_PENDING_FREE = BIT(0),
@@ -82,9 +87,7 @@ struct zms_block {
 	void *data;
 	bool dirty;
 	bool listed;
-	bool deferred_free;
 	bool reading;
-	bool drop_data;
 	int read_ret;
 	atomic_t pin_state;
 	struct list_head list;
@@ -238,7 +241,7 @@ static bool zms_block_ref_tryget(struct zms_block *block)
 
 	old = atomic_read(&block->pin_state);
 	for (;;) {
-		if (old & (ZMS_PIN_FROZEN | ZMS_PIN_RELEASING))
+		if (old & ZMS_PIN_BLOCKED_MASK)
 			return false;
 		if ((old & ZMS_PIN_COUNT_MASK) == ZMS_PIN_COUNT_MASK)
 			return false;
@@ -247,58 +250,59 @@ static bool zms_block_ref_tryget(struct zms_block *block)
 	}
 }
 
-static void zms_block_ref_put_locked(struct zms *zms, struct zms_block *block)
+static void zms_block_finish_releasing(struct zms *zms, struct zms_block *block)
 {
 	int old;
-	int new;
-	bool cleanup;
-	bool schedule_free;
 
 	old = atomic_read(&block->pin_state);
 	for (;;) {
-		if (WARN_ON_ONCE(!(old & ZMS_PIN_COUNT_MASK)))
-			return;
-		if (WARN_ON_ONCE(old & (ZMS_PIN_FROZEN | ZMS_PIN_RELEASING)))
-			return;
-		cleanup = (old & ZMS_PIN_COUNT_MASK) == 1 &&
-			(block->drop_data || block->deferred_free);
-		new = cleanup ? ZMS_PIN_RELEASING : old - 1;
-		if (atomic_try_cmpxchg(&block->pin_state, &old, new))
-			break;
-	}
-	if ((old & ZMS_PIN_COUNT_MASK) != 1 || !cleanup)
-		return;
+		int cleanup = old & ZMS_PIN_CLEANUP_MASK;
+		bool schedule_free = cleanup & ZMS_PIN_DEFER_FREE;
 
-	if (block->drop_data) {
-		if (WARN_ON_ONCE(block->dirty)) {
-			block->drop_data = false;
-		} else {
+		if (WARN_ON_ONCE(!(old & ZMS_PIN_RELEASING)))
+			return;
+		if (WARN_ON_ONCE(old & (ZMS_PIN_FROZEN | ZMS_PIN_COUNT_MASK)))
+			return;
+
+		if (cleanup & ZMS_PIN_DROP_DATA)
 			zms_block_data_clear(block);
-			block->drop_data = false;
+
+		if (atomic_try_cmpxchg(&block->pin_state, &old, 0)) {
+			wake_up_all(&block->read_wait);
+			if (schedule_free)
+				schedule_work(&zms->free_work);
+			return;
 		}
 	}
-	schedule_free = block->deferred_free;
-	block->deferred_free = false;
-	atomic_set(&block->pin_state, 0);
-	if (schedule_free)
-		schedule_work(&zms->free_work);
-	wake_up_all(&block->read_wait);
 }
 
-static bool zms_block_ref_put_fast(struct zms_block *block)
+static void zms_block_ref_put(struct zms *zms, struct zms_block *block)
 {
 	int old;
 
 	old = atomic_read(&block->pin_state);
 	for (;;) {
+		int cleanup = old & ZMS_PIN_CLEANUP_MASK;
+		int count = old & ZMS_PIN_COUNT_MASK;
+		int new;
+
 		if (WARN_ON_ONCE(!(old & ZMS_PIN_COUNT_MASK)))
-			return false;
+			return;
 		if (WARN_ON_ONCE(old & (ZMS_PIN_FROZEN | ZMS_PIN_RELEASING)))
-			return false;
-		if ((old & ZMS_PIN_COUNT_MASK) <= 1)
-			return false;
-		if (atomic_try_cmpxchg(&block->pin_state, &old, old - 1))
-			return true;
+			return;
+
+		if (count > 1)
+			new = old - 1;
+		else if (cleanup)
+			new = ZMS_PIN_RELEASING | cleanup;
+		else
+			new = 0;
+
+		if (atomic_try_cmpxchg(&block->pin_state, &old, new)) {
+			if (new & ZMS_PIN_RELEASING)
+				zms_block_finish_releasing(zms, block);
+			return;
+		}
 	}
 }
 
@@ -311,41 +315,68 @@ static bool zms_block_freeze(struct zms_block *block)
 
 static void zms_block_unfreeze(struct zms *zms, struct zms_block *block)
 {
-	if (WARN_ON_ONCE(atomic_read(&block->pin_state) != ZMS_PIN_FROZEN))
-		return;
-	if (block->drop_data) {
-		if (WARN_ON_ONCE(block->dirty)) {
-			block->drop_data = false;
-		} else {
-			zms_block_data_clear(block);
-			block->drop_data = false;
-		}
-	}
-	atomic_set(&block->pin_state, 0);
-	if (block->deferred_free) {
-		block->deferred_free = false;
-		schedule_work(&zms->free_work);
-	}
-	wake_up_all(&block->read_wait);
-}
+	int old;
+	int new;
 
-static void zms_block_begin_release(struct zms_block *block)
-{
-	int old = ZMS_PIN_FROZEN;
+	old = atomic_read(&block->pin_state);
+	for (;;) {
+		int cleanup = old & ZMS_PIN_CLEANUP_MASK;
 
-	if (WARN_ON_ONCE(!atomic_try_cmpxchg(&block->pin_state, &old,
-					     ZMS_PIN_RELEASING)))
-		return;
+		if (WARN_ON_ONCE(!(old & ZMS_PIN_FROZEN)))
+			return;
+		if (WARN_ON_ONCE(old & (ZMS_PIN_RELEASING | ZMS_PIN_COUNT_MASK)))
+			return;
+
+		new = cleanup ? ZMS_PIN_RELEASING | cleanup : 0;
+		if (atomic_try_cmpxchg(&block->pin_state, &old, new))
+			break;
+	}
+
+	if (new & ZMS_PIN_RELEASING)
+		zms_block_finish_releasing(zms, block);
+	else
+		wake_up_all(&block->read_wait);
 }
 
 static bool zms_block_frozen(const struct zms_block *block)
 {
-	return atomic_read(&block->pin_state) == ZMS_PIN_FROZEN;
+	return atomic_read(&block->pin_state) & ZMS_PIN_FROZEN;
 }
 
 static bool zms_block_pinned(const struct zms_block *block)
 {
 	return atomic_read(&block->pin_state) != 0;
+}
+
+static void zms_block_request_cleanup(struct zms *zms, struct zms_block *block,
+				      int flags)
+{
+	int old;
+	int new;
+
+	if (WARN_ON_ONCE(flags & ~ZMS_PIN_CLEANUP_MASK))
+		flags &= ZMS_PIN_CLEANUP_MASK;
+	if (WARN_ON_ONCE(!flags))
+		return;
+
+	old = atomic_read(&block->pin_state);
+	for (;;) {
+		if (old & ZMS_PIN_RELEASING) {
+			new = old | flags;
+		} else if (old & ZMS_PIN_FROZEN) {
+			new = old | flags;
+		} else if (old & ZMS_PIN_COUNT_MASK) {
+			new = old | flags;
+		} else {
+			new = ZMS_PIN_RELEASING | flags;
+		}
+
+		if (atomic_try_cmpxchg(&block->pin_state, &old, new))
+			break;
+	}
+
+	if (new & ZMS_PIN_RELEASING && !(old & ZMS_PIN_RELEASING))
+		zms_block_finish_releasing(zms, block);
 }
 
 static void *zms_block_data_load(const struct zms_block *block)
@@ -414,29 +445,15 @@ static int zms_read_block(struct zms *zms, struct zms_block *block,
 static void zms_release_block_data_locked(struct zms *zms,
 					  struct zms_block *block)
 {
-	bool frozen;
-
 	if (WARN_ON_ONCE(block->dirty))
 		return;
 
-	frozen = zms_block_frozen(block);
-	if (zms_block_pinned(block)) {
-		if (frozen) {
-			zms_block_data_clear(block);
-			block->drop_data = false;
-		} else {
-			block->drop_data = true;
-		}
+	if (zms_block_frozen(block)) {
+		zms_block_data_clear(block);
 		return;
 	}
 
-	if (!zms_block_freeze(block)) {
-		block->drop_data = true;
-		return;
-	}
-	zms_block_data_clear(block);
-	block->drop_data = false;
-	zms_block_unfreeze(zms, block);
+	zms_block_request_cleanup(zms, block, ZMS_PIN_DROP_DATA);
 }
 
 static void zms_wait_read_done(struct zms_class *class, struct zms_block *block)
@@ -1325,7 +1342,6 @@ static bool zms_free_empty_block_locked(struct zms *zms, struct zms_class *class
 	zms_remove_block_locked(zms, class, block);
 	for (i = 0; i < block->pages; i++)
 		zms_free_disk_block(zms, block->blocks[i]);
-	zms_block_begin_release(block);
 	zms_free_block(zms, block);
 	return true;
 }
@@ -1466,6 +1482,8 @@ static int zms_free_handle(struct zms *zms, unsigned long handle)
 	struct zms_class *class;
 	struct zms_block *block;
 	unsigned long flags;
+	unsigned int class_size;
+	bool request_free;
 
 	if (!handle || handle > zms->nr_handles)
 		return -EINVAL;
@@ -1486,16 +1504,23 @@ static int zms_free_handle(struct zms *zms, unsigned long handle)
 	}
 	if (!zms_block_freeze(entry->block)) {
 		block = entry->block;
+		class_size = block->class_size;
 		spin_unlock_irqrestore(zms_handle_lock(zms, handle), flags);
 
-		class = zms_class_for_size(zms, block->class_size);
+		class = zms_class_for_size(zms, class_size);
 		if (WARN_ON_ONCE(!class))
 			return -EIO;
 
 		mutex_lock(&class->lock);
-		block->deferred_free = true;
-		if (!zms_block_pinned(block))
-			schedule_work(&zms->free_work);
+		request_free = false;
+		spin_lock_irqsave(zms_handle_lock(zms, handle), flags);
+		entry = &zms->handles[handle];
+		if (entry->block == block &&
+		    (entry->flags & ZMS_HANDLE_PENDING_FREE))
+			request_free = true;
+		spin_unlock_irqrestore(zms_handle_lock(zms, handle), flags);
+		if (request_free)
+			zms_block_request_cleanup(zms, block, ZMS_PIN_DEFER_FREE);
 		mutex_unlock(&class->lock);
 		return -EAGAIN;
 	}
@@ -2181,17 +2206,7 @@ int zms_load(struct zms *zms, unsigned long handle, void *dst, size_t *size,
 
 static void zms_put_block_ref(struct zms *zms, struct zms_block *block)
 {
-	struct zms_class *class;
-
-	if (zms_block_ref_put_fast(block))
-		return;
-
-	class = zms_class_for_size(zms, block->class_size);
-	if (WARN_ON_ONCE(!class))
-		return;
-	mutex_lock(&class->lock);
-	zms_block_ref_put_locked(zms, block);
-	mutex_unlock(&class->lock);
+	zms_block_ref_put(zms, block);
 }
 
 static int zms_try_load_cached_ref(struct zms *zms, unsigned long handle,
@@ -2286,7 +2301,7 @@ retry:
 	block = snapshot.block;
 	class = zms_class_for_size(zms, block->class_size);
 	if (WARN_ON_ONCE(!class)) {
-		zms_block_ref_put_locked(zms, block);
+		zms_block_ref_put(zms, block);
 		return -EIO;
 	}
 
@@ -2295,7 +2310,7 @@ retry:
 		data = zms_block_data_load(block);
 		if (data) {
 			if (!zms_handle_matches_snapshot(zms, handle, &snapshot)) {
-				zms_block_ref_put_locked(zms, block);
+				zms_block_ref_put(zms, block);
 				mutex_unlock(&class->lock);
 				return -ENOENT;
 			}
@@ -2315,7 +2330,7 @@ retry:
 		ret = block->read_ret;
 		if (ret) {
 			atomic_long_inc(&zms->read_merge_failures);
-			zms_block_ref_put_locked(zms, block);
+			zms_block_ref_put(zms, block);
 			mutex_unlock(&class->lock);
 			return ret;
 		}
@@ -2324,7 +2339,7 @@ retry:
 		if (!data ||
 		    !zms_handle_matches_snapshot(zms, handle, &snapshot)) {
 			atomic_long_inc(&zms->read_merge_mismatch);
-			zms_block_ref_put_locked(zms, block);
+			zms_block_ref_put(zms, block);
 			mutex_unlock(&class->lock);
 			return -ENOENT;
 		}
@@ -2369,7 +2384,7 @@ retry:
 
 out_unpin:
 	if (owner)
-		zms_block_ref_put_locked(zms, block);
+		zms_block_ref_put(zms, block);
 	mutex_unlock(&class->lock);
 
 	if (ret == -EBUSY)
@@ -2430,7 +2445,6 @@ int zms_peek_neighbors(struct zms *zms, unsigned long handle,
 		       unsigned long *handles, unsigned int max_handles)
 {
 	struct zms_load_snapshot snapshot;
-	struct zms_class *class;
 	struct zms_block *block;
 	unsigned int found = 0;
 	unsigned int slot;
@@ -2444,16 +2458,8 @@ int zms_peek_neighbors(struct zms *zms, unsigned long handle,
 		return ret;
 
 	block = snapshot.block;
-	class = zms_class_for_size(zms, block->class_size);
-	if (WARN_ON_ONCE(!class)) {
-		zms_block_ref_put_locked(zms, block);
-		return -EIO;
-	}
-
-	mutex_lock(&class->lock);
 	if (block->fullness == ZMS_FG_LOW || block->fullness == ZMS_FG_MID) {
-		zms_block_ref_put_locked(zms, block);
-		mutex_unlock(&class->lock);
+		zms_block_ref_put(zms, block);
 		return 0;
 	}
 
@@ -2469,8 +2475,7 @@ int zms_peek_neighbors(struct zms *zms, unsigned long handle,
 
 		handles[found++] = neighbor;
 	}
-	zms_block_ref_put_locked(zms, block);
-	mutex_unlock(&class->lock);
+	zms_block_ref_put(zms, block);
 
 	return found;
 }

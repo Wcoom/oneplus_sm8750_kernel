@@ -208,12 +208,19 @@ void crystal_hybridswap_stats_show(struct seq_file *m)
 		   zram_io_stats.prefetch_expired);
 	seq_printf(m, "zram_prefetch_reclaimed: %llu\n",
 		   zram_io_stats.prefetch_reclaimed);
-	seq_printf(m, "zram_prefetch_invalidated: %llu\n",
-		   zram_io_stats.prefetch_invalidated);
-	seq_printf(m, "zram_prefetch_errors: %llu\n",
-		   zram_io_stats.prefetch_read_errors +
-		   zram_io_stats.prefetch_prepare_errors +
-		   zram_io_stats.prefetch_snapshot_mismatch +
+		seq_printf(m, "zram_prefetch_invalidated: %llu\n",
+			   zram_io_stats.prefetch_invalidated);
+		seq_printf(m, "zram_prefetch_read_errors: %llu\n",
+			   zram_io_stats.prefetch_read_errors);
+		seq_printf(m, "zram_prefetch_prepare_errors: %llu\n",
+			   zram_io_stats.prefetch_prepare_errors);
+		seq_printf(m, "zram_prefetch_snapshot_mismatch: %llu\n",
+			   zram_io_stats.prefetch_snapshot_mismatch);
+		seq_printf(m, "zram_prefetch_alloc_failures: %llu\n",
+			   zram_io_stats.prefetch_alloc_failures);
+		seq_printf(m, "zram_prefetch_errors: %llu\n",
+			   zram_io_stats.prefetch_read_errors +
+			   zram_io_stats.prefetch_prepare_errors +
 		   zram_io_stats.prefetch_alloc_failures);
 	seq_printf(m, "zram_io_scan_errors_count: %llu\n",
 		   zram_io_stats.scan_errors_count);

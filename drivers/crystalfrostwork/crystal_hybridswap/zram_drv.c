@@ -3590,6 +3590,21 @@ static bool zram_wb_snapshot_matches(struct zram *zram, u32 index,
 	return zram_snapshot_flags(zram, index) == snapshot->flags;
 }
 
+static bool zram_prefetch_snapshot_matches(struct zram *zram, u32 index,
+		const struct zram_wb_snapshot *snapshot)
+{
+	if (!zram_test_flag(zram, index, ZRAM_WB) ||
+	    zram_test_flag(zram, index, ZRAM_UNDER_WB))
+		return false;
+	if (zram_get_element(zram, index) != snapshot->element)
+		return false;
+	if (zram_get_obj_size(zram, index) != snapshot->size)
+		return false;
+	if (zram->table[index].memcg_id != snapshot->memcg_id)
+		return false;
+	return zram_snapshot_flags(zram, index) == snapshot->flags;
+}
+
 static int zram_batchin_flush_items(struct zram *zram,
 		struct zram_batchin_item *items, struct zms_load_item *loads,
 		unsigned int count, struct page *page, u64 target_cgroup_id,
@@ -3690,13 +3705,90 @@ clear_remaining:
 	return first_err;
 }
 
-static int zram_batchin_selected_items(struct zram *zram,
-				       struct zram_batchin_item *items,
-				       unsigned int count, unsigned long *moved,
-				       unsigned long *skipped,
-				       unsigned long *read_errors,
-				       unsigned long *prepare_errors,
-				       unsigned long *snapshot_mismatch)
+static int zram_prefetch_flush_items(struct zram *zram,
+		struct zram_batchin_item *items, struct zms_load_item *loads,
+		unsigned int count, struct page *page, unsigned long *moved,
+		unsigned long *skipped, unsigned long *read_errors,
+		unsigned long *prepare_errors, unsigned long *snapshot_mismatch)
+{
+	unsigned int i;
+	int ret;
+	int first_err = 0;
+	struct zms_io io;
+
+	if (!count)
+		return 0;
+
+	ret = zms_load_batch(zram->zms, loads, count, GFP_NOIO, &io);
+	zram_record_zms_io(zram, items[0].index, &io);
+	if (ret)
+		first_err = ret;
+
+	for (i = 0; i < count; i++) {
+		int err = loads[i].ret;
+
+		if (err == -ENOENT) {
+			(*skipped)++;
+			continue;
+		}
+		if (!err)
+			err = zram_decode_zms_payload(zram, page,
+						      loads[i].dst,
+						      loads[i].loaded_size,
+						      loads[i].expected_size,
+						      items[i].prio);
+		if (err) {
+			if (!first_err)
+				first_err = err;
+			(*read_errors)++;
+			chs_log_ratelimited(CHS_LOG_ERR,
+				"prefetch read error dev=%s index=%lu handle=%lu ret=%d\n",
+				zram->disk ? zram->disk->disk_name : "unknown",
+				items[i].index, items[i].snapshot.element, err);
+			continue;
+		}
+
+		err = zram_prepare_page(zram, page, &items[i].prep);
+		if (err) {
+			if (!first_err)
+				first_err = err;
+			(*prepare_errors)++;
+			chs_log_ratelimited(CHS_LOG_ERR,
+				"prefetch compress error dev=%s index=%lu handle=%lu ret=%d\n",
+				zram->disk ? zram->disk->disk_name : "unknown",
+				items[i].index, items[i].snapshot.element, err);
+			continue;
+		}
+
+		zram_slot_lock(zram, items[i].index);
+		if (!zram_prefetch_snapshot_matches(zram, items[i].index,
+						    &items[i].snapshot)) {
+			zram_slot_unlock(zram, items[i].index);
+			zram_cleanup_prepared_page(zram, &items[i].prep);
+			(*snapshot_mismatch)++;
+			(*skipped)++;
+			continue;
+		}
+
+		zram_commit_prepared_page(zram, items[i].index, &items[i].prep,
+					  items[i].memcg_id);
+		zram_set_prefetched(zram, items[i].index);
+		zram_slot_unlock(zram, items[i].index);
+		atomic64_inc(&zram->stats.bd_reads);
+		(*moved)++;
+		cond_resched();
+	}
+
+	return first_err;
+}
+
+static int zram_prefetch_selected_items(struct zram *zram,
+					struct zram_batchin_item *items,
+					unsigned int count, unsigned long *moved,
+					unsigned long *skipped,
+					unsigned long *read_errors,
+					unsigned long *prepare_errors,
+					unsigned long *snapshot_mismatch)
 {
 	struct zms_load_item loads[ZRAM_ZMS_PREFETCH_MAX];
 	void *payloads;
@@ -3706,22 +3798,14 @@ static int zram_batchin_selected_items(struct zram *zram,
 
 	if (!count)
 		return -ENODATA;
-	if (WARN_ON_ONCE(count > ZRAM_ZMS_PREFETCH_MAX)) {
-		for (i = 0; i < count; i++)
-			zram_clear_under_wb(zram, items[i].index);
+	if (WARN_ON_ONCE(count > ZRAM_ZMS_PREFETCH_MAX))
 		return -EINVAL;
-	}
 
 	page = alloc_page(GFP_NOIO);
-	if (!page) {
-		for (i = 0; i < count; i++)
-			zram_clear_under_wb(zram, items[i].index);
+	if (!page)
 		return -ENOMEM;
-	}
 	payloads = kvmalloc_array(count, PAGE_SIZE, GFP_NOIO);
 	if (!payloads) {
-		for (i = 0; i < count; i++)
-			zram_clear_under_wb(zram, items[i].index);
 		__free_page(page);
 		return -ENOMEM;
 	}
@@ -3733,10 +3817,9 @@ static int zram_batchin_selected_items(struct zram *zram,
 		loads[i].expected_size = items[i].snapshot.size;
 	}
 
-	ret = zram_batchin_flush_items(zram, items, loads, count, page, 0,
-				       moved, skipped, read_errors,
-				       prepare_errors, snapshot_mismatch, false,
-				       true);
+	ret = zram_prefetch_flush_items(zram, items, loads, count, page, moved,
+				       skipped, read_errors, prepare_errors,
+				       snapshot_mismatch);
 	kvfree(payloads);
 	__free_page(page);
 	return ret;
@@ -3753,21 +3836,16 @@ static void zram_zms_prefetch_workfn(struct work_struct *work)
 	unsigned long prepare_errors = 0;
 	unsigned long snapshot_mismatch = 0;
 	int ret = -ENODEV;
-	unsigned int i;
 
 	atomic64_inc(&zram->stats.prefetch_runs);
 	down_read(&zram->init_lock);
 	if (init_done(zram) && zram->zms && !crystal_hybridswap_system_sleeping())
-		ret = zram_batchin_selected_items(zram, prefetch->items,
-						  prefetch->count, &moved,
-						  &skipped, &read_errors,
-						  &prepare_errors,
-						  &snapshot_mismatch);
+		ret = zram_prefetch_selected_items(zram, prefetch->items,
+						   prefetch->count, &moved,
+						   &skipped, &read_errors,
+						   &prepare_errors,
+						   &snapshot_mismatch);
 	else {
-		if (init_done(zram) && zram->zms) {
-			for (i = 0; i < prefetch->count; i++)
-				zram_clear_under_wb(zram, prefetch->items[i].index);
-		}
 		skipped = prefetch->count;
 	}
 	up_read(&zram->init_lock);
@@ -3809,7 +3887,6 @@ static bool zram_zms_prefetch_prepare_item(struct zram *zram,
 	item->index = index;
 	item->memcg_id = zram->table[index].memcg_id;
 	item->prio = zram_get_priority(zram, index);
-	zram_set_flag(zram, index, ZRAM_UNDER_WB);
 	zram_take_wb_snapshot(zram, index, &item->snapshot);
 	ok = true;
 
@@ -3899,8 +3976,6 @@ static void zram_zms_maybe_prefetch(struct zram *zram, u32 index,
 		return;
 	}
 	if (!zram_try_get(zram)) {
-		for (i = 0; i < prefetch->count; i++)
-			zram_clear_under_wb(zram, prefetch->items[i].index);
 		kfree(prefetch);
 		up_read(&zram->init_lock);
 		return;

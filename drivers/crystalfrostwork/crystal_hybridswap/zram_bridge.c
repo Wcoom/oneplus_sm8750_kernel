@@ -456,10 +456,17 @@ static ssize_t hybridswap_crystal_stat_show(struct device *dev,
 				 zram_io_stats.prefetch_reclaimed);
 	ret += sysfs_emit_at(buf, ret, "zram_prefetch_invalidated %llu\n",
 				 zram_io_stats.prefetch_invalidated);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_read_errors %llu\n",
+				 zram_io_stats.prefetch_read_errors);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_prepare_errors %llu\n",
+				 zram_io_stats.prefetch_prepare_errors);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_snapshot_mismatch %llu\n",
+				 zram_io_stats.prefetch_snapshot_mismatch);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_alloc_failures %llu\n",
+				 zram_io_stats.prefetch_alloc_failures);
 	ret += sysfs_emit_at(buf, ret, "zram_prefetch_errors %llu\n",
 				 zram_io_stats.prefetch_read_errors +
 				 zram_io_stats.prefetch_prepare_errors +
-				 zram_io_stats.prefetch_snapshot_mismatch +
 				 zram_io_stats.prefetch_alloc_failures);
 	ret += sysfs_emit_at(buf, ret, "zram_io_scan_errors_count %llu\n",
 				 zram_io_stats.scan_errors_count);

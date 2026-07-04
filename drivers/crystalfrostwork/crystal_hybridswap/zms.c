@@ -16,6 +16,7 @@
 #include <linux/kernel.h>
 #include <linux/ktime.h>
 #include <linux/list.h>
+#include <linux/math64.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -37,6 +38,7 @@
 #define ZMS_STAT_COUNTER_BATCH		32
 #define ZMS_DIRTY_HARD_MAX_PAGES	(SZ_32M >> PAGE_SHIFT)
 #define ZMS_DIRTY_FLUSH_DELAY_MS	20U
+#define ZMS_CLEAN_CACHE_MAX_PAGES	(SZ_16M >> PAGE_SHIFT)
 #define ZMS_HANDLE_LOCK_BITS		8
 #define ZMS_HANDLE_LOCKS		(1U << ZMS_HANDLE_LOCK_BITS)
 #define ZMS_PIN_DROP_DATA		(1 << 26)
@@ -88,9 +90,12 @@ struct zms_block {
 	bool dirty;
 	bool listed;
 	bool reading;
+	bool clean_cached;
+	bool clean_referenced;
 	int read_ret;
 	atomic_t pin_state;
 	struct list_head list;
+	struct list_head clean_node;
 	wait_queue_head_t read_wait;
 	unsigned long blocks[];
 };
@@ -142,6 +147,8 @@ struct zms {
 	atomic_long_t read_merge_hits;
 	atomic_long_t read_merge_mismatch;
 	atomic_long_t read_merge_failures;
+	atomic_long_t load_resident_hits;
+	atomic_long_t load_disk_misses;
 	atomic_long_t alloc_run_success_pages;
 	atomic_long_t alloc_run_partial_pages;
 	atomic_long_t alloc_run_fallback_pages;
@@ -149,6 +156,10 @@ struct zms {
 	atomic_long_t valid_classes;
 	spinlock_t pending_lock;
 	spinlock_t alloc_lock;
+	spinlock_t clean_lock;
+	struct list_head clean_lru;
+	unsigned long clean_cache_pages;
+	unsigned long clean_cache_max_pages;
 	spinlock_t handle_locks[ZMS_HANDLE_LOCKS];
 	struct work_struct free_work;
 	struct delayed_work flush_work;
@@ -233,7 +244,8 @@ static bool zms_handle_active(const struct zms_handle_entry *entry)
 
 static void *zms_block_data_load(const struct zms_block *block);
 static void zms_block_data_publish(struct zms_block *block, void *data);
-static void zms_block_data_clear(struct zms_block *block);
+static void zms_block_data_clear(struct zms *zms, struct zms_block *block);
+static void zms_clean_cache_del(struct zms *zms, struct zms_block *block);
 
 static bool zms_block_ref_tryget(struct zms_block *block)
 {
@@ -265,7 +277,7 @@ static void zms_block_finish_releasing(struct zms *zms, struct zms_block *block)
 			return;
 
 		if (cleanup & ZMS_PIN_DROP_DATA)
-			zms_block_data_clear(block);
+			zms_block_data_clear(zms, block);
 
 		if (atomic_try_cmpxchg(&block->pin_state, &old, 0)) {
 			wake_up_all(&block->read_wait);
@@ -389,12 +401,13 @@ static void zms_block_data_publish(struct zms_block *block, void *data)
 	smp_store_release(&block->data, data);
 }
 
-static void zms_block_data_clear(struct zms_block *block)
+static void zms_block_data_clear(struct zms *zms, struct zms_block *block)
 {
 	void *data = zms_block_data_load(block);
 
 	if (!data)
 		return;
+	zms_clean_cache_del(zms, block);
 	zms_block_data_publish(block, NULL);
 	kvfree(data);
 }
@@ -442,18 +455,145 @@ static int zms_flush_to(struct zms *zms, unsigned long target_pages,
 static int zms_read_block(struct zms *zms, struct zms_block *block,
 			  gfp_t gfp, struct zms_io *io);
 
+static bool zms_clean_cache_eligible(const struct zms_block *block)
+{
+	if (!block || block->dirty || !block->used || !zms_block_data_load(block))
+		return false;
+
+	return block->fullness == ZMS_FG_FULL ||
+	       block->fullness == ZMS_FG_ALMOST_FULL;
+}
+
+static void zms_clean_cache_del(struct zms *zms, struct zms_block *block)
+{
+	unsigned long flags;
+
+	if (!block || !READ_ONCE(block->clean_cached))
+		return;
+
+	spin_lock_irqsave(&zms->clean_lock, flags);
+	if (READ_ONCE(block->clean_cached)) {
+		list_del_init(&block->clean_node);
+		WRITE_ONCE(block->clean_cached, false);
+		WRITE_ONCE(block->clean_referenced, false);
+		if (zms->clean_cache_pages >= block->pages)
+			WRITE_ONCE(zms->clean_cache_pages,
+				   zms->clean_cache_pages - block->pages);
+		else
+			WRITE_ONCE(zms->clean_cache_pages, 0);
+	}
+	spin_unlock_irqrestore(&zms->clean_lock, flags);
+}
+
+static bool zms_clean_cache_add(struct zms *zms, struct zms_block *block)
+{
+	unsigned long flags;
+
+	if (!zms_clean_cache_eligible(block))
+		return false;
+
+	spin_lock_irqsave(&zms->clean_lock, flags);
+	if (!zms_clean_cache_eligible(block)) {
+		spin_unlock_irqrestore(&zms->clean_lock, flags);
+		return false;
+	}
+	if (READ_ONCE(block->clean_cached)) {
+		WRITE_ONCE(block->clean_referenced, true);
+		spin_unlock_irqrestore(&zms->clean_lock, flags);
+		return false;
+	}
+
+	WRITE_ONCE(block->clean_cached, true);
+	WRITE_ONCE(block->clean_referenced, false);
+	list_add(&block->clean_node, &zms->clean_lru);
+	WRITE_ONCE(zms->clean_cache_pages,
+		   zms->clean_cache_pages + block->pages);
+	spin_unlock_irqrestore(&zms->clean_lock, flags);
+	return true;
+}
+
+static void zms_clean_cache_touch(struct zms_block *block)
+{
+	if (!block || !READ_ONCE(block->clean_cached))
+		return;
+
+	WRITE_ONCE(block->clean_referenced, true);
+}
+
+static void zms_clean_cache_shrink(struct zms *zms, unsigned long max_pages)
+{
+	unsigned int scanned = 0;
+
+	while (READ_ONCE(zms->clean_cache_pages) > max_pages &&
+	       scanned++ < ZMS_FLUSH_PINNED_RETRY_MAX) {
+		struct zms_block *block;
+		unsigned long flags;
+
+		spin_lock_irqsave(&zms->clean_lock, flags);
+		if (list_empty(&zms->clean_lru)) {
+			spin_unlock_irqrestore(&zms->clean_lock, flags);
+			return;
+		}
+		block = list_last_entry(&zms->clean_lru, struct zms_block,
+					clean_node);
+		if (READ_ONCE(block->clean_referenced)) {
+			WRITE_ONCE(block->clean_referenced, false);
+			list_move(&block->clean_node, &zms->clean_lru);
+			spin_unlock_irqrestore(&zms->clean_lock, flags);
+			continue;
+		}
+		if (!zms_block_freeze(block)) {
+			list_move(&block->clean_node, &zms->clean_lru);
+			spin_unlock_irqrestore(&zms->clean_lock, flags);
+			continue;
+		}
+
+		list_del_init(&block->clean_node);
+		WRITE_ONCE(block->clean_cached, false);
+		WRITE_ONCE(block->clean_referenced, false);
+		if (zms->clean_cache_pages >= block->pages)
+			WRITE_ONCE(zms->clean_cache_pages,
+				   zms->clean_cache_pages - block->pages);
+		else
+			WRITE_ONCE(zms->clean_cache_pages, 0);
+		spin_unlock_irqrestore(&zms->clean_lock, flags);
+
+		if (!block->dirty)
+			zms_block_data_clear(zms, block);
+		zms_block_unfreeze(zms, block);
+	}
+}
+
+static void zms_drop_block_data_locked(struct zms *zms, struct zms_block *block)
+{
+	if (!block || !zms_block_data_load(block))
+		return;
+
+	zms_clean_cache_del(zms, block);
+	if (zms_block_frozen(block)) {
+		zms_block_data_clear(zms, block);
+		return;
+	}
+
+	zms_block_request_cleanup(zms, block, ZMS_PIN_DROP_DATA);
+}
+
 static void zms_release_block_data_locked(struct zms *zms,
 					  struct zms_block *block)
 {
 	if (WARN_ON_ONCE(block->dirty))
 		return;
 
-	if (zms_block_frozen(block)) {
-		zms_block_data_clear(block);
+	if (!zms_block_data_load(block))
+		return;
+
+	if (zms_clean_cache_eligible(block)) {
+		if (zms_clean_cache_add(zms, block))
+			zms_clean_cache_shrink(zms, zms->clean_cache_max_pages);
 		return;
 	}
 
-	zms_block_request_cleanup(zms, block, ZMS_PIN_DROP_DATA);
+	zms_drop_block_data_locked(zms, block);
 }
 
 static void zms_wait_read_done(struct zms_class *class, struct zms_block *block)
@@ -1081,7 +1221,11 @@ static void zms_free_disk_block(struct zms *zms, unsigned long block)
 
 static void zms_mark_dirty_locked(struct zms *zms, struct zms_block *block)
 {
-	if (!block || block->dirty)
+	if (!block)
+		return;
+
+	zms_clean_cache_del(zms, block);
+	if (block->dirty)
 		return;
 
 	zms_stat_add(zms, ZMS_STAT_DIRTY_BLOCKS, 1);
@@ -1106,6 +1250,7 @@ static void zms_free_block(struct zms *zms, struct zms_block *block)
 	if (!block)
 		return;
 
+	zms_clean_cache_del(zms, block);
 	zms_clear_dirty_locked(zms, block);
 	kvfree(block->bitmap);
 	kvfree(block->slot_handles);
@@ -1221,6 +1366,7 @@ static struct zms_block *zms_alloc_block_locked(struct zms *zms,
 	if (!block)
 		return NULL;
 
+	INIT_LIST_HEAD(&block->clean_node);
 	block->pages = class->pages_per_zspage;
 	block->slots = class->slots_per_zspage;
 	bitmap_size = BITS_TO_LONGS(block->slots) * sizeof(unsigned long);
@@ -1560,6 +1706,7 @@ static int zms_free_handle(struct zms *zms, unsigned long handle)
 	spin_unlock_irqrestore(zms_handle_lock(zms, handle), flags);
 	zms_pending_stat_dec_if_set(zms, handle);
 
+	zms_clean_cache_del(zms, block);
 	__clear_bit(snapshot.slot, block->bitmap);
 	block->slot_handles[snapshot.slot] = 0;
 	zms_stat_add(zms, ZMS_STAT_OBJECTS, -1);
@@ -1575,6 +1722,8 @@ static int zms_free_handle(struct zms *zms, unsigned long handle)
 		}
 	} else {
 		zms_fix_fullness_locked(zms, class, block);
+		if (!block->dirty)
+			zms_release_block_data_locked(zms, block);
 		zms_block_unfreeze(zms, block);
 	}
 	mutex_unlock(&class->lock);
@@ -1661,6 +1810,8 @@ static int zms_move_slot_locked(struct zms *zms, struct zms_class *class,
 	ret = zms_read_frozen_block_unlocked(zms, class, target, gfp, io);
 	if (ret)
 		goto out_unpin;
+	zms_clean_cache_del(zms, source);
+	zms_clean_cache_del(zms, target);
 	source_data = zms_block_data_load(source);
 	target_data = zms_block_data_load(target);
 	if (WARN_ON_ONCE(!source_data || !target_data)) {
@@ -1770,7 +1921,7 @@ static int zms_compact_class_locked(struct zms *zms, struct zms_class *class,
 				return -EAGAIN;
 		} else {
 			if (!source->dirty)
-				zms_release_block_data_locked(zms, source);
+				zms_drop_block_data_locked(zms, source);
 			break;
 		}
 	}
@@ -1835,6 +1986,9 @@ struct zms *zms_create(struct block_device *bdev, unsigned long nr_blocks,
 	zms->next_block = ZMS_BLOCK_RESERVED;
 	spin_lock_init(&zms->pending_lock);
 	spin_lock_init(&zms->alloc_lock);
+	spin_lock_init(&zms->clean_lock);
+	INIT_LIST_HEAD(&zms->clean_lru);
+	zms->clean_cache_max_pages = ZMS_CLEAN_CACHE_MAX_PAGES;
 	INIT_WORK(&zms->free_work, zms_free_workfn);
 	INIT_DELAYED_WORK(&zms->flush_work, zms_flush_workfn);
 	zms_init_dirty_watermarks(zms);
@@ -1997,6 +2151,8 @@ void zms_destroy(struct zms *zms)
 
 int zms_get_stats(struct zms *zms, struct zms_stats *stats)
 {
+	u64 load_total;
+
 	if (!zms || !stats)
 		return -EINVAL;
 
@@ -2044,6 +2200,13 @@ int zms_get_stats(struct zms *zms, struct zms_stats *stats)
 		atomic_long_read(&zms->reclaim_before_alloc_calls);
 	stats->reclaim_before_alloc_handles =
 		atomic_long_read(&zms->reclaim_before_alloc_handles);
+	stats->load_resident_hits = atomic_long_read(&zms->load_resident_hits);
+	stats->load_disk_misses = atomic_long_read(&zms->load_disk_misses);
+	load_total = (u64)stats->load_resident_hits + stats->load_disk_misses;
+	if (load_total)
+		stats->load_resident_hit_pct =
+			div64_u64((u64)stats->load_resident_hits * 100,
+				  load_total);
 	stats->used_blocks = zms_stat_read_positive(zms, ZMS_STAT_USED_BLOCKS);
 	stats->pending_free = zms_stat_read_positive(zms, ZMS_STAT_PENDING_FREE);
 	stats->objects = zms_stat_read_positive(zms, ZMS_STAT_OBJECTS);
@@ -2124,6 +2287,7 @@ retry:
 		mutex_unlock(&class->lock);
 		return ret;
 	}
+	zms_clean_cache_del(zms, block);
 
 	slot = find_first_zero_bit(block->bitmap, block->slots);
 	if (WARN_ON_ONCE(slot >= block->slots)) {
@@ -2210,12 +2374,13 @@ static void zms_put_block_ref(struct zms *zms, struct zms_block *block)
 }
 
 static int zms_try_load_cached_ref(struct zms *zms, unsigned long handle,
-				   struct zms_load_ref *ref)
+				   struct zms_load_ref *ref, bool account_load)
 {
 	struct zms_handle_entry *entry;
 	struct zms_block *block = NULL;
 	unsigned long flags;
 	void *data;
+	bool clean_cached = false;
 	bool put = false;
 	int ret = 0;
 
@@ -2236,15 +2401,22 @@ static int zms_try_load_cached_ref(struct zms *zms, unsigned long handle,
 	data = zms_block_data_load(block);
 	if (!data) {
 		put = true;
+		if (account_load)
+			atomic_long_inc(&zms->load_disk_misses);
 		ret = -EAGAIN;
 		goto out;
 	}
+	clean_cached = READ_ONCE(block->clean_cached);
 
 	ref->data = (char *)data + entry->offset;
 	ref->size = entry->size;
 	ref->private = block;
+	if (account_load)
+		atomic_long_inc(&zms->load_resident_hits);
 out:
 	spin_unlock_irqrestore(zms_handle_lock(zms, handle), flags);
+	if (!ret && clean_cached)
+		zms_clean_cache_touch(block);
 	if (put)
 		zms_put_block_ref(zms, block);
 	return ret;
@@ -2267,7 +2439,7 @@ int zms_load_cached_ref(struct zms *zms, unsigned long handle,
 		return -EINVAL;
 	memset(ref, 0, sizeof(*ref));
 
-	return zms_try_load_cached_ref(zms, handle, ref);
+	return zms_try_load_cached_ref(zms, handle, ref, true);
 }
 
 int zms_load_ref(struct zms *zms, unsigned long handle, struct zms_load_ref *ref,
@@ -2278,6 +2450,7 @@ int zms_load_ref(struct zms *zms, unsigned long handle, struct zms_load_ref *ref
 	struct zms_block *block;
 	void *data;
 	bool owner = false;
+	bool shrink_clean_cache = false;
 	int ret;
 
 	zms_io_clear(io);
@@ -2285,7 +2458,7 @@ int zms_load_ref(struct zms *zms, unsigned long handle, struct zms_load_ref *ref
 		return -EINVAL;
 	memset(ref, 0, sizeof(*ref));
 
-	ret = zms_try_load_cached_ref(zms, handle, ref);
+	ret = zms_try_load_cached_ref(zms, handle, ref, false);
 	if (!ret || ret != -EAGAIN)
 		return ret;
 
@@ -2379,6 +2552,7 @@ retry:
 		ref->data = (char *)data + snapshot.offset;
 		ref->size = snapshot.size;
 		ref->private = block;
+		shrink_clean_cache = zms_clean_cache_add(zms, block);
 		owner = false;
 	}
 
@@ -2389,6 +2563,8 @@ out_unpin:
 
 	if (ret == -EBUSY)
 		goto retry;
+	if (!ret && shrink_clean_cache)
+		zms_clean_cache_shrink(zms, zms->clean_cache_max_pages);
 
 	return ret;
 }

@@ -80,6 +80,9 @@ struct zms_stats {
 	unsigned long alloc_run_avg_segment_pages;
 	unsigned long reclaim_before_alloc_calls;
 	unsigned long reclaim_before_alloc_handles;
+	unsigned long load_resident_hits;
+	unsigned long load_disk_misses;
+	unsigned long load_resident_hit_pct;
 	u64 stored_bytes;
 	u64 packed_bytes;
 };

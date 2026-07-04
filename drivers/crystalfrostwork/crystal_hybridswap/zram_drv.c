@@ -2977,6 +2977,9 @@ static ssize_t zms_stat_show(struct device *dev,
 		"alloc_run_avg_segment_pages: %lu\n"
 		"reclaim_before_alloc_calls: %lu\n"
 		"reclaim_before_alloc_handles: %lu\n"
+		"load_resident_hits: %lu\n"
+		"load_disk_misses: %lu\n"
+		"load_resident_hit_pct: %lu\n"
 		"pending_free: %lu\n"
 		"empty_blocks: %lu\n"
 		"valid_classes: %lu\n",
@@ -3011,6 +3014,9 @@ static ssize_t zms_stat_show(struct device *dev,
 		stats.alloc_run_avg_segment_pages,
 		stats.reclaim_before_alloc_calls,
 		stats.reclaim_before_alloc_handles,
+		stats.load_resident_hits,
+		stats.load_disk_misses,
+		stats.load_resident_hit_pct,
 		stats.pending_free,
 		stats.empty_blocks,
 		stats.valid_classes);

@@ -1862,8 +1862,12 @@ static int swapd_policy_stat_show(struct seq_file *m, void *v)
 		   atomic64_read(&chs.stats.policy_window_throttled));
 	seq_printf(m, "writeback_quota_used_pages: %lld\n",
 		   atomic64_read(&chs.stats.writeback_quota_used_pages));
+	seq_printf(m, "writeback_quota_used_bytes: %lld\n",
+		   atomic64_read(&chs.stats.writeback_quota_used_bytes));
 	seq_printf(m, "writeback_quota_remaining_pages: %lld\n",
 		   atomic64_read(&chs.stats.writeback_quota_remaining_pages));
+	seq_printf(m, "writeback_quota_remaining_bytes: %lld\n",
+		   atomic64_read(&chs.stats.writeback_quota_remaining_bytes));
 	seq_printf(m, "writeback_quota_skipped: %lld\n",
 		   atomic64_read(&chs.stats.writeback_quota_skipped));
 	seq_printf(m, "writeback_quota_capped: %lld\n",
@@ -2203,7 +2207,7 @@ void crystal_hybridswap_memcg_stats_show(struct seq_file *m)
 		   memcg_pages_to_mb(atomic64_read(
 		   &chs.stats.avail_buffers_last_free_swap_pages)));
 	seq_printf(m,
-		   "auto_policy: runs=%lld queued=%lld skipped=%lld last_jiffies=%lld last_writeback_jiffies=%lld last_ret=%lld last_written=%lld android_avail_pages=%lld android_avail_mb=%lld fallback=%lld zram_ratio=%lld zram_effective_ratio=%lld zram_wm_ratio=%lld zram_gate=%lld zram_resident=%lld zram_total=%lld zram_increase=%lld zram_increase_boost=%lld zram_increase_budget=%lld quota_used_pages=%lld quota_remaining_pages=%lld quota_skipped=%lld quota_capped=%lld quota_resets=%lld dev_life_level=%lld dev_life_auto_scaled=%lld dev_life_quota_scaled=%lld dev_life_force_soft_bypass=%lld empty_rounds=%lld empty_backoff_ms=%lld window_start=%lld window_written=%lld window_throttled=%lld candidates=%lld per_memcg_queued=%lld per_memcg_success=%lld per_memcg_no_data=%lld per_memcg_error=%lld global_fallback=%lld normal_ms=%u low_ms=%u min_writeback_ms=%u window_ms=%u window_max_mb=%u\n",
+		   "auto_policy: runs=%lld queued=%lld skipped=%lld last_jiffies=%lld last_writeback_jiffies=%lld last_ret=%lld last_written=%lld android_avail_pages=%lld android_avail_mb=%lld fallback=%lld zram_ratio=%lld zram_effective_ratio=%lld zram_wm_ratio=%lld zram_gate=%lld zram_resident=%lld zram_total=%lld zram_increase=%lld zram_increase_boost=%lld zram_increase_budget=%lld quota_used_pages=%lld quota_used_bytes=%lld quota_remaining_pages=%lld quota_remaining_bytes=%lld quota_skipped=%lld quota_capped=%lld quota_resets=%lld dev_life_level=%lld dev_life_auto_scaled=%lld dev_life_quota_scaled=%lld dev_life_force_soft_bypass=%lld empty_rounds=%lld empty_backoff_ms=%lld window_start=%lld window_written=%lld window_throttled=%lld candidates=%lld per_memcg_queued=%lld per_memcg_success=%lld per_memcg_no_data=%lld per_memcg_error=%lld global_fallback=%lld normal_ms=%u low_ms=%u min_writeback_ms=%u window_ms=%u window_max_mb=%u\n",
 		   atomic64_read(&chs.stats.auto_policy_runs),
 		   atomic64_read(&chs.stats.auto_writeback_queued),
 		   atomic64_read(&chs.stats.auto_writeback_skipped),
@@ -2224,7 +2228,9 @@ void crystal_hybridswap_memcg_stats_show(struct seq_file *m)
 		   atomic64_read(&chs.stats.policy_zram_increase_boost_pages),
 		   atomic64_read(&chs.stats.policy_zram_increase_budget_pages),
 		   atomic64_read(&chs.stats.writeback_quota_used_pages),
+		   atomic64_read(&chs.stats.writeback_quota_used_bytes),
 		   atomic64_read(&chs.stats.writeback_quota_remaining_pages),
+		   atomic64_read(&chs.stats.writeback_quota_remaining_bytes),
 		   atomic64_read(&chs.stats.writeback_quota_skipped),
 		   atomic64_read(&chs.stats.writeback_quota_capped),
 		   atomic64_read(&chs.stats.writeback_quota_resets),

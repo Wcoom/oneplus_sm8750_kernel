@@ -122,6 +122,20 @@ void crystal_hybridswap_stats_show(struct seq_file *m)
 		   zram_io_stats.bd_read_pages);
 	seq_printf(m, "zram_bd_write_pages: %llu\n",
 		   zram_io_stats.bd_write_pages);
+	seq_printf(m, "zram_bd_physical_read_pages: %llu\n",
+		   zram_io_stats.bd_physical_read_pages);
+	seq_printf(m, "zram_bd_physical_read_ios_count: %llu\n",
+		   zram_io_stats.bd_physical_read_ios_count);
+	seq_printf(m, "zram_bd_physical_read_failed_pages: %llu\n",
+		   zram_io_stats.bd_physical_read_failed_pages);
+	seq_printf(m, "zram_bd_physical_write_pages: %llu\n",
+		   zram_io_stats.bd_physical_write_pages);
+	seq_printf(m, "zram_bd_physical_write_bytes: %llu\n",
+		   zram_io_stats.bd_physical_write_bytes);
+	seq_printf(m, "zram_bd_physical_write_ios_count: %llu\n",
+		   zram_io_stats.bd_physical_write_ios_count);
+	seq_printf(m, "zram_bd_physical_write_failed_pages: %llu\n",
+		   zram_io_stats.bd_physical_write_failed_pages);
 	seq_printf(m, "zram_bd_read_sync_ios_count: %llu\n",
 		   zram_io_stats.bd_read_sync_ios_count);
 	seq_printf(m, "zram_bd_read_async_ios_count: %llu\n",
@@ -242,6 +256,7 @@ void crystal_hybridswap_stats_show(struct seq_file *m)
 		   atomic64_read(&chs.stats.loop_device_last_ret));
 	seq_printf(m, "zram_increase_store: %lld\n",
 		   atomic64_read(&chs.stats.zram_increase_store));
+	seq_puts(m, "writeback_quota_accounting: zms_physical_write_bytes\n");
 	seq_printf(m, "writeback_quota_limit_bytes: %lld\n",
 		   atomic64_read(&chs.stats.writeback_quota_limit_bytes));
 	seq_printf(m, "writeback_quota_effective_limit_bytes: %lld\n",
@@ -252,6 +267,8 @@ void crystal_hybridswap_stats_show(struct seq_file *m)
 		   atomic64_read(&chs.stats.writeback_quota_used_bytes));
 	seq_printf(m, "writeback_quota_remaining_pages: %lld\n",
 		   atomic64_read(&chs.stats.writeback_quota_remaining_pages));
+	seq_printf(m, "writeback_quota_remaining_bytes: %lld\n",
+		   atomic64_read(&chs.stats.writeback_quota_remaining_bytes));
 	seq_printf(m, "writeback_quota_skipped: %lld\n",
 		   atomic64_read(&chs.stats.writeback_quota_skipped));
 	seq_printf(m, "writeback_quota_capped: %lld\n",
@@ -700,7 +717,8 @@ static int report_show(struct seq_file *m, void *v)
 	seq_puts(m, "batchin_snapshot_validation: page_level_slot_state_verify_before_commit\n");
 	seq_puts(m, "force_shrink_units: *_last_target_pages/*_last_batch_pages/*_last_reclaimed_pages are page counts; old no-suffix names are compatibility aliases\n");
 	seq_puts(m, "diagnostics: backing_read_write_latency batchin_worker writeback_worker slow_logs_rate_limited\n");
-	seq_puts(m, "zram_bd_stat: standard_3_position_fields_only; Crystal zram IO diagnostics are named zram_* fields in debugfs stats\n");
+	seq_puts(m, "zram_bd_stat: zms_physical_4k_blocks; Crystal zram IO diagnostics are named zram_* fields in debugfs stats\n");
+	seq_puts(m, "quota_accounting: zms_physical_write_bytes\n");
 	seq_printf(m, "multi_zram: registered=%lld selected=%lld traversed=%lld eligible=%lld skip_no_backing=%lld skip_limit=%lld skip_no_resident=%lld\n",
 		   atomic64_read(&chs.stats.multi_zram_registered),
 		   atomic64_read(&chs.stats.multi_zram_last_selected),

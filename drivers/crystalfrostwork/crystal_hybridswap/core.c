@@ -647,14 +647,19 @@ static void crystal_hybridswap_update_quota_stats_locked(u64 quota,
 {
 	u64 used_bytes = crystal_hybridswap_pages_to_bytes_u64(
 		chs.quota_used_pages);
+	u64 remaining_bytes;
 	u64 remaining_pages;
 
-	if (!effective_quota)
+	if (!effective_quota) {
+		remaining_bytes = U64_MAX;
 		remaining_pages = S64_MAX;
-	else if (effective_quota > used_bytes)
-		remaining_pages = (effective_quota - used_bytes) >> PAGE_SHIFT;
-	else
+	} else if (effective_quota > used_bytes) {
+		remaining_bytes = effective_quota - used_bytes;
+		remaining_pages = remaining_bytes >> PAGE_SHIFT;
+	} else {
+		remaining_bytes = 0;
 		remaining_pages = 0;
+	}
 
 	atomic64_set(&chs.stats.writeback_quota_limit_bytes,
 		     crystal_hybridswap_clamp_u64_to_s64(quota));
@@ -666,6 +671,8 @@ static void crystal_hybridswap_update_quota_stats_locked(u64 quota,
 		     crystal_hybridswap_clamp_u64_to_s64(used_bytes));
 	atomic64_set(&chs.stats.writeback_quota_remaining_pages,
 		     crystal_hybridswap_clamp_u64_to_s64(remaining_pages));
+	atomic64_set(&chs.stats.writeback_quota_remaining_bytes,
+		     crystal_hybridswap_clamp_u64_to_s64(remaining_bytes));
 	atomic64_set(&chs.stats.writeback_quota_window_start_jiffies,
 		     chs.quota_window_start);
 }
@@ -774,7 +781,7 @@ static u64 crystal_hybridswap_apply_dev_life_auto_budget(u64 pages)
 	return scaled;
 }
 
-void crystal_hybridswap_account_writeback_pages(unsigned long pages)
+void crystal_hybridswap_account_physical_write_pages(unsigned long pages)
 {
 	if (!pages)
 		return;
@@ -937,6 +944,15 @@ static void crystal_hybridswap_add_zram_io_stats(
 	dst->bd_compressed_bytes += src->bd_compressed_bytes;
 	dst->bd_read_pages += src->bd_read_pages;
 	dst->bd_write_pages += src->bd_write_pages;
+	dst->bd_physical_read_pages += src->bd_physical_read_pages;
+	dst->bd_physical_read_ios_count += src->bd_physical_read_ios_count;
+	dst->bd_physical_read_failed_pages +=
+		src->bd_physical_read_failed_pages;
+	dst->bd_physical_write_pages += src->bd_physical_write_pages;
+	dst->bd_physical_write_bytes += src->bd_physical_write_bytes;
+	dst->bd_physical_write_ios_count += src->bd_physical_write_ios_count;
+	dst->bd_physical_write_failed_pages +=
+		src->bd_physical_write_failed_pages;
 	dst->bd_read_sync_ios_count += src->bd_read_sync_ios_count;
 	dst->bd_read_async_ios_count += src->bd_read_async_ios_count;
 	dst->bd_read_failures_count += src->bd_read_failures_count;
@@ -2571,6 +2587,7 @@ void crystal_hybridswap_stats_init(struct crystal_hybridswap_stats *stats)
 	atomic64_set(&stats->writeback_quota_used_pages, 0);
 	atomic64_set(&stats->writeback_quota_used_bytes, 0);
 	atomic64_set(&stats->writeback_quota_remaining_pages, 0);
+	atomic64_set(&stats->writeback_quota_remaining_bytes, 0);
 	atomic64_set(&stats->writeback_quota_skipped, 0);
 	atomic64_set(&stats->writeback_quota_capped, 0);
 	atomic64_set(&stats->writeback_quota_resets, 0);

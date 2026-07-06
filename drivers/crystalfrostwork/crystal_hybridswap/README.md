@@ -232,7 +232,9 @@ echo '...' > /sys/fs/cgroup/memory/<cg_path>/memory.swapd_single_memcg_param
 | `writeback` | Triggers page writeback. |
 | `writeback_limit` | Sets writeback limit. |
 | `writeback_limit_enable` | Enables or disables writeback limit enforcement. |
-| `bd_stat` | Keeps the standard three-field zram backing-device statistics format. |
+| `bd_stat` | Three-field backing-device statistics using ZMS physical 4K-block units. |
+| `zms_stat` | Shows Crystal ZMS backing-store state, packing, block allocation, dirty data, and read-merge diagnostics. |
+| `writeback_cold_stat` | Shows age/cold-page selection counters used by automatic writeback when entry access-time tracking is enabled. |
 
 ### 4.4 Crystal zram Bridge Nodes
 
@@ -327,7 +329,10 @@ Crystal Hybridswap keeps the standard zram-facing ABI:
 - standard `/sys/block/zramX` configuration nodes;
 - standard writeback-facing nodes such as `backing_dev`, `writeback`, `writeback_limit`, `writeback_limit_enable`, and `bd_stat`.
 
-`bd_stat` intentionally keeps the standard three-field output. Crystal-specific detailed counters are exposed through Crystal statistics nodes and debugfs instead of extending the standard `bd_stat` format.
+`bd_stat` intentionally keeps the three-field output, but Crystal/ZMS reports
+physical 4K backing-block units there. More detailed logical-page, compressed
+payload, and physical-write counters are exposed through Crystal statistics
+nodes and debugfs instead of extending the `bd_stat` format.
 
 ### 5.2 Crystal Extension Groups
 
@@ -397,7 +402,10 @@ Check the following:
 
 ### 8.2 Why does `bd_stat` have only three fields?
 
-Because `bd_stat` follows the standard zram ABI. Use `hybridswap_crystal_stat`, `hybridswap_stat_snap`, and debugfs for Crystal-specific detailed counters.
+Because `bd_stat` keeps the three-field ABI shape. Under Crystal/ZMS, the
+columns are current physical backing blocks, cumulative physical read blocks,
+and cumulative physical write blocks. Use `hybridswap_crystal_stat`,
+`hybridswap_stat_snap`, and debugfs for Crystal-specific detailed counters.
 
 ### 8.3 Why are `hybridswap_vmstat` and `hybridswap_crystal_stat` separate?
 

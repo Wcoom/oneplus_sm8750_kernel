@@ -163,6 +163,13 @@ struct zms {
 	spinlock_t handle_locks[ZMS_HANDLE_LOCKS];
 	struct work_struct free_work;
 	struct delayed_work flush_work;
+	atomic64_t physical_read_pages;
+	atomic64_t physical_read_ios;
+	atomic64_t physical_read_failed_pages;
+	atomic64_t physical_write_pages;
+	atomic64_t physical_write_ios;
+	atomic64_t physical_write_failed_pages;
+	zms_account_write_pages_t account_write_pages;
 	unsigned long dirty_low_pages;
 	unsigned long dirty_high_pages;
 	unsigned long dirty_hard_pages;
@@ -761,10 +768,38 @@ static bool zms_handle_publish_store(struct zms *zms, unsigned long handle,
 	return published;
 }
 
-static void zms_io_record(struct zms_io *io, unsigned int op,
+static void zms_account_physical_io(struct zms *zms, unsigned int op,
+				    unsigned int pages, int ret)
+{
+	if (!zms || !pages)
+		return;
+
+	if (op == REQ_OP_WRITE) {
+		atomic64_inc(&zms->physical_write_ios);
+		if (ret) {
+			atomic64_add(pages, &zms->physical_write_failed_pages);
+			return;
+		}
+
+		atomic64_add(pages, &zms->physical_write_pages);
+		if (zms->account_write_pages)
+			zms->account_write_pages(pages);
+		return;
+	}
+
+	atomic64_inc(&zms->physical_read_ios);
+	if (ret)
+		atomic64_add(pages, &zms->physical_read_failed_pages);
+	else
+		atomic64_add(pages, &zms->physical_read_pages);
+}
+
+static void zms_io_record(struct zms *zms, struct zms_io *io, unsigned int op,
 			  unsigned long block,
 			  unsigned int pages, u64 latency_ns, int ret)
 {
+	zms_account_physical_io(zms, op, pages, ret);
+
 	if (!io)
 		return;
 
@@ -886,7 +921,7 @@ static int zms_submit_run_data(struct zms *zms, struct zms_block *block,
 
 		start = ktime_get_ns();
 		ret = submit_bio_wait(&bio);
-		zms_io_record(io, op, block->blocks[page_idx + done],
+		zms_io_record(zms, io, op, block->blocks[page_idx + done],
 			      submitted, ktime_get_ns() - start, ret);
 		bio_uninit(&bio);
 		if (ret)
@@ -1966,7 +2001,8 @@ static void zms_flush_workfn(struct work_struct *work)
 }
 
 struct zms *zms_create(struct block_device *bdev, unsigned long nr_blocks,
-		       unsigned long nr_handles)
+		       unsigned long nr_handles,
+		       zms_account_write_pages_t account_write_pages)
 {
 	struct zms *zms;
 	size_t block_bitmap_size;
@@ -1984,6 +2020,7 @@ struct zms *zms_create(struct block_device *bdev, unsigned long nr_blocks,
 	zms->nr_blocks = nr_blocks;
 	zms->nr_handles = nr_handles;
 	zms->next_block = ZMS_BLOCK_RESERVED;
+	zms->account_write_pages = account_write_pages;
 	spin_lock_init(&zms->pending_lock);
 	spin_lock_init(&zms->alloc_lock);
 	spin_lock_init(&zms->clean_lock);
@@ -2212,6 +2249,16 @@ int zms_get_stats(struct zms *zms, struct zms_stats *stats)
 	stats->objects = zms_stat_read_positive(zms, ZMS_STAT_OBJECTS);
 	stats->stored_bytes = zms_stat_read_positive(zms, ZMS_STAT_STORED_BYTES);
 	stats->packed_bytes = zms_stat_read_positive(zms, ZMS_STAT_PACKED_BYTES);
+	stats->physical_read_pages =
+		atomic64_read(&zms->physical_read_pages);
+	stats->physical_read_ios = atomic64_read(&zms->physical_read_ios);
+	stats->physical_read_failed_pages =
+		atomic64_read(&zms->physical_read_failed_pages);
+	stats->physical_write_pages =
+		atomic64_read(&zms->physical_write_pages);
+	stats->physical_write_ios = atomic64_read(&zms->physical_write_ios);
+	stats->physical_write_failed_pages =
+		atomic64_read(&zms->physical_write_failed_pages);
 	stats->partial_blocks =
 		zms_stat_read_positive(zms, ZMS_STAT_PARTIAL_BLOCKS);
 	stats->low_blocks = zms_stat_read_positive(zms, ZMS_STAT_LOW_BLOCKS);

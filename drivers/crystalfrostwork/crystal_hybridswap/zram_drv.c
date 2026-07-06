@@ -700,6 +700,14 @@ static s64 zram_ns_to_s64(u64 ns)
 	return ns > S64_MAX ? S64_MAX : (s64)ns;
 }
 
+static u64 zram_pages_to_bytes_u64(u64 pages)
+{
+	if (pages > (U64_MAX >> PAGE_SHIFT))
+		return U64_MAX;
+
+	return pages << PAGE_SHIFT;
+}
+
 static inline void zram_fill_page(void *ptr, unsigned long len,
 				  unsigned long value)
 {
@@ -1133,7 +1141,8 @@ static int zram_set_backing_dev(struct zram *zram, const char *buf, size_t len,
 	}
 
 	zms = zms_create(bdev, nr_pages,
-			 late_bind ? zram_pages_snapshot(zram) : 1);
+			 late_bind ? zram_pages_snapshot(zram) : 1,
+			 crystal_hybridswap_account_physical_write_pages);
 	if (!zms) {
 		err = -ENOMEM;
 		chs_log(CHS_LOG_ERR,
@@ -2004,9 +2013,6 @@ release_init_lock:
 		wb_stats->unknown_or_filtered_pages = unknown_or_filtered;
 	}
 
-	if (written)
-		crystal_hybridswap_account_writeback_pages(written);
-
 	if (ret)
 		chs_log_ratelimited(CHS_LOG_WARN,
 				    "writeback finished with error mode=0x%x target_cgroup_id=%llu scan_scope=%s scanned=%lu eligible=%lu written=%lu unknown_or_filtered=%lu max_pages=%lu ret=%d\n",
@@ -2227,6 +2233,31 @@ int crystal_hybridswap_zram_io_stats(struct device *dev,
 	stats->devices_count = 1;
 	stats->last_device_index = zram_dev_id(zram);
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
+	{
+		struct zms_stats zms_stats;
+
+		memset(&zms_stats, 0, sizeof(zms_stats));
+		if (zram->zms && !zms_get_stats(zram->zms, &zms_stats)) {
+			u64 physical_write_bytes;
+
+			physical_write_bytes =
+				zram_pages_to_bytes_u64(zms_stats.physical_write_pages);
+			stats->bd_physical_read_pages =
+				zms_stats.physical_read_pages;
+			stats->bd_physical_read_ios_count =
+				zms_stats.physical_read_ios;
+			stats->bd_physical_read_failed_pages =
+				zms_stats.physical_read_failed_pages;
+			stats->bd_physical_write_pages =
+				zms_stats.physical_write_pages;
+			stats->bd_physical_write_bytes =
+				physical_write_bytes;
+			stats->bd_physical_write_ios_count =
+				zms_stats.physical_write_ios;
+			stats->bd_physical_write_failed_pages =
+				zms_stats.physical_write_failed_pages;
+		}
+	}
 	stats->bd_pages = atomic64_read(&zram->stats.bd_count);
 	stats->bd_compressed_bytes =
 		atomic64_read(&zram->stats.bd_compr_data_size);
@@ -2903,17 +2934,16 @@ static ssize_t bd_stat_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	struct zram *zram = dev_to_zram(dev);
-	u64 bd_compr_pages;
+	struct zms_stats stats = {};
 	ssize_t ret;
 
 	down_read(&zram->init_lock);
-	bd_compr_pages = DIV_ROUND_UP_ULL(
-		(u64)atomic64_read(&zram->stats.bd_compr_data_size),
-		PAGE_SIZE);
+	if (init_done(zram) && zram->zms)
+		zms_get_stats(zram->zms, &stats);
 	ret = scnprintf(buf, PAGE_SIZE, "%8llu %8llu %8llu\n",
-			FOUR_K(bd_compr_pages),
-			FOUR_K((u64)atomic64_read(&zram->stats.bd_reads)),
-			FOUR_K((u64)atomic64_read(&zram->stats.bd_writes)));
+			FOUR_K((u64)stats.used_blocks),
+			FOUR_K(stats.physical_read_pages),
+			FOUR_K(stats.physical_write_pages));
 	up_read(&zram->init_lock);
 
 	return ret;
@@ -2924,6 +2954,7 @@ static ssize_t zms_stat_show(struct device *dev,
 {
 	struct zram *zram = dev_to_zram(dev);
 	struct zms_stats stats;
+	u64 physical_write_bytes;
 	ssize_t ret;
 	int err = 0;
 
@@ -2943,6 +2974,9 @@ static ssize_t zms_stat_show(struct device *dev,
 		goto out;
 	}
 
+	physical_write_bytes =
+		zram_pages_to_bytes_u64(stats.physical_write_pages);
+
 	ret = sysfs_emit(buf,
 		"enabled: 1\n"
 		"ret: 0\n"
@@ -2953,6 +2987,13 @@ static ssize_t zms_stat_show(struct device *dev,
 		"objects: %lu\n"
 		"stored_bytes: %llu\n"
 		"packed_bytes: %llu\n"
+		"physical_read_pages: %llu\n"
+		"physical_read_ios: %llu\n"
+		"physical_read_failed_pages: %llu\n"
+		"physical_write_pages: %llu\n"
+		"physical_write_bytes: %llu\n"
+		"physical_write_ios: %llu\n"
+		"physical_write_failed_pages: %llu\n"
 		"partial_blocks: %lu\n"
 		"low_blocks: %lu\n"
 		"mid_blocks: %lu\n"
@@ -2990,6 +3031,13 @@ static ssize_t zms_stat_show(struct device *dev,
 		stats.objects,
 		(unsigned long long)stats.stored_bytes,
 		(unsigned long long)stats.packed_bytes,
+		(unsigned long long)stats.physical_read_pages,
+		(unsigned long long)stats.physical_read_ios,
+		(unsigned long long)stats.physical_read_failed_pages,
+		(unsigned long long)stats.physical_write_pages,
+		(unsigned long long)physical_write_bytes,
+		(unsigned long long)stats.physical_write_ios,
+		(unsigned long long)stats.physical_write_failed_pages,
 		stats.partial_blocks,
 		stats.low_blocks,
 		stats.mid_blocks,

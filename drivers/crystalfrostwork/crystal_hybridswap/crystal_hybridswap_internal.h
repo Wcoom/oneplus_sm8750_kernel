@@ -238,6 +238,13 @@ struct crystal_hybridswap_zram_io_stats {
 	u64 bd_compressed_bytes;
 	u64 bd_read_pages;
 	u64 bd_write_pages;
+	u64 bd_physical_read_pages;
+	u64 bd_physical_read_ios_count;
+	u64 bd_physical_read_failed_pages;
+	u64 bd_physical_write_pages;
+	u64 bd_physical_write_bytes;
+	u64 bd_physical_write_ios_count;
+	u64 bd_physical_write_failed_pages;
 	u64 bd_read_sync_ios_count;
 	u64 bd_read_async_ios_count;
 	u64 bd_read_failures_count;
@@ -354,6 +361,7 @@ struct crystal_hybridswap_stats {
 	atomic64_t writeback_quota_used_pages;
 	atomic64_t writeback_quota_used_bytes;
 	atomic64_t writeback_quota_remaining_pages;
+	atomic64_t writeback_quota_remaining_bytes;
 	atomic64_t writeback_quota_skipped;
 	atomic64_t writeback_quota_capped;
 	atomic64_t writeback_quota_resets;
@@ -724,7 +732,7 @@ s64 crystal_hybridswap_zram_wm_ratio(void);
 int crystal_hybridswap_set_stored_wm_ratio(s64 val);
 s64 crystal_hybridswap_stored_wm_ratio(void);
 s64 crystal_hybridswap_mb_to_pages(s64 mb);
-void crystal_hybridswap_account_writeback_pages(unsigned long pages);
+void crystal_hybridswap_account_physical_write_pages(unsigned long pages);
 int crystal_hybridswap_queue_writeback(struct device *dev, const char *mode,
 				       s64 pages);
 int crystal_hybridswap_queue_force_swapout(u64 target_cgroup_id,

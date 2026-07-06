@@ -361,6 +361,8 @@ static ssize_t hybridswap_crystal_stat_show(struct device *dev,
 
 	ret += sysfs_emit_at(buf, ret,
 				 "debugfs_full_stats crystal_hybridswap/stats\n");
+	ret += sysfs_emit_at(buf, ret,
+				 "writeback_quota_accounting zms_physical_write_bytes\n");
 	ret += sysfs_emit_at(buf, ret, "writeback_quota_limit_bytes %lld\n",
 				 atomic64_read(&chs.stats.writeback_quota_limit_bytes));
 	ret += sysfs_emit_at(buf, ret,
@@ -368,8 +370,13 @@ static ssize_t hybridswap_crystal_stat_show(struct device *dev,
 				 atomic64_read(&chs.stats.writeback_quota_effective_limit_bytes));
 	ret += sysfs_emit_at(buf, ret, "writeback_quota_used_pages %lld\n",
 				 atomic64_read(&chs.stats.writeback_quota_used_pages));
+	ret += sysfs_emit_at(buf, ret, "writeback_quota_used_bytes %lld\n",
+				 atomic64_read(&chs.stats.writeback_quota_used_bytes));
 	ret += sysfs_emit_at(buf, ret, "writeback_quota_remaining_pages %lld\n",
 				 atomic64_read(&chs.stats.writeback_quota_remaining_pages));
+	ret += sysfs_emit_at(buf, ret,
+				 "writeback_quota_remaining_bytes %lld\n",
+				 atomic64_read(&chs.stats.writeback_quota_remaining_bytes));
 	ret += sysfs_emit_at(buf, ret, "writeback_quota_skipped %lld\n",
 				 atomic64_read(&chs.stats.writeback_quota_skipped));
 	ret += sysfs_emit_at(buf, ret, "writeback_quota_capped %lld\n",
@@ -397,6 +404,24 @@ static ssize_t hybridswap_crystal_stat_show(struct device *dev,
 				 zram_io_stats.bd_read_pages);
 	ret += sysfs_emit_at(buf, ret, "zram_bd_write_pages %llu\n",
 				 zram_io_stats.bd_write_pages);
+	ret += sysfs_emit_at(buf, ret, "zram_bd_physical_read_pages %llu\n",
+				 zram_io_stats.bd_physical_read_pages);
+	ret += sysfs_emit_at(buf, ret,
+				 "zram_bd_physical_read_ios_count %llu\n",
+				 zram_io_stats.bd_physical_read_ios_count);
+	ret += sysfs_emit_at(buf, ret,
+				 "zram_bd_physical_read_failed_pages %llu\n",
+				 zram_io_stats.bd_physical_read_failed_pages);
+	ret += sysfs_emit_at(buf, ret, "zram_bd_physical_write_pages %llu\n",
+				 zram_io_stats.bd_physical_write_pages);
+	ret += sysfs_emit_at(buf, ret, "zram_bd_physical_write_bytes %llu\n",
+				 zram_io_stats.bd_physical_write_bytes);
+	ret += sysfs_emit_at(buf, ret,
+				 "zram_bd_physical_write_ios_count %llu\n",
+				 zram_io_stats.bd_physical_write_ios_count);
+	ret += sysfs_emit_at(buf, ret,
+				 "zram_bd_physical_write_failed_pages %llu\n",
+				 zram_io_stats.bd_physical_write_failed_pages);
 	ret += sysfs_emit_at(buf, ret, "zram_bd_read_sync_ios_count %llu\n",
 				 zram_io_stats.bd_read_sync_ios_count);
 	ret += sysfs_emit_at(buf, ret, "zram_bd_read_async_ios_count %llu\n",
@@ -552,6 +577,7 @@ static ssize_t hybridswap_report_show(struct device *dev,
 			 "avail_buffers_policy=kernel_delayed_work_auto_MB_config_available_or_free_swap_pages_or_high_watermark_to_zram_writeback\n"
 			 "zram_wm_ratio_api=memory.zram_wm_ratio_zram_watermark,old_compatible_range_0_100,no_runtime_min_clamp\n"
 			 "auto_policy_controls=daily_quota,dev_life_budget_scale,zram_wm_ratio_gate,zram_increase_boost,empty_no_data_backoff,window_throttle,min_writeback_interval\n"
+			 "quota_accounting=zms_physical_write_bytes\n"
 			 "auto_policy_limits=zram_wm_ratio:%lld window_mb:%u memcg_candidates:%u memcg_max_mb:%u quota_window_ms:%lu dev_life_auto_percent:%u\n"
 			 "auto_memcg=legacy_swapd_memcgs_param_%s_policy_enabled_candidates_by_app_score_zram2ufs_ratio_recent_result_then_multi_zram_global_fallback\n"
 			 "multi_zram_policy=auto_writeback_pressure_selected force_swapout_memcg_bounded_traverse force_swapin_memcg_writeback_first global_writeback_pages_fallback\n"
@@ -559,7 +585,7 @@ static ssize_t hybridswap_report_show(struct device *dev,
 			 "force_swapout_units=unknown_or_filtered fields with _pages suffix are page counts; no-suffix names are compatibility aliases\n"
 			 "force_swapin_units=memory.force_swapin write value is a trigger/request value; use *_request and *_pages fields for units; total_info_per_app in_mb is compatibility only\n"
 			 "force_shrink_units=*_last_target_pages/*_last_batch_pages/*_last_reclaimed_pages are page counts; old no-suffix names are compatibility aliases\n"
-			 "zram_bd_stat=standard_3_position_fields_only; Crystal zram IO diagnostics are named zram_* fields in hybridswap_crystal_stat and debugfs stats\n"
+			 "zram_bd_stat=zms_physical_4k_blocks; Crystal zram IO diagnostics are named zram_* fields in hybridswap_crystal_stat and debugfs stats\n"
 			 "diagnostic_slow_io_ns=%llu\n"
 			 "diagnostic_slow_work_ns=%llu\n"
 			 "ub_ufs2zram_ratio_api=%s_per_memcg_page_level_batchin\n"

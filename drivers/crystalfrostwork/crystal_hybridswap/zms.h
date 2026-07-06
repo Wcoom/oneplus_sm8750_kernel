@@ -23,6 +23,8 @@ static inline unsigned int zms_size_to_class(size_t size)
 	return (aligned / ZMS_CLASS_SIZE) - 1;
 }
 
+typedef void (*zms_account_write_pages_t)(unsigned long pages);
+
 struct zms_io {
 	bool submitted;
 	bool write;
@@ -85,6 +87,12 @@ struct zms_stats {
 	unsigned long load_resident_hit_pct;
 	u64 stored_bytes;
 	u64 packed_bytes;
+	u64 physical_read_pages;
+	u64 physical_read_ios;
+	u64 physical_read_failed_pages;
+	u64 physical_write_pages;
+	u64 physical_write_ios;
+	u64 physical_write_failed_pages;
 };
 
 struct zms_load_item {
@@ -102,7 +110,8 @@ struct zms_load_ref {
 };
 
 struct zms *zms_create(struct block_device *bdev, unsigned long nr_blocks,
-			       unsigned long nr_handles);
+		       unsigned long nr_handles,
+		       zms_account_write_pages_t account_write_pages);
 int zms_set_nr_handles(struct zms *zms, unsigned long nr_handles);
 void zms_destroy(struct zms *zms);
 int zms_get_stats(struct zms *zms, struct zms_stats *stats);

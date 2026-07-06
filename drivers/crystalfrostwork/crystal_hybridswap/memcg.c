@@ -2,6 +2,7 @@
 #define pr_fmt(fmt) "crystal_hybridswap: " fmt
 
 #include <linux/cgroup.h>
+#include <linux/cred.h>
 #include <linux/errno.h>
 #include <linux/err.h>
 #include <linux/kernel.h>
@@ -19,6 +20,7 @@
 #include <linux/swap.h>
 #include <linux/vmstat.h>
 #include <linux/workqueue.h>
+#include <trace/hooks/cgroup.h>
 #include <trace/hooks/mm.h>
 #include <trace/hooks/vmscan.h>
 
@@ -35,8 +37,11 @@ enum scan_balance {
 static DEFINE_MUTEX(memcg_lock);
 static LIST_HEAD(memcg_list);
 static bool memcg_cftypes_registered;
+static bool memcg_cgroup_attach_hook_registered;
 static bool memcg_css_offline_hook_registered;
 
+#define CHS_APP_UID_UNKNOWN			(-1LL)
+#define CHS_APP_UID_MIXED			(-2LL)
 #define CHS_FORCE_SHRINK_RECLAIM_INACTIVE	0UL
 #define CHS_FORCE_SHRINK_RECLAIM_ALL		1UL
 #define CHS_FORCE_SHRINK_DEFAULT_BATCH		(1UL << 10)
@@ -264,6 +269,124 @@ static void memcg_css_offline(void *data, struct cgroup_subsys_state *css,
 		memcg_free_entry_locked(entry);
 	}
 	mutex_unlock(&memcg_lock);
+}
+
+static s64 memcg_task_app_uid(struct task_struct *task)
+{
+	return from_kuid_munged(&init_user_ns, task_uid(task));
+}
+
+static s64 memcg_scan_app_uid(struct cgroup_subsys_state *css)
+{
+	struct css_task_iter it;
+	struct task_struct *task;
+	s64 app_uid = CHS_APP_UID_UNKNOWN;
+
+	if (!css || css_is_dying(css))
+		return CHS_APP_UID_UNKNOWN;
+
+	css_task_iter_start(css, 0, &it);
+	while ((task = css_task_iter_next(&it))) {
+		s64 uid = memcg_task_app_uid(task);
+
+		if (app_uid == CHS_APP_UID_UNKNOWN) {
+			app_uid = uid;
+			continue;
+		}
+
+		if (app_uid != uid) {
+			app_uid = CHS_APP_UID_MIXED;
+			break;
+		}
+	}
+	css_task_iter_end(&it);
+
+	return app_uid;
+}
+
+static int memcg_update_app_uid(struct cgroup_subsys_state *css, bool create,
+				s64 *app_uid)
+{
+	struct crystal_hybridswap_memcg *entry;
+	s64 uid;
+
+	if (!css)
+		return -EINVAL;
+	if (css_is_dying(css)) {
+		if (app_uid)
+			*app_uid = CHS_APP_UID_UNKNOWN;
+		return 0;
+	}
+
+	uid = memcg_scan_app_uid(css);
+	entry = crystal_hybridswap_memcg_get(css, create);
+	if (!entry)
+		return create ? -ENOMEM : -ENOENT;
+
+	atomic64_set(&entry->app_uid, uid);
+	if (app_uid)
+		*app_uid = uid;
+
+	return 0;
+}
+
+static void memcg_cgroup_attach(void *data, struct cgroup_subsys *ss,
+				struct cgroup_taskset *tset)
+{
+	struct cgroup_subsys_state *css = NULL;
+	struct task_struct *task;
+	int ret;
+
+	if (ss != &memory_cgrp_subsys)
+		return;
+
+	cgroup_taskset_for_each(task, css, tset) {
+		ret = memcg_update_app_uid(css, true, NULL);
+		if (ret)
+			chs_log_ratelimited(CHS_LOG_WARN,
+					    "app_uid update failed ret=%d\n",
+					    ret);
+		break;
+	}
+}
+
+static void memcg_refresh_known_app_uids(void)
+{
+	struct crystal_hybridswap_memcg *entry;
+	struct cgroup_subsys_state **csses;
+	int count = 0;
+	int copied = 0;
+	int i;
+
+	mutex_lock(&memcg_lock);
+	list_for_each_entry(entry, &memcg_list, node)
+		count++;
+	mutex_unlock(&memcg_lock);
+
+	if (!count)
+		return;
+
+	csses = kcalloc(count, sizeof(*csses), GFP_KERNEL);
+	if (!csses)
+		return;
+
+	mutex_lock(&memcg_lock);
+	list_for_each_entry(entry, &memcg_list, node) {
+		if (copied >= count)
+			break;
+		if (css_is_dying(entry->css))
+			continue;
+		css_get(entry->css);
+		csses[copied++] = entry->css;
+	}
+	mutex_unlock(&memcg_lock);
+
+	for (i = 0; i < copied; i++) {
+		memcg_update_app_uid(csses[i], false, NULL);
+		css_put(csses[i]);
+	}
+
+	kfree(csses);
 }
 
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM
@@ -946,7 +1069,7 @@ crystal_hybridswap_memcg_get(struct cgroup_subsys_state *css, bool create)
 	cgroup_name(css->cgroup, name, sizeof(name));
 	strscpy(entry->name, name[0] ? name : "unknown", sizeof(entry->name));
 	atomic64_set(&entry->app_score, CHS_DEFAULT_APP_SCORE);
-	atomic64_set(&entry->app_uid, 0);
+	atomic64_set(&entry->app_uid, CHS_APP_UID_UNKNOWN);
 	atomic64_set(&entry->ub_ufs2zram_ratio, CHS_DEFAULT_RATIO);
 	atomic_set(&entry->ub_mem2zram_ratio, CHS_DEFAULT_RATIO);
 	atomic_set(&entry->ub_zram2ufs_ratio, CHS_DEFAULT_RATIO);
@@ -1067,33 +1190,20 @@ static s64 memcg_app_score_read(struct cgroup_subsys_state *css,
 	return atomic64_read(&entry->app_score);
 }
 
-static int memcg_app_uid_write(struct cgroup_subsys_state *css,
-			       struct cftype *cft, s64 val)
-{
-	struct crystal_hybridswap_memcg *entry;
-
-	if (val < 0)
-		return -EINVAL;
-
-	entry = crystal_hybridswap_memcg_get(css, true);
-	if (!entry)
-		return -ENOMEM;
-
-	atomic64_set(&entry->app_uid, val);
-	atomic64_inc(&chs.stats.memcg_param_updates);
-	return 0;
-}
-
 static s64 memcg_app_uid_read(struct cgroup_subsys_state *css,
 			      struct cftype *cft)
 {
-	struct crystal_hybridswap_memcg *entry;
+	s64 app_uid = CHS_APP_UID_UNKNOWN;
 
-	entry = crystal_hybridswap_memcg_get(css, false);
-	if (!entry)
-		return -EPERM;
+	memcg_update_app_uid(css, true, &app_uid);
 
-	return atomic64_read(&entry->app_uid);
+	return app_uid;
+}
+
+static int memcg_app_uid_write(struct cgroup_subsys_state *css,
+			       struct cftype *cft, s64 val)
+{
+	return memcg_update_app_uid(css, true, NULL);
 }
 
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS
@@ -1425,6 +1535,7 @@ static int memcg_swap_stat_show(struct seq_file *m, void *v)
 	s64 eswap_cur_kb = 0;
 	int zram_ret;
 
+	memcg_update_app_uid(seq_css(m), true, NULL);
 	entry = crystal_hybridswap_memcg_get(seq_css(m), false);
 	if (!entry)
 		return -EPERM;
@@ -1532,6 +1643,7 @@ static void *memcg_total_info_per_app_start(struct seq_file *m, loff_t *pos)
 	if (*pos == 0)
 		return SEQ_START_TOKEN;
 
+	memcg_refresh_known_app_uids();
 	snapshot = kmalloc(sizeof(*snapshot), GFP_KERNEL);
 	if (!snapshot)
 		return ERR_PTR(-ENOMEM);
@@ -2136,6 +2248,7 @@ static int swapd_single_memcg_param_show(struct seq_file *m, void *v)
 {
 	struct crystal_hybridswap_memcg *entry;
 
+	memcg_update_app_uid(seq_css(m), true, NULL);
 	entry = crystal_hybridswap_memcg_get(seq_css(m), false);
 	if (!entry)
 		return -EPERM;
@@ -2267,6 +2380,7 @@ void crystal_hybridswap_memcg_stats_show(struct seq_file *m)
 #endif
 	mutex_unlock(&memcg_lock);
 
+	memcg_refresh_known_app_uids();
 	count = memcg_collect_snapshots(&snapshots);
 	if (count < 0) {
 		chs_log_ratelimited(CHS_LOG_WARN,
@@ -2468,6 +2582,7 @@ int crystal_hybridswap_memcg_init(void)
 	atomic_set(&force_shrink_anon_queued, 0);
 	atomic_set(&force_shrink_file_queued, 0);
 	WRITE_ONCE(force_shrink_anon_hook_registered, false);
+	memcg_cgroup_attach_hook_registered = false;
 	memcg_css_offline_hook_registered = false;
 
 	ret = register_trace_android_vh_mem_cgroup_css_offline(
@@ -2479,6 +2594,17 @@ int crystal_hybridswap_memcg_init(void)
 	} else {
 		memcg_css_offline_hook_registered = true;
 		chs_log(CHS_LOG_INFO, "memcg css_offline hook registered\n");
+	}
+
+	ret = register_trace_android_vh_cgroup_attach(memcg_cgroup_attach,
+						      NULL);
+	if (ret) {
+		chs_log(CHS_LOG_WARN,
+			"cgroup attach hook unavailable ret=%d, app_uid will refresh on read\n",
+			ret);
+	} else {
+		memcg_cgroup_attach_hook_registered = true;
+		chs_log(CHS_LOG_INFO, "cgroup attach hook registered\n");
 	}
 
 	ret = register_trace_android_vh_tune_scan_type(
@@ -2501,6 +2627,11 @@ int crystal_hybridswap_memcg_init(void)
 			unregister_trace_android_vh_tune_scan_type(
 					memcg_force_shrink_tune_scan_type, NULL);
 			WRITE_ONCE(force_shrink_anon_hook_registered, false);
+		}
+		if (memcg_cgroup_attach_hook_registered) {
+			unregister_trace_android_vh_cgroup_attach(memcg_cgroup_attach,
+								  NULL);
+			memcg_cgroup_attach_hook_registered = false;
 		}
 		if (memcg_css_offline_hook_registered) {
 			unregister_trace_android_vh_mem_cgroup_css_offline(
@@ -2528,6 +2659,12 @@ void crystal_hybridswap_memcg_exit(void)
 		unregister_trace_android_vh_tune_scan_type(
 				memcg_force_shrink_tune_scan_type, NULL);
 		WRITE_ONCE(force_shrink_anon_hook_registered, false);
+	}
+
+	if (memcg_cgroup_attach_hook_registered) {
+		unregister_trace_android_vh_cgroup_attach(memcg_cgroup_attach,
+							  NULL);
+		memcg_cgroup_attach_hook_registered = false;
 	}
 
 	if (memcg_css_offline_hook_registered) {

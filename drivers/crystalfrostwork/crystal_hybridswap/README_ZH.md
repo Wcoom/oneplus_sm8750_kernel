@@ -269,6 +269,7 @@ echo '...' > /sys/fs/cgroup/memory/<cg_path>/memory.swapd_single_memcg_param
 - `memory.erm_avail_buffer`
 - `memory.swapd_policy_stat`
 - `memory.total_info_per_app`
+- `memory.app_uid`
 
 `memory.force_shrink_anon_percent` 接受 1 到 100 的百分比，
 按当前 memcg 本地匿名页加 zram/writeback 页计算目标换出比例，
@@ -287,6 +288,10 @@ echo '...' > /sys/fs/cgroup/memory/<cg_path>/memory.swapd_single_memcg_param
 dev_life、zram gate、backoff/window throttle 和 `force_*` 接口均不被
 ERM 覆盖。`memory.swapd_policy_stat` 会显示 base、ERM override 和
 effective 条件来源。
+
+`memory.app_uid` 为兼容旧用户态保留可写权限，但 Crystal 会忽略写入值，
+显示值仍根据当前挂在该 memcg 下的 task 自动推导：`-1` 表示未知或空
+memcg，`-2` 表示存在多个 UID，非负数表示真实 Linux UID。
 
 启用 `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM` 时，Crystal 还会暴露旧 `memory.swapd_memcgs_param` 根 cgroup 节点和 `memory.swapd_single_memcg_param` per-memcg 节点。关闭该选项时，这些节点不暴露，自动 memcg 写回也不受旧 score/ratio 策略控制。
 

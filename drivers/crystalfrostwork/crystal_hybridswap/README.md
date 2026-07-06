@@ -269,6 +269,7 @@ Common memcg nodes include:
 - `memory.erm_avail_buffer`
 - `memory.swapd_policy_stat`
 - `memory.total_info_per_app`
+- `memory.app_uid`
 
 `memory.force_shrink_anon_percent` accepts a percentage from 1 to 100
 and requests enough anonymous reclaim to make zram/writeback pages reach
@@ -287,6 +288,11 @@ The base `memory.avail_buffers` tuple, `free_swap_threshold`,
 `zram_wm_ratio`, quota, dev_life, zram gate, backoff/window throttle, and
 `force_*` interfaces are not overridden by ERM. `memory.swapd_policy_stat`
 shows the base, ERM override, and effective condition source.
+
+`memory.app_uid` is writable for compatibility, but Crystal ignores the
+written value and derives the reported value from the tasks currently attached
+to the memcg. `-1` means unknown or empty, `-2` means mixed UIDs, and
+non-negative values are real Linux UIDs.
 
 When `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM` is enabled, Crystal also exposes the legacy `memory.swapd_memcgs_param` root cgroup node and `memory.swapd_single_memcg_param` per-memcg node. When that option is disabled, these nodes are hidden and automatic memcg writeback is not controlled by the old score/ratio policy.
 

@@ -232,7 +232,7 @@ echo '...' > /sys/fs/cgroup/memory/<cg_path>/memory.swapd_single_memcg_param
 | `writeback` | 触发页面写回。 |
 | `writeback_limit` | 设置写回限制。 |
 | `writeback_limit_enable` | 启用或关闭写回限制。 |
-| `bd_stat` | 三字段 backing-device 统计，使用 ZMS 物理 4K block 口径。 |
+| `bd_stat` | 三字段 data-path backing-device 统计，使用 ZMS 物理 4K block 口径。 |
 | `zms_stat` | 显示 Crystal ZMS backing-store 状态、打包情况、block 分配、dirty 数据和 read-merge 诊断。 |
 | `writeback_cold_stat` | 显示启用 entry access-time tracking 时自动写回使用的 age/cold-page 选择计数。 |
 
@@ -334,9 +334,10 @@ Crystal Hybridswap 保留标准 zram 对外 ABI：
 - 标准 `/sys/block/zramX` 配置节点；
 - `backing_dev`、`writeback`、`writeback_limit`、`writeback_limit_enable`、`bd_stat` 等标准写回相关节点。
 
-`bd_stat` 有意保持三字段输出，但 Crystal/ZMS 下字段使用物理 4K
-backing block 口径。更详细的逻辑页、压缩 payload 和物理写入计数通过
-Crystal 统计节点和 debugfs 暴露，而不是扩展 `bd_stat` 格式。
+`bd_stat` 有意保持三字段输出，但 Crystal/ZMS 下字段使用 data-path
+物理 4K backing block 口径：当前已回写 block、累计物理回读 block、
+累计物理回写 block。ZMS compact 等内部维护 I/O 不计入 `bd_stat`；
+完整 ZMS 物理 I/O 计数保留在 `zms_stat`。
 
 ### 5.2 Crystal 扩展接口分组
 
@@ -406,10 +407,10 @@ Crystal 专属接口分为：
 
 ### 8.2 为什么 `bd_stat` 只有三字段？
 
-因为 `bd_stat` 保持三字段 ABI 形态。Crystal/ZMS 下三列分别是当前
-物理 backing block、累计物理读 block、累计物理写 block。Crystal 专属
-详细计数请查看 `hybridswap_crystal_stat`、`hybridswap_stat_snap` 和
-debugfs。
+因为 `bd_stat` 保持三字段 ABI 形态。Crystal/ZMS 下这些字段使用
+data-path 物理 4K block 口径，并排除 ZMS 内部维护 I/O。完整 ZMS
+物理读写 I/O 请查看 `zms_stat`，其他 Crystal 专属详细计数请查看
+`hybridswap_crystal_stat`、`hybridswap_stat_snap` 和 debugfs。
 
 ### 8.3 为什么 `hybridswap_vmstat` 和 `hybridswap_crystal_stat` 分开？
 

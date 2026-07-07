@@ -717,7 +717,7 @@ static int report_show(struct seq_file *m, void *v)
 	seq_puts(m, "batchin_snapshot_validation: page_level_slot_state_verify_before_commit\n");
 	seq_puts(m, "force_shrink_units: *_last_target_pages/*_last_batch_pages/*_last_reclaimed_pages are page counts; old no-suffix names are compatibility aliases\n");
 	seq_puts(m, "diagnostics: backing_read_write_latency batchin_worker writeback_worker slow_logs_rate_limited\n");
-	seq_puts(m, "zram_bd_stat: zms_physical_4k_blocks; Crystal zram IO diagnostics are named zram_* fields in debugfs stats\n");
+	seq_puts(m, "zram_bd_stat: zms_data_path_physical_4k_blocks; zms_stat physical_* includes internal ZMS I/O\n");
 	seq_puts(m, "quota_accounting: zms_physical_write_bytes\n");
 	seq_printf(m, "multi_zram: registered=%lld selected=%lld traversed=%lld eligible=%lld skip_no_backing=%lld skip_limit=%lld skip_no_resident=%lld\n",
 		   atomic64_read(&chs.stats.multi_zram_registered),

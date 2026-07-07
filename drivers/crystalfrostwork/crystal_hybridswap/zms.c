@@ -88,6 +88,7 @@ struct zms_block {
 	unsigned long *slot_handles;
 	void *data;
 	bool dirty;
+	bool bd_stat_dirty;
 	bool listed;
 	bool reading;
 	bool clean_cached;
@@ -169,6 +170,8 @@ struct zms {
 	atomic64_t physical_write_pages;
 	atomic64_t physical_write_ios;
 	atomic64_t physical_write_failed_pages;
+	atomic64_t bd_stat_read_pages;
+	atomic64_t bd_stat_write_pages;
 	zms_account_write_pages_t account_write_pages;
 	unsigned long dirty_low_pages;
 	unsigned long dirty_high_pages;
@@ -455,12 +458,14 @@ static unsigned long zms_dirty_pages(struct zms *zms)
 
 static void zms_fullness_stats_add(struct zms *zms, enum zms_fullness fullness,
 				   s64 pages);
-static void zms_mark_dirty_locked(struct zms *zms, struct zms_block *block);
+static void zms_mark_dirty_locked(struct zms *zms, struct zms_block *block,
+				  bool account_bd_stat);
 static void zms_clear_dirty_locked(struct zms *zms, struct zms_block *block);
 static int zms_flush_to(struct zms *zms, unsigned long target_pages,
 			gfp_t gfp, struct zms_io *last_io);
 static int zms_read_block(struct zms *zms, struct zms_block *block,
-			  gfp_t gfp, struct zms_io *io);
+			  gfp_t gfp, struct zms_io *io,
+			  bool account_bd_stat);
 
 static bool zms_clean_cache_eligible(const struct zms_block *block)
 {
@@ -769,7 +774,8 @@ static bool zms_handle_publish_store(struct zms *zms, unsigned long handle,
 }
 
 static void zms_account_physical_io(struct zms *zms, unsigned int op,
-				    unsigned int pages, int ret)
+				    unsigned int pages, bool account_bd_stat,
+				    int ret)
 {
 	if (!zms || !pages)
 		return;
@@ -782,23 +788,29 @@ static void zms_account_physical_io(struct zms *zms, unsigned int op,
 		}
 
 		atomic64_add(pages, &zms->physical_write_pages);
+		if (account_bd_stat)
+			atomic64_add(pages, &zms->bd_stat_write_pages);
 		if (zms->account_write_pages)
 			zms->account_write_pages(pages);
 		return;
 	}
 
 	atomic64_inc(&zms->physical_read_ios);
-	if (ret)
+	if (ret) {
 		atomic64_add(pages, &zms->physical_read_failed_pages);
-	else
+	} else {
 		atomic64_add(pages, &zms->physical_read_pages);
+		if (account_bd_stat)
+			atomic64_add(pages, &zms->bd_stat_read_pages);
+	}
 }
 
 static void zms_io_record(struct zms *zms, struct zms_io *io, unsigned int op,
 			  unsigned long block,
-			  unsigned int pages, u64 latency_ns, int ret)
+			  unsigned int pages, bool account_bd_stat,
+			  u64 latency_ns, int ret)
 {
-	zms_account_physical_io(zms, op, pages, ret);
+	zms_account_physical_io(zms, op, pages, account_bd_stat, ret);
 
 	if (!io)
 		return;
@@ -860,7 +872,7 @@ static int zms_read_frozen_block_unlocked(struct zms *zms,
 	block->read_ret = 0;
 	mutex_unlock(&class->lock);
 
-	ret = zms_read_block(zms, block, gfp, io);
+	ret = zms_read_block(zms, block, gfp, io, false);
 
 	mutex_lock(&class->lock);
 	block->read_ret = ret;
@@ -884,7 +896,8 @@ static unsigned int zms_contiguous_run(const struct zms_block *block,
 static int zms_submit_run_data(struct zms *zms, struct zms_block *block,
 			       void *base, unsigned int page_idx,
 			       unsigned int nr_pages, unsigned int op,
-			       gfp_t gfp, struct zms_io *io)
+			       gfp_t gfp, struct zms_io *io,
+			       bool account_bd_stat)
 {
 	unsigned int done = 0;
 
@@ -922,7 +935,8 @@ static int zms_submit_run_data(struct zms *zms, struct zms_block *block,
 		start = ktime_get_ns();
 		ret = submit_bio_wait(&bio);
 		zms_io_record(zms, io, op, block->blocks[page_idx + done],
-			      submitted, ktime_get_ns() - start, ret);
+			      submitted, account_bd_stat,
+			      ktime_get_ns() - start, ret);
 		bio_uninit(&bio);
 		if (ret)
 			return ret;
@@ -934,7 +948,7 @@ static int zms_submit_run_data(struct zms *zms, struct zms_block *block,
 
 static int zms_submit_block_data(struct zms *zms, struct zms_block *block,
 				 void *data, unsigned int op, gfp_t gfp,
-				 struct zms_io *io)
+				 struct zms_io *io, bool account_bd_stat)
 {
 	unsigned int i;
 	int ret;
@@ -943,7 +957,7 @@ static int zms_submit_block_data(struct zms *zms, struct zms_block *block,
 		unsigned int run = zms_contiguous_run(block, i);
 
 		ret = zms_submit_run_data(zms, block, data, i, run, op, gfp,
-					  io);
+					  io, account_bd_stat);
 		if (ret)
 			return ret;
 		i += run;
@@ -953,14 +967,15 @@ static int zms_submit_block_data(struct zms *zms, struct zms_block *block,
 }
 
 static int zms_write_block(struct zms *zms, struct zms_block *block,
-			   gfp_t gfp, struct zms_io *io)
+			   gfp_t gfp, struct zms_io *io, bool account_bd_stat)
 {
 	void *data = zms_block_data_load(block);
 
 	if (WARN_ON_ONCE(!data))
 		return -EIO;
 
-	return zms_submit_block_data(zms, block, data, REQ_OP_WRITE, gfp, io);
+	return zms_submit_block_data(zms, block, data, REQ_OP_WRITE, gfp, io,
+				     account_bd_stat);
 }
 
 static int zms_flush_class_to_locked(struct zms *zms, struct zms_class *class,
@@ -976,6 +991,7 @@ restart:
 		struct zms_block *block;
 
 		list_for_each_entry(block, &class->fullness[fullness], list) {
+			bool account_bd_stat;
 			int ret;
 
 			if (target_pages && zms_dirty_pages(zms) <= target_pages)
@@ -986,8 +1002,10 @@ restart:
 				saw_pinned = true;
 				continue;
 			}
+			account_bd_stat = block->bd_stat_dirty;
 			mutex_unlock(&class->lock);
-			ret = zms_write_block(zms, block, gfp, io);
+			ret = zms_write_block(zms, block, gfp, io,
+					      account_bd_stat);
 			mutex_lock(&class->lock);
 			if (!ret) {
 				zms_clear_dirty_locked(zms, block);
@@ -1014,7 +1032,7 @@ static int zms_flush_class_locked(struct zms *zms, struct zms_class *class,
 }
 
 static int zms_read_block(struct zms *zms, struct zms_block *block,
-			  gfp_t gfp, struct zms_io *io)
+			  gfp_t gfp, struct zms_io *io, bool account_bd_stat)
 {
 	void *data;
 	int ret;
@@ -1026,7 +1044,8 @@ static int zms_read_block(struct zms *zms, struct zms_block *block,
 	if (!data)
 		return -ENOMEM;
 
-	ret = zms_submit_block_data(zms, block, data, REQ_OP_READ, gfp, io);
+	ret = zms_submit_block_data(zms, block, data, REQ_OP_READ, gfp, io,
+				    account_bd_stat);
 	if (ret) {
 		kvfree(data);
 		return ret;
@@ -1254,12 +1273,15 @@ static void zms_free_disk_block(struct zms *zms, unsigned long block)
 	spin_unlock_irqrestore(&zms->alloc_lock, flags);
 }
 
-static void zms_mark_dirty_locked(struct zms *zms, struct zms_block *block)
+static void zms_mark_dirty_locked(struct zms *zms, struct zms_block *block,
+				  bool account_bd_stat)
 {
 	if (!block)
 		return;
 
 	zms_clean_cache_del(zms, block);
+	if (account_bd_stat)
+		block->bd_stat_dirty = true;
 	if (block->dirty)
 		return;
 
@@ -1276,6 +1298,7 @@ static void zms_clear_dirty_locked(struct zms *zms, struct zms_block *block)
 	zms_stat_add(zms, ZMS_STAT_DIRTY_BLOCKS, -1);
 	zms_stat_add(zms, ZMS_STAT_DIRTY_PAGES, -(s64)block->pages);
 	block->dirty = false;
+	block->bd_stat_dirty = false;
 }
 
 static void zms_free_block(struct zms *zms, struct zms_block *block)
@@ -1889,7 +1912,7 @@ static int zms_move_slot_locked(struct zms *zms, struct zms_class *class,
 	__set_bit(dst_slot, target->bitmap);
 	target->slot_handles[dst_slot] = handle;
 	target->used++;
-	zms_mark_dirty_locked(zms, target);
+	zms_mark_dirty_locked(zms, target, false);
 	zms_fix_fullness_locked(zms, class, target);
 
 	__clear_bit(src_slot, source->bitmap);
@@ -2259,6 +2282,8 @@ int zms_get_stats(struct zms *zms, struct zms_stats *stats)
 	stats->physical_write_ios = atomic64_read(&zms->physical_write_ios);
 	stats->physical_write_failed_pages =
 		atomic64_read(&zms->physical_write_failed_pages);
+	stats->bd_stat_read_pages = atomic64_read(&zms->bd_stat_read_pages);
+	stats->bd_stat_write_pages = atomic64_read(&zms->bd_stat_write_pages);
 	stats->partial_blocks =
 		zms_stat_read_positive(zms, ZMS_STAT_PARTIAL_BLOCKS);
 	stats->low_blocks = zms_stat_read_positive(zms, ZMS_STAT_LOW_BLOCKS);
@@ -2360,7 +2385,7 @@ retry:
 	zms_stat_add(zms, ZMS_STAT_OBJECTS, 1);
 	zms_stat_add(zms, ZMS_STAT_STORED_BYTES, size);
 	zms_stat_add(zms, ZMS_STAT_PACKED_BYTES, class->size);
-	zms_mark_dirty_locked(zms, block);
+	zms_mark_dirty_locked(zms, block, false);
 	if (!block->listed)
 		zms_insert_block_locked(zms, class, block);
 	else
@@ -2385,6 +2410,7 @@ retry:
 		return -EEXIST;
 	}
 
+	zms_mark_dirty_locked(zms, block, true);
 	ret = 0;
 	if (frozen)
 		zms_block_unfreeze(zms, block);
@@ -2577,7 +2603,7 @@ retry:
 	owner = true;
 	mutex_unlock(&class->lock);
 
-	ret = zms_read_block(zms, block, gfp, io);
+	ret = zms_read_block(zms, block, gfp, io, true);
 	mutex_lock(&class->lock);
 	block->read_ret = ret;
 	block->reading = false;

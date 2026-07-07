@@ -93,6 +93,8 @@ struct zms_stats {
 	u64 physical_write_pages;
 	u64 physical_write_ios;
 	u64 physical_write_failed_pages;
+	u64 bd_stat_read_pages;
+	u64 bd_stat_write_pages;
 };
 
 struct zms_load_item {

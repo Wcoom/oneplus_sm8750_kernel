@@ -585,7 +585,7 @@ static ssize_t hybridswap_report_show(struct device *dev,
 			 "force_swapout_units=unknown_or_filtered fields with _pages suffix are page counts; no-suffix names are compatibility aliases\n"
 			 "force_swapin_units=memory.force_swapin write value is a trigger/request value; use *_request and *_pages fields for units; total_info_per_app in_mb is compatibility only\n"
 			 "force_shrink_units=*_last_target_pages/*_last_batch_pages/*_last_reclaimed_pages are page counts; old no-suffix names are compatibility aliases\n"
-			 "zram_bd_stat=zms_physical_4k_blocks; Crystal zram IO diagnostics are named zram_* fields in hybridswap_crystal_stat and debugfs stats\n"
+			 "zram_bd_stat=zms_data_path_physical_4k_blocks; zms_stat physical_* includes internal ZMS I/O\n"
 			 "diagnostic_slow_io_ns=%llu\n"
 			 "diagnostic_slow_work_ns=%llu\n"
 			 "ub_ufs2zram_ratio_api=%s_per_memcg_page_level_batchin\n"

@@ -2942,8 +2942,8 @@ static ssize_t bd_stat_show(struct device *dev,
 		zms_get_stats(zram->zms, &stats);
 	ret = scnprintf(buf, PAGE_SIZE, "%8llu %8llu %8llu\n",
 			FOUR_K((u64)stats.used_blocks),
-			FOUR_K(stats.physical_read_pages),
-			FOUR_K(stats.physical_write_pages));
+			FOUR_K(stats.bd_stat_read_pages),
+			FOUR_K(stats.bd_stat_write_pages));
 	up_read(&zram->init_lock);
 
 	return ret;
@@ -2994,6 +2994,8 @@ static ssize_t zms_stat_show(struct device *dev,
 		"physical_write_bytes: %llu\n"
 		"physical_write_ios: %llu\n"
 		"physical_write_failed_pages: %llu\n"
+		"bd_stat_read_pages: %llu\n"
+		"bd_stat_write_pages: %llu\n"
 		"partial_blocks: %lu\n"
 		"low_blocks: %lu\n"
 		"mid_blocks: %lu\n"
@@ -3038,6 +3040,8 @@ static ssize_t zms_stat_show(struct device *dev,
 		(unsigned long long)physical_write_bytes,
 		(unsigned long long)stats.physical_write_ios,
 		(unsigned long long)stats.physical_write_failed_pages,
+		(unsigned long long)stats.bd_stat_read_pages,
+		(unsigned long long)stats.bd_stat_write_pages,
 		stats.partial_blocks,
 		stats.low_blocks,
 		stats.mid_blocks,

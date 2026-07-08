@@ -38,7 +38,7 @@
 #define ZMS_STAT_COUNTER_BATCH		32
 #define ZMS_DIRTY_HARD_MAX_PAGES	(SZ_32M >> PAGE_SHIFT)
 #define ZMS_DIRTY_FLUSH_DELAY_MS	20U
-#define ZMS_CLEAN_CACHE_MAX_PAGES	(SZ_16M >> PAGE_SHIFT)
+#define ZMS_CLEAN_CACHE_MAX_PAGES	(SZ_64M >> PAGE_SHIFT)
 #define ZMS_HANDLE_LOCK_BITS		8
 #define ZMS_HANDLE_LOCKS		(1U << ZMS_HANDLE_LOCK_BITS)
 #define ZMS_PIN_DROP_DATA		(1 << 26)
@@ -1373,6 +1373,7 @@ static void zms_remove_block_locked(struct zms *zms, struct zms_class *class,
 static void zms_fix_fullness_locked(struct zms *zms, struct zms_class *class,
 				    struct zms_block *block)
 {
+	enum zms_fullness old_fullness;
 	enum zms_fullness fullness;
 
 	if (!block->used)
@@ -1380,14 +1381,17 @@ static void zms_fix_fullness_locked(struct zms *zms, struct zms_class *class,
 	if (WARN_ON_ONCE(!block->listed))
 		return;
 
+	old_fullness = block->fullness;
 	fullness = zms_block_fullness(block);
-	if (fullness == block->fullness)
+	if (fullness == old_fullness)
 		return;
 
-	zms_fullness_stats_add(zms, block->fullness, -(s64)block->pages);
+	zms_fullness_stats_add(zms, old_fullness, -(s64)block->pages);
 	list_move_tail(&block->list, &class->fullness[fullness]);
 	block->fullness = fullness;
 	zms_fullness_stats_add(zms, block->fullness, block->pages);
+	if (fullness < ZMS_FG_ALMOST_FULL)
+		zms_clean_cache_del(zms, block);
 }
 
 static struct zms_block *zms_find_available_block_locked(struct zms_class *class)

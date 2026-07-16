@@ -1013,13 +1013,29 @@ static void crystal_hybridswap_add_zram_io_stats(
 	dst->prefetch_snapshot_mismatch += src->prefetch_snapshot_mismatch;
 	dst->prefetch_no_data += src->prefetch_no_data;
 	dst->prefetch_alloc_failures += src->prefetch_alloc_failures;
+	dst->prefetch_cached_attempts += src->prefetch_cached_attempts;
+	dst->prefetch_cached_hits += src->prefetch_cached_hits;
+	dst->prefetch_cached_misses += src->prefetch_cached_misses;
+	dst->prefetch_safe_limited += src->prefetch_safe_limited;
+	dst->prefetch_promote_bytes += src->prefetch_promote_bytes;
+	dst->prefetch_cookie_mismatch += src->prefetch_cookie_mismatch;
+	dst->prefetch_payload_buffer_failures +=
+		src->prefetch_payload_buffer_failures;
+	dst->prefetch_promote_alloc_failures +=
+		src->prefetch_promote_alloc_failures;
+	dst->prefetch_zms_read_ios += src->prefetch_zms_read_ios;
 	dst->prefetch_hits += src->prefetch_hits;
 	dst->prefetch_stale_hits += src->prefetch_stale_hits;
 	dst->prefetch_expired += src->prefetch_expired;
 	dst->prefetch_reclaimed += src->prefetch_reclaimed;
 	dst->prefetch_invalidated += src->prefetch_invalidated;
+	dst->prefetch_wasted = dst->prefetch_reclaimed +
+		dst->prefetch_invalidated;
 	dst->prefetch_hit_pct = dst->prefetch_moved ?
 		mul_u64_u64_div_u64(dst->prefetch_hits, 100,
+				    dst->prefetch_moved) : 0;
+	dst->prefetch_waste_pct = dst->prefetch_moved ?
+		mul_u64_u64_div_u64(dst->prefetch_wasted, 100,
 				    dst->prefetch_moved) : 0;
 	dst->scan_errors_count += src->scan_errors_count;
 }

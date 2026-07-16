@@ -150,6 +150,9 @@ struct zms {
 	atomic_long_t read_merge_failures;
 	atomic_long_t load_resident_hits;
 	atomic_long_t load_disk_misses;
+	atomic_long_t clean_cache_evictions;
+	atomic_long_t clean_cache_fullness_drops;
+	atomic_long_t clean_cache_demand_hits;
 	atomic_long_t alloc_run_success_pages;
 	atomic_long_t alloc_run_partial_pages;
 	atomic_long_t alloc_run_fallback_pages;
@@ -497,7 +500,9 @@ static void zms_clean_cache_del(struct zms *zms, struct zms_block *block)
 	spin_unlock_irqrestore(&zms->clean_lock, flags);
 }
 
-static bool zms_clean_cache_add(struct zms *zms, struct zms_block *block)
+static bool zms_clean_cache_add_mode(struct zms *zms,
+				     struct zms_block *block,
+				     bool touch_existing)
 {
 	unsigned long flags;
 
@@ -510,7 +515,8 @@ static bool zms_clean_cache_add(struct zms *zms, struct zms_block *block)
 		return false;
 	}
 	if (READ_ONCE(block->clean_cached)) {
-		WRITE_ONCE(block->clean_referenced, true);
+		if (touch_existing)
+			WRITE_ONCE(block->clean_referenced, true);
 		spin_unlock_irqrestore(&zms->clean_lock, flags);
 		return false;
 	}
@@ -522,6 +528,17 @@ static bool zms_clean_cache_add(struct zms *zms, struct zms_block *block)
 		   zms->clean_cache_pages + block->pages);
 	spin_unlock_irqrestore(&zms->clean_lock, flags);
 	return true;
+}
+
+static bool zms_clean_cache_add(struct zms *zms, struct zms_block *block)
+{
+	return zms_clean_cache_add_mode(zms, block, true);
+}
+
+static bool zms_clean_cache_add_untouched(struct zms *zms,
+					  struct zms_block *block)
+{
+	return zms_clean_cache_add_mode(zms, block, false);
 }
 
 static void zms_clean_cache_touch(struct zms_block *block)
@@ -563,6 +580,7 @@ static void zms_clean_cache_shrink(struct zms *zms, unsigned long max_pages)
 		list_del_init(&block->clean_node);
 		WRITE_ONCE(block->clean_cached, false);
 		WRITE_ONCE(block->clean_referenced, false);
+		atomic_long_inc(&zms->clean_cache_evictions);
 		if (zms->clean_cache_pages >= block->pages)
 			WRITE_ONCE(zms->clean_cache_pages,
 				   zms->clean_cache_pages - block->pages);
@@ -601,6 +619,23 @@ static void zms_release_block_data_locked(struct zms *zms,
 
 	if (zms_clean_cache_eligible(block)) {
 		if (zms_clean_cache_add(zms, block))
+			zms_clean_cache_shrink(zms, zms->clean_cache_max_pages);
+		return;
+	}
+
+	zms_drop_block_data_locked(zms, block);
+}
+
+static void zms_reconcile_clean_cache_locked(struct zms *zms,
+					      struct zms_block *block)
+{
+	if (WARN_ON_ONCE(block->dirty))
+		return;
+	if (!zms_block_data_load(block))
+		return;
+
+	if (zms_clean_cache_eligible(block)) {
+		if (zms_clean_cache_add_untouched(zms, block))
 			zms_clean_cache_shrink(zms, zms->clean_cache_max_pages);
 		return;
 	}
@@ -730,9 +765,9 @@ static bool zms_handle_matches_snapshot(struct zms *zms, unsigned long handle,
 	return match;
 }
 
-static bool zms_handle_points_to_slot(struct zms *zms, unsigned long handle,
-				      struct zms_block *block,
-				      unsigned int slot)
+static bool zms_get_slot_cookie(struct zms *zms, unsigned long handle,
+				struct zms_block *block, unsigned int slot,
+				struct zms_object_cookie *cookie)
 {
 	struct zms_handle_entry *entry;
 	unsigned long flags;
@@ -745,6 +780,10 @@ static bool zms_handle_points_to_slot(struct zms *zms, unsigned long handle,
 	entry = &zms->handles[handle];
 	match = zms_handle_active(entry) && entry->block == block &&
 		entry->slot == slot;
+	if (match) {
+		cookie->handle = handle;
+		cookie->generation = entry->generation;
+	}
 	spin_unlock_irqrestore(zms_handle_lock(zms, handle), flags);
 	return match;
 }
@@ -1390,8 +1429,11 @@ static void zms_fix_fullness_locked(struct zms *zms, struct zms_class *class,
 	list_move_tail(&block->list, &class->fullness[fullness]);
 	block->fullness = fullness;
 	zms_fullness_stats_add(zms, block->fullness, block->pages);
-	if (fullness < ZMS_FG_ALMOST_FULL)
+	if (fullness < ZMS_FG_ALMOST_FULL) {
+		if (READ_ONCE(block->clean_cached))
+			atomic_long_inc(&zms->clean_cache_fullness_drops);
 		zms_clean_cache_del(zms, block);
+	}
 }
 
 static struct zms_block *zms_find_available_block_locked(struct zms_class *class)
@@ -1768,7 +1810,6 @@ static int zms_free_handle(struct zms *zms, unsigned long handle)
 	spin_unlock_irqrestore(zms_handle_lock(zms, handle), flags);
 	zms_pending_stat_dec_if_set(zms, handle);
 
-	zms_clean_cache_del(zms, block);
 	__clear_bit(snapshot.slot, block->bitmap);
 	block->slot_handles[snapshot.slot] = 0;
 	zms_stat_add(zms, ZMS_STAT_OBJECTS, -1);
@@ -1785,7 +1826,7 @@ static int zms_free_handle(struct zms *zms, unsigned long handle)
 	} else {
 		zms_fix_fullness_locked(zms, class, block);
 		if (!block->dirty)
-			zms_release_block_data_locked(zms, block);
+			zms_reconcile_clean_cache_locked(zms, block);
 		zms_block_unfreeze(zms, block);
 	}
 	mutex_unlock(&class->lock);
@@ -2266,6 +2307,13 @@ int zms_get_stats(struct zms *zms, struct zms_stats *stats)
 		atomic_long_read(&zms->reclaim_before_alloc_handles);
 	stats->load_resident_hits = atomic_long_read(&zms->load_resident_hits);
 	stats->load_disk_misses = atomic_long_read(&zms->load_disk_misses);
+	stats->clean_cache_pages = READ_ONCE(zms->clean_cache_pages);
+	stats->clean_cache_evictions =
+		atomic_long_read(&zms->clean_cache_evictions);
+	stats->clean_cache_fullness_drops =
+		atomic_long_read(&zms->clean_cache_fullness_drops);
+	stats->clean_cache_demand_hits =
+		atomic_long_read(&zms->clean_cache_demand_hits);
 	load_total = (u64)stats->load_resident_hits + stats->load_disk_misses;
 	if (load_total)
 		stats->load_resident_hit_pct =
@@ -2451,7 +2499,9 @@ static void zms_put_block_ref(struct zms *zms, struct zms_block *block)
 }
 
 static int zms_try_load_cached_ref(struct zms *zms, unsigned long handle,
-				   struct zms_load_ref *ref, bool account_load)
+				   const struct zms_object_cookie *cookie,
+				   struct zms_load_ref *ref,
+				   bool account_load, bool touch_cache)
 {
 	struct zms_handle_entry *entry;
 	struct zms_block *block = NULL;
@@ -2468,6 +2518,10 @@ static int zms_try_load_cached_ref(struct zms *zms, unsigned long handle,
 	entry = &zms->handles[handle];
 	if (!zms_handle_active(entry)) {
 		ret = -ENOENT;
+		goto out;
+	}
+	if (cookie && entry->generation != cookie->generation) {
+		ret = -ESTALE;
 		goto out;
 	}
 	block = entry->block;
@@ -2488,11 +2542,15 @@ static int zms_try_load_cached_ref(struct zms *zms, unsigned long handle,
 	ref->data = (char *)data + entry->offset;
 	ref->size = entry->size;
 	ref->private = block;
+	ref->cookie.handle = handle;
+	ref->cookie.generation = entry->generation;
 	if (account_load)
 		atomic_long_inc(&zms->load_resident_hits);
 out:
 	spin_unlock_irqrestore(zms_handle_lock(zms, handle), flags);
-	if (!ret && clean_cached)
+	if (!ret && clean_cached && account_load)
+		atomic_long_inc(&zms->clean_cache_demand_hits);
+	if (!ret && clean_cached && touch_cache)
 		zms_clean_cache_touch(block);
 	if (put)
 		zms_put_block_ref(zms, block);
@@ -2516,7 +2574,38 @@ int zms_load_cached_ref(struct zms *zms, unsigned long handle,
 		return -EINVAL;
 	memset(ref, 0, sizeof(*ref));
 
-	return zms_try_load_cached_ref(zms, handle, ref, true);
+	return zms_try_load_cached_ref(zms, handle, NULL, ref, true, true);
+}
+
+int zms_load_prefetch_ref(struct zms *zms,
+			  const struct zms_object_cookie *cookie,
+			  struct zms_load_ref *ref)
+{
+	if (!zms || !cookie || !ref || !cookie->handle)
+		return -EINVAL;
+	memset(ref, 0, sizeof(*ref));
+
+	return zms_try_load_cached_ref(zms, cookie->handle, cookie, ref,
+				       false, false);
+}
+
+bool zms_cookie_matches(struct zms *zms,
+			const struct zms_object_cookie *cookie)
+{
+	struct zms_handle_entry *entry;
+	unsigned long flags;
+	bool match;
+
+	if (!zms || !cookie || !cookie->handle ||
+	    cookie->handle > zms->nr_handles)
+		return false;
+
+	spin_lock_irqsave(zms_handle_lock(zms, cookie->handle), flags);
+	entry = &zms->handles[cookie->handle];
+	match = zms_handle_active(entry) &&
+		entry->generation == cookie->generation;
+	spin_unlock_irqrestore(zms_handle_lock(zms, cookie->handle), flags);
+	return match;
 }
 
 int zms_load_ref(struct zms *zms, unsigned long handle, struct zms_load_ref *ref,
@@ -2535,7 +2624,7 @@ int zms_load_ref(struct zms *zms, unsigned long handle, struct zms_load_ref *ref
 		return -EINVAL;
 	memset(ref, 0, sizeof(*ref));
 
-	ret = zms_try_load_cached_ref(zms, handle, ref, false);
+	ret = zms_try_load_cached_ref(zms, handle, NULL, ref, false, true);
 	if (!ret || ret != -EAGAIN)
 		return ret;
 
@@ -2567,6 +2656,8 @@ retry:
 			ref->data = (char *)data + snapshot.offset;
 			ref->size = snapshot.size;
 			ref->private = block;
+			ref->cookie.handle = handle;
+			ref->cookie.generation = snapshot.generation;
 			mutex_unlock(&class->lock);
 			return 0;
 		}
@@ -2598,6 +2689,8 @@ retry:
 		ref->data = (char *)data + snapshot.offset;
 		ref->size = snapshot.size;
 		ref->private = block;
+		ref->cookie.handle = handle;
+		ref->cookie.generation = snapshot.generation;
 		mutex_unlock(&class->lock);
 		return 0;
 	}
@@ -2629,6 +2722,8 @@ retry:
 		ref->data = (char *)data + snapshot.offset;
 		ref->size = snapshot.size;
 		ref->private = block;
+		ref->cookie.handle = handle;
+		ref->cookie.generation = snapshot.generation;
 		shrink_clean_cache = zms_clean_cache_add(zms, block);
 		owner = false;
 	}
@@ -2694,41 +2789,55 @@ int zms_load_batch(struct zms *zms, struct zms_load_item *items,
 	return 0;
 }
 
-int zms_peek_neighbors(struct zms *zms, unsigned long handle,
-		       unsigned long *handles, unsigned int max_handles)
+int zms_peek_ref_neighbors(struct zms *zms,
+			   const struct zms_load_ref *source,
+			   struct zms_object_cookie *objects,
+			   unsigned int max_objects,
+			   struct zms_prefetch_info *info)
 {
-	struct zms_load_snapshot snapshot;
 	struct zms_block *block;
 	unsigned int found = 0;
+	unsigned int safe = 0;
 	unsigned int slot;
-	int ret;
 
-	if (!zms || !handle || !handles || !max_handles)
+	if (!zms || !source || !source->private || !source->cookie.handle ||
+	    !objects || !max_objects || !info)
 		return -EINVAL;
+	memset(info, 0, sizeof(*info));
 
-	ret = zms_get_handle_ref(zms, handle, &snapshot);
-	if (ret)
-		return ret;
-
-	block = snapshot.block;
-	if (block->fullness == ZMS_FG_LOW || block->fullness == ZMS_FG_MID) {
-		zms_block_ref_put(zms, block);
+	block = source->private;
+	if (!zms_cookie_matches(zms, &source->cookie) ||
+	    !zms_block_data_load(block) || block->dirty ||
+	    block->fullness < ZMS_FG_ALMOST_FULL)
 		return 0;
-	}
 
-	for (slot = 0; slot < block->slots && found < max_handles; slot++) {
+	info->source_pages = block->pages;
+	info->source_used = block->used;
+	info->source_slots = block->slots;
+	while (safe < max_objects && safe < block->used - 1) {
+		unsigned int remaining = block->used - safe - 1;
+
+		if (remaining * 100U / block->slots <= 66U)
+			break;
+		safe++;
+	}
+	info->safe_promotions = safe;
+	if (!safe)
+		return 0;
+
+	for (slot = 0; slot < block->slots && found < max_objects; slot++) {
 		unsigned long neighbor = block->slot_handles[slot];
 
-		if (!neighbor || neighbor == handle)
+		if (!neighbor || neighbor == source->cookie.handle)
 			continue;
 		if (neighbor > zms->nr_handles)
 			continue;
-		if (!zms_handle_points_to_slot(zms, neighbor, block, slot))
+		if (!zms_get_slot_cookie(zms, neighbor, block, slot,
+					 &objects[found]))
 			continue;
 
-		handles[found++] = neighbor;
+		found++;
 	}
-	zms_block_ref_put(zms, block);
 
 	return found;
 }

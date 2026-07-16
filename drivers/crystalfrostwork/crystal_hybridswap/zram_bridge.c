@@ -469,6 +469,26 @@ static ssize_t hybridswap_crystal_stat_show(struct device *dev,
 				 zram_io_stats.prefetch_runs);
 	ret += sysfs_emit_at(buf, ret, "zram_prefetch_moved %llu\n",
 				 zram_io_stats.prefetch_moved);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_cached_attempts %llu\n",
+				 zram_io_stats.prefetch_cached_attempts);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_cached_hits %llu\n",
+				 zram_io_stats.prefetch_cached_hits);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_cached_misses %llu\n",
+				 zram_io_stats.prefetch_cached_misses);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_safe_limited %llu\n",
+				 zram_io_stats.prefetch_safe_limited);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_promote_bytes %llu\n",
+				 zram_io_stats.prefetch_promote_bytes);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_cookie_mismatch %llu\n",
+				 zram_io_stats.prefetch_cookie_mismatch);
+	ret += sysfs_emit_at(buf, ret,
+			 "zram_prefetch_payload_buffer_failures %llu\n",
+			 zram_io_stats.prefetch_payload_buffer_failures);
+	ret += sysfs_emit_at(buf, ret,
+			 "zram_prefetch_promote_alloc_failures %llu\n",
+			 zram_io_stats.prefetch_promote_alloc_failures);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_zms_read_ios %llu\n",
+				 zram_io_stats.prefetch_zms_read_ios);
 	ret += sysfs_emit_at(buf, ret, "zram_prefetch_hits %llu\n",
 				 zram_io_stats.prefetch_hits);
 	ret += sysfs_emit_at(buf, ret, "zram_prefetch_hit_pct %llu\n",
@@ -481,6 +501,10 @@ static ssize_t hybridswap_crystal_stat_show(struct device *dev,
 				 zram_io_stats.prefetch_reclaimed);
 	ret += sysfs_emit_at(buf, ret, "zram_prefetch_invalidated %llu\n",
 				 zram_io_stats.prefetch_invalidated);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_wasted %llu\n",
+				 zram_io_stats.prefetch_wasted);
+	ret += sysfs_emit_at(buf, ret, "zram_prefetch_waste_pct %llu\n",
+				 zram_io_stats.prefetch_waste_pct);
 	ret += sysfs_emit_at(buf, ret, "zram_prefetch_read_errors %llu\n",
 				 zram_io_stats.prefetch_read_errors);
 	ret += sysfs_emit_at(buf, ret, "zram_prefetch_prepare_errors %llu\n",

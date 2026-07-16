@@ -166,6 +166,15 @@ struct zram_stats {
 		atomic64_t prefetch_snapshot_mismatch;
 		atomic64_t prefetch_no_data;
 		atomic64_t prefetch_alloc_failures;
+		atomic64_t prefetch_cached_attempts;
+		atomic64_t prefetch_cached_hits;
+		atomic64_t prefetch_cached_misses;
+		atomic64_t prefetch_safe_limited;
+		atomic64_t prefetch_promote_bytes;
+		atomic64_t prefetch_cookie_mismatch;
+		atomic64_t prefetch_payload_buffer_failures;
+		atomic64_t prefetch_promote_alloc_failures;
+		atomic64_t prefetch_zms_read_ios;
 		atomic64_t prefetch_hits;
 		atomic64_t prefetch_stale_hits;
 		atomic64_t prefetch_expired;
@@ -249,7 +258,10 @@ struct zram {
 	u32 prefetch_last_fault_index;
 	u32 prefetch_prev_fault_index;
 	u64 prefetch_last_fault_memcg_id;
+	unsigned int prefetch_degree;
+	unsigned long prefetch_ttl_ms;
 	bool prefetch_fault_valid;
+	bool prefetch_enable;
 	struct block_device *bdev;
 	struct zms *zms;
 	struct work_struct zms_gc_work;

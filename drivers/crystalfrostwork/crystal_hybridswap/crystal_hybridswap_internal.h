@@ -293,12 +293,23 @@ struct crystal_hybridswap_zram_io_stats {
 	u64 prefetch_snapshot_mismatch;
 	u64 prefetch_no_data;
 	u64 prefetch_alloc_failures;
+	u64 prefetch_cached_attempts;
+	u64 prefetch_cached_hits;
+	u64 prefetch_cached_misses;
+	u64 prefetch_safe_limited;
+	u64 prefetch_promote_bytes;
+	u64 prefetch_cookie_mismatch;
+	u64 prefetch_payload_buffer_failures;
+	u64 prefetch_promote_alloc_failures;
+	u64 prefetch_zms_read_ios;
 	u64 prefetch_hits;
 	u64 prefetch_stale_hits;
 	u64 prefetch_expired;
 	u64 prefetch_reclaimed;
 	u64 prefetch_invalidated;
+	u64 prefetch_wasted;
 	u64 prefetch_hit_pct;
+	u64 prefetch_waste_pct;
 	u64 scan_errors_count;
 };
 

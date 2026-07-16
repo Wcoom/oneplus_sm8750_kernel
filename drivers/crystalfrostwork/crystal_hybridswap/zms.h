@@ -85,6 +85,10 @@ struct zms_stats {
 	unsigned long load_resident_hits;
 	unsigned long load_disk_misses;
 	unsigned long load_resident_hit_pct;
+	unsigned long clean_cache_pages;
+	unsigned long clean_cache_evictions;
+	unsigned long clean_cache_fullness_drops;
+	unsigned long clean_cache_demand_hits;
 	u64 stored_bytes;
 	u64 packed_bytes;
 	u64 physical_read_pages;
@@ -105,10 +109,23 @@ struct zms_load_item {
 	int ret;
 };
 
+struct zms_object_cookie {
+	unsigned long handle;
+	u32 generation;
+};
+
+struct zms_prefetch_info {
+	unsigned int source_pages;
+	unsigned int source_used;
+	unsigned int source_slots;
+	unsigned int safe_promotions;
+};
+
 struct zms_load_ref {
 	const void *data;
 	size_t size;
 	void *private;
+	struct zms_object_cookie cookie;
 };
 
 struct zms *zms_create(struct block_device *bdev, unsigned long nr_blocks,
@@ -124,13 +141,21 @@ int zms_load(struct zms *zms, unsigned long handle, void *dst, size_t *size,
 	     gfp_t gfp, struct zms_io *io);
 int zms_load_cached_ref(struct zms *zms, unsigned long handle,
 			struct zms_load_ref *ref, struct zms_io *io);
+int zms_load_prefetch_ref(struct zms *zms,
+			  const struct zms_object_cookie *cookie,
+			  struct zms_load_ref *ref);
+bool zms_cookie_matches(struct zms *zms,
+			const struct zms_object_cookie *cookie);
 int zms_load_ref(struct zms *zms, unsigned long handle, struct zms_load_ref *ref,
 			 gfp_t gfp, struct zms_io *io);
 void zms_put_ref(struct zms *zms, struct zms_load_ref *ref);
 int zms_load_batch(struct zms *zms, struct zms_load_item *items,
 		   unsigned int nr, gfp_t gfp, struct zms_io *io);
-int zms_peek_neighbors(struct zms *zms, unsigned long handle,
-		       unsigned long *handles, unsigned int max_handles);
+int zms_peek_ref_neighbors(struct zms *zms,
+			   const struct zms_load_ref *source,
+			   struct zms_object_cookie *objects,
+			   unsigned int max_objects,
+			   struct zms_prefetch_info *info);
 void zms_free(struct zms *zms, unsigned long handle);
 int zms_flush_all(struct zms *zms, gfp_t gfp, struct zms_io *last_io);
 int zms_compact(struct zms *zms, gfp_t gfp, struct zms_io *io);

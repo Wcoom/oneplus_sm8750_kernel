@@ -30,7 +30,7 @@ extern struct address_space *swapper_spaces[];
 		>> SWAP_ADDRESS_SPACE_SHIFT])
 
 void show_swap_cache_info(void);
-bool add_to_swap(struct folio *folio);
+int add_to_swap(struct folio *folio);
 void *get_shadow_from_swap_cache(swp_entry_t entry);
 int add_to_swap_cache(struct folio *folio, swp_entry_t entry,
 		      gfp_t gfp, void **shadowp);
@@ -115,9 +115,9 @@ struct folio *filemap_get_incore_folio(struct address_space *mapping,
 	return filemap_get_folio(mapping, index);
 }
 
-static inline bool add_to_swap(struct folio *folio)
+static inline int add_to_swap(struct folio *folio)
 {
-	return false;
+	return -ENOSPC;
 }
 
 static inline void *get_shadow_from_swap_cache(swp_entry_t entry)

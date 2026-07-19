@@ -513,7 +513,7 @@ static inline long get_nr_swap_pages(void)
 }
 
 extern void si_swapinfo(struct sysinfo *);
-swp_entry_t folio_alloc_swap(struct folio *folio);
+swp_entry_t folio_alloc_swap(struct folio *folio, int *error);
 bool folio_free_swap(struct folio *folio);
 void put_swap_folio(struct folio *folio, swp_entry_t entry);
 extern swp_entry_t get_swap_page_of_type(int);
@@ -624,9 +624,12 @@ static inline int swp_swapcount(swp_entry_t entry)
 	return 0;
 }
 
-static inline swp_entry_t folio_alloc_swap(struct folio *folio)
+static inline swp_entry_t folio_alloc_swap(struct folio *folio, int *error)
 {
 	swp_entry_t entry;
+
+	if (error)
+		*error = -ENOSPC;
 	entry.val = 0;
 	return entry;
 }
@@ -698,13 +701,14 @@ static inline void folio_throttle_swaprate(struct folio *folio, gfp_t gfp)
 
 #if defined(CONFIG_MEMCG) && defined(CONFIG_SWAP)
 void mem_cgroup_swapout(struct folio *folio, swp_entry_t entry);
-int __mem_cgroup_try_charge_swap(struct folio *folio, swp_entry_t entry);
+int __mem_cgroup_try_charge_swap(struct folio *folio, swp_entry_t entry,
+				 long *nr_swap_pages);
 static inline int mem_cgroup_try_charge_swap(struct folio *folio,
-		swp_entry_t entry)
+		swp_entry_t entry, long *nr_swap_pages)
 {
 	if (mem_cgroup_disabled())
 		return 0;
-	return __mem_cgroup_try_charge_swap(folio, entry);
+	return __mem_cgroup_try_charge_swap(folio, entry, nr_swap_pages);
 }
 
 extern void __mem_cgroup_uncharge_swap(swp_entry_t entry, unsigned int nr_pages);
@@ -723,7 +727,8 @@ static inline void mem_cgroup_swapout(struct folio *folio, swp_entry_t entry)
 }
 
 static inline int mem_cgroup_try_charge_swap(struct folio *folio,
-					     swp_entry_t entry)
+					     swp_entry_t entry,
+					     long *nr_swap_pages)
 {
 	return 0;
 }

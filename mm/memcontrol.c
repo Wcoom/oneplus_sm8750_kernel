@@ -6847,14 +6847,29 @@ static ssize_t memory_reclaim(struct kernfs_open_file *of, char *buf,
 	unsigned int nr_retries = MAX_RECLAIM_RETRIES;
 	unsigned long nr_to_reclaim, nr_reclaimed = 0;
 	unsigned int reclaim_options;
+	char *token;
 	int err;
 
 	buf = strstrip(buf);
-	err = page_counter_memparse(buf, "", &nr_to_reclaim);
+	if (!*buf)
+		return -EINVAL;
+
+	token = strsep(&buf, " \t\n");
+	err = page_counter_memparse(token, "", &nr_to_reclaim);
 	if (err)
 		return err;
 
 	reclaim_options	= MEMCG_RECLAIM_MAY_SWAP | MEMCG_RECLAIM_PROACTIVE;
+	while ((token = strsep(&buf, " \t\n")) != NULL) {
+		if (!*token)
+			continue;
+		if (!strcmp(token, "swappiness=max")) {
+			reclaim_options |= MEMCG_RECLAIM_ANON_ONLY;
+			continue;
+		}
+		return -EINVAL;
+	}
+
 	while (nr_reclaimed < nr_to_reclaim) {
 		/* Will converge on zero, but reclaim enforces a minimum */
 		unsigned long batch_size = (nr_to_reclaim - nr_reclaimed) / 4;

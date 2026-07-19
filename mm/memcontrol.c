@@ -6866,22 +6866,29 @@ static ssize_t memory_reclaim(struct kernfs_open_file *of, char *buf,
 	unsigned long nr_to_reclaim, nr_reclaimed = 0;
 	int swappiness = -1;
 	unsigned int reclaim_options;
-	char *old_buf, *start;
+	char *token;
 	substring_t args[MAX_OPT_ARGS];
+	int err;
 
 	buf = strstrip(buf);
-
-	old_buf = buf;
-	nr_to_reclaim = memparse(buf, &buf) / PAGE_SIZE;
-	if (buf == old_buf)
+	if (!*buf)
 		return -EINVAL;
 
-	buf = strstrip(buf);
+	token = strsep(&buf, " \t\n");
+	err = page_counter_memparse(token, "", &nr_to_reclaim);
+	if (err)
+		return err;
 
-	while ((start = strsep(&buf, " ")) != NULL) {
-		if (!strlen(start))
+	reclaim_options	= MEMCG_RECLAIM_MAY_SWAP | MEMCG_RECLAIM_PROACTIVE;
+	while ((token = strsep(&buf, " \t\n")) != NULL) {
+		if (!*token)
 			continue;
-		switch (match_token(start, tokens, args)) {
+		if (!strcmp(token, "swappiness=max")) {
+			reclaim_options |= MEMCG_RECLAIM_ANON_ONLY;
+			continue;
+		}
+		return -EINVAL;
+		switch (match_token(token, tokens, args)) {
 		case MEMORY_RECLAIM_SWAPPINESS:
 			if (match_int(&args[0], &swappiness))
 				return -EINVAL;
@@ -6893,7 +6900,6 @@ static ssize_t memory_reclaim(struct kernfs_open_file *of, char *buf,
 		}
 	}
 
-	reclaim_options	= MEMCG_RECLAIM_MAY_SWAP | MEMCG_RECLAIM_PROACTIVE;
 	while (nr_reclaimed < nr_to_reclaim) {
 		/* Will converge on zero, but reclaim enforces a minimum */
 		unsigned long batch_size = (nr_to_reclaim - nr_reclaimed) / 4;

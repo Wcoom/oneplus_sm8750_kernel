@@ -1805,6 +1805,7 @@ retry:
 		bool activate = false;
 		bool keep = false;
 		bool should_split_to_list = false;
+		int swap_error;
 
 		cond_resched();
 
@@ -1996,11 +1997,12 @@ retry:
 				    (data_race(!list_empty(&folio->_deferred_list)) ||
 				    should_split_to_list))
 					split_folio_to_list(folio, folio_list);
-				if (!add_to_swap(folio)) {
+				swap_error = add_to_swap(folio);
+				if (swap_error) {
 					int __maybe_unused order = folio_order(folio);
 					bool bypass = false;
 
-					if (!folio_test_large(folio))
+					if (!folio_test_large(folio) || swap_error != -E2BIG)
 						goto activate_locked_split;
 					trace_android_vh_split_large_folio_bypass(&bypass);
 					if (bypass)
@@ -2014,7 +2016,7 @@ retry:
 					}
 					count_mthp_stat(order, MTHP_STAT_SWPOUT_FALLBACK);
 #endif
-					if (!add_to_swap(folio))
+					if (add_to_swap(folio))
 						goto activate_locked_split;
 				}
 			}

@@ -301,16 +301,21 @@ direct_free:
 	}
 }
 
-swp_entry_t folio_alloc_swap(struct folio *folio)
+swp_entry_t folio_alloc_swap(struct folio *folio, int *error)
 {
 	swp_entry_t entry;
 	struct swap_slots_cache *cache;
+	unsigned int order = folio_order(folio);
+	long nr_swap_pages = get_nr_swap_pages();
+	int ret;
 
 	entry.val = 0;
+	if (error)
+		*error = 0;
 
 	if (folio_test_large(folio)) {
 		if (IS_ENABLED(CONFIG_THP_SWAP))
-			get_swap_pages(1, &entry, folio_order(folio));
+			get_swap_pages(1, &entry, order);
 		goto out;
 	}
 
@@ -344,9 +349,26 @@ repeat:
 
 	get_swap_pages(1, &entry, 0);
 out:
-	if (mem_cgroup_try_charge_swap(folio, entry)) {
+	ret = mem_cgroup_try_charge_swap(folio, entry, &nr_swap_pages);
+	if (ret) {
 		put_swap_folio(folio, entry);
 		entry.val = 0;
+		if (error)
+			*error = order && nr_swap_pages > 0 ? -E2BIG : -ENOMEM;
+		return entry;
 	}
+
+	if (!entry.val && error) {
+		long global_swap_pages = get_nr_swap_pages();
+
+		nr_swap_pages = min(nr_swap_pages, global_swap_pages);
+		if (order && nr_swap_pages > 0)
+			*error = -E2BIG;
+		else if (global_swap_pages <= 0)
+			*error = -ENOSPC;
+		else
+			*error = -ENOMEM;
+	}
+
 	return entry;
 }

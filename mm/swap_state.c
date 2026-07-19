@@ -171,9 +171,10 @@ void __delete_from_swap_cache(struct folio *folio,
  * swap cache.
  *
  * Context: Caller needs to hold the folio lock.
- * Return: Whether the folio was added to the swap cache.
+ * Return: 0 on success, -E2BIG if splitting the folio might allow swapout,
+ * or another negative error code if splitting would not help.
  */
-bool add_to_swap(struct folio *folio)
+int add_to_swap(struct folio *folio)
 {
 	swp_entry_t entry;
 	int err;
@@ -181,9 +182,9 @@ bool add_to_swap(struct folio *folio)
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	VM_BUG_ON_FOLIO(!folio_test_uptodate(folio), folio);
 
-	entry = folio_alloc_swap(folio);
+	entry = folio_alloc_swap(folio, &err);
 	if (!entry.val)
-		return false;
+		return err;
 
 	/*
 	 * XArray node allocations from PF_MEMALLOC contexts could
@@ -217,11 +218,11 @@ bool add_to_swap(struct folio *folio)
 	 */
 	folio_mark_dirty(folio);
 
-	return true;
+	return 0;
 
 fail:
 	put_swap_folio(folio, entry);
-	return false;
+	return err;
 }
 
 /*

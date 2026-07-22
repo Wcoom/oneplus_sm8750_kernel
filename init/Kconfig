@@ -2056,3 +2056,11 @@ source "init/Kconfig.gki"
 
 endif
 source "init/Kconfig.gki-debug"
+
+menu "whitewhale0612"
+
+config ARCH_ORYON
+	bool
+	default y
+
+endmenu

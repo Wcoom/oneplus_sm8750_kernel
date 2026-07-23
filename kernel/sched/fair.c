@@ -10070,11 +10070,6 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 		nr_running = rq->nr_running;
 		sgs->sum_nr_running += nr_running;
 
-		if (cpu_overutilized(i)) {
-			*sg_status |= SG_OVERUTILIZED;
-			sgs->nr_overutilized++;
-		}
-
 		/*
 		 * No need to call idle_cpu() if nr_running is not 0
 		 */
@@ -10082,6 +10077,11 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 			sgs->idle_cpus++;
 			/* Idle cpu can't have misfit task */
 			continue;
+		}
+
+		if (cpu_overutilized(i)) {
+			*sg_status |= SG_OVERUTILIZED;
+			sgs->nr_overutilized++;
 		}
 
 		/* Overload indicator is only updated at root domain */

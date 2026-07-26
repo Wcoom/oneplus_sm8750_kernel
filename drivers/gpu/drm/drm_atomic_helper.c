@@ -573,23 +573,65 @@ mode_valid(struct drm_atomic_state *state)
 	return 0;
 }
 
+static bool drm_encoder_mask_has_virtual(struct drm_device *dev,
+					 u32 encoder_mask)
+{
+	struct drm_encoder *encoder;
+
+	drm_for_each_encoder_mask(encoder, dev, encoder_mask) {
+		if (encoder->encoder_type == DRM_MODE_ENCODER_VIRTUAL)
+			return true;
+	}
+
+	return false;
+}
+
 static int drm_atomic_check_valid_clones(struct drm_atomic_state *state,
 					 struct drm_crtc *crtc)
 {
-	struct drm_encoder *drm_enc;
-	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state,
-									  crtc);
+	struct drm_device *dev = crtc->dev;
+	struct drm_encoder *encoder;
+	struct drm_crtc_state *crtc_state;
+	u32 implicit_mask;
+	bool has_virtual;
 
-	drm_for_each_encoder_mask(drm_enc, crtc->dev, crtc_state->encoder_mask) {
-		if (!drm_enc->possible_clones) {
-			DRM_DEBUG("enc%d possible_clones is 0\n", drm_enc->base.id);
+	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
+	if (!crtc_state)
+		return 0;
+
+	implicit_mask = dev->mode_config.encoder_clones_implicit;
+	has_virtual = drm_encoder_mask_has_virtual(dev,
+						   crtc_state->encoder_mask);
+
+	drm_for_each_encoder_mask(encoder, dev, crtc_state->encoder_mask) {
+		u32 encoder_mask = drm_encoder_mask(encoder);
+		u32 invalid_mask;
+
+		/*
+		 * Qualcomm downstream CWB/writeback paths may leave
+		 * possible_clones unset. The DRM core later fixes the value
+		 * to the encoder's own mask, which would make generic clone
+		 * validation reject a valid physical-display + virtual-WB
+		 * combination.
+		 *
+		 * Limit the compatibility exception to encoder sets that
+		 * actually contain a virtual encoder.
+		 */
+		if (has_virtual && (implicit_mask & encoder_mask))
 			continue;
-		}
 
-		if ((crtc_state->encoder_mask & drm_enc->possible_clones) !=
-		    crtc_state->encoder_mask) {
-			DRM_DEBUG("crtc%d failed valid clone check for mask 0x%x\n",
-				  crtc->base.id, crtc_state->encoder_mask);
+		invalid_mask = crtc_state->encoder_mask &
+			       ~encoder->possible_clones;
+		if (invalid_mask) {
+			DRM_DEBUG_ATOMIC(
+				"[CRTC:%d:%s] [ENCODER:%d:%s] "
+				"invalid clone mask: active=0x%x "
+				"possible=0x%x invalid=0x%x\n",
+				crtc->base.id, crtc->name,
+				encoder->base.id, encoder->name,
+				crtc_state->encoder_mask,
+				encoder->possible_clones,
+				invalid_mask);
 			return -EINVAL;
 		}
 	}

@@ -5561,10 +5561,18 @@ static int isolate_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	int type;
 	int scanned;
 	int tier = -1;
+	int type_to_scan = ANON_AND_FILE;
 
 	type = get_initial_type_to_scan(lruvec, sc, swappiness, &tier);
 
-	for (i = !swappiness; i < ANON_AND_FILE; i++) {
+	trace_android_vh_isolate_folio_type(swappiness, &type, &tier, &type_to_scan);
+	if (sc->anon_only) {
+		type = LRU_GEN_ANON;
+		tier = -1;
+		type_to_scan = 1;
+	}
+
+	for (i = !swappiness; i < type_to_scan; i++) {
 		if (tier < 0)
 			tier = get_tier_idx(lruvec, type);
 
@@ -5854,7 +5862,7 @@ static bool try_to_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 			should_age = true;
 		}
 
-		nr_batch = min(nr_to_scan, MIN_LRU_BATCH);
+		nr_batch = min(nr_to_scan, MAX_LRU_BATCH);
 		delta = evict_folios(nr_batch, lruvec, sc, swappiness);
 		if (!delta)
 			break;

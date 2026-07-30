@@ -1792,6 +1792,13 @@ static enum hmbird_ops_enable_state hmbird_ops_enable_state(void)
 	return atomic_read(&hmbird_ops_enable_state_var);
 }
 
+bool hmbird_idle_fastpath_safe(void)
+{
+	return !hmbird_enabled() &&
+	       atomic_read_acquire(&hmbird_ops_enable_state_var) ==
+	       HMBIRD_OPS_DISABLED;
+}
+
 static enum hmbird_ops_enable_state
 hmbird_ops_set_enable_state(enum hmbird_ops_enable_state to)
 {

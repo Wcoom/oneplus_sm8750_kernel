@@ -6913,7 +6913,10 @@ static void __sched notrace __schedule(int sched_mode)
 
 	schedule_debug(prev, preempt);
 
-	trace_android_vh_lock_delay_schedule(prev, sched_mode, &skip_schedule);
+	trace_android_vh_lock_delay_schedule(prev,
+					     sched_mode == SM_IDLE ?
+					     SM_NONE : sched_mode,
+					     &skip_schedule);
 
 	if (skip_schedule)
 		return;
@@ -6957,9 +6960,13 @@ static void __sched notrace __schedule(int sched_mode)
 	 * that we form a control dependency vs deactivate_task() below.
 	 */
 	prev_state = READ_ONCE(prev->__state);
-	if (sched_mode == SM_IDLE) {
-		/* SCX must consult the BPF scheduler to tell if rq is empty */
-		if (!rq->nr_running && !hmbird_enabled()) {
+	if (sched_mode == SM_IDLE && prev == rq->idle) {
+		/* HMBIRD may be transitioning even while it reports disabled. */
+		if (!rq->nr_running
+#ifdef CONFIG_HMBIRD_SCHED
+		    && hmbird_idle_fastpath_safe()
+#endif
+		   ) {
 			next = prev;
 			goto picked;
 		}

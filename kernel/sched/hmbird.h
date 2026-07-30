@@ -244,6 +244,7 @@ void hmbird_post_fork(struct task_struct *p);
 void hmbird_cancel_fork(struct task_struct *p);
 int hmbird_check_setscheduler(struct task_struct *p, int policy);
 bool hmbird_can_stop_tick(struct rq *rq);
+bool hmbird_idle_fastpath_safe(void);
 void init_sched_hmbird_class(void);
 
 void hmbird_ops_exit(void);

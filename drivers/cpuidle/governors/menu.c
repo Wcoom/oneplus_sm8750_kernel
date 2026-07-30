@@ -296,6 +296,19 @@ static int menu_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 				   RESOLUTION * DECAY * NSEC_PER_USEC);
 		/* Use the lowest expected idle interval to pick the idle state. */
 		predicted_ns = min((u64)timer_us * NSEC_PER_USEC, predicted_ns);
+		/*
+		 * If the tick is already stopped, the cost of possible short
+		 * idle duration misprediction is higher because the CPU may get
+		 * stuck in a shallow idle state then.  To avoid that, if
+		 * predicted_ns is small enough, say it might be mispredicted
+		 * and use the known time till the closest timer for idle state
+		 * selection unless that timer is going to trigger within
+		 * SAFE_TIMER_RANGE_NS in which case it can be regarded as a
+		 * sufficient safety net.
+		 */
+		if (tick_nohz_tick_stopped() && predicted_ns < TICK_NSEC &&
+		    data->next_timer_ns > SAFE_TIMER_RANGE_NS)
+			predicted_ns = data->next_timer_ns;
 	} else {
 		/*
 		 * Because the next timer event is not going to be determined

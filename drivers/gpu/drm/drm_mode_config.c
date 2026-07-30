@@ -435,6 +435,7 @@ int drmm_mode_config_init(struct drm_device *dev)
 	dev->mode_config.num_connector = 0;
 	dev->mode_config.num_crtc = 0;
 	dev->mode_config.num_encoder = 0;
+	dev->mode_config.encoder_clones_implicit = 0;
 	dev->mode_config.num_total_plane = 0;
 
 	if (IS_ENABLED(CONFIG_LOCKDEP)) {
@@ -578,8 +579,13 @@ static u32 full_encoder_mask(struct drm_device *dev)
  */
 static void fixup_encoder_possible_clones(struct drm_encoder *encoder)
 {
-	if (encoder->possible_clones == 0)
-		encoder->possible_clones = drm_encoder_mask(encoder);
+	struct drm_mode_config *config = &encoder->dev->mode_config;
+	u32 encoder_mask = drm_encoder_mask(encoder);
+
+	if (!encoder->possible_clones) {
+		config->encoder_clones_implicit |= encoder_mask;
+		encoder->possible_clones = encoder_mask;
+	}
 }
 
 static void validate_encoder_possible_clones(struct drm_encoder *encoder)

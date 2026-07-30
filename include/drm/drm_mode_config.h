@@ -480,6 +480,20 @@ struct drm_mode_config {
 	 * lifetime of a device and hence doesn't need any locks.
 	 */
 	int num_encoder;
+#ifndef __GENKSYMS__ /* Placed in an existing hole in the structure. */
+	/**
+	 * @encoder_clones_implicit:
+	 *
+	 * Bitmask of encoders whose zero possible_clones value was
+	 * automatically replaced with the encoder's own mask during
+	 * mode-config validation.
+	 *
+	 * These encoders did not provide an explicit clone topology and may
+	 * require compatibility handling for downstream virtual writeback
+	 * paths.
+	 */
+	u32 encoder_clones_implicit;
+#endif
 	/**
 	 * @encoder_list:
 	 *

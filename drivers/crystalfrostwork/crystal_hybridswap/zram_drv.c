@@ -3117,6 +3117,47 @@ static ssize_t mm_stat_show(struct device *dev,
 	return ret;
 }
 
+static ssize_t sddc_stat_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct crystal_sddc_stats_snapshot stats;
+	struct zram *zram = dev_to_zram(dev);
+
+	crystal_sddc_get_stats(zram, &stats);
+	return sysfs_emit(buf,
+		"enabled: %u\n"
+		"queued: %llu\n"
+		"dropped: %llu\n"
+		"pending: %u\n"
+		"pending_max: %llu\n"
+		"observed: %llu\n"
+		"stale: %llu\n"
+		"indexed: %llu\n"
+		"refs: %llu\n"
+		"ref_bytes: %llu\n"
+		"aliases: %llu\n"
+		"deltas: %llu\n"
+		"delta_bytes: %llu\n"
+		"alias_attempts: %llu\n"
+		"alias_hits: %llu\n"
+		"delta_attempts: %llu\n"
+		"delta_hits: %llu\n"
+		"saved_bytes: %llu\n"
+		"saved_bytes_total: %llu\n"
+		"conversion_failures: %llu\n"
+		"decode_failures: %llu\n"
+		"flatten_failures: %llu\n"
+		"limit_rejects: %llu\n",
+		stats.enabled, stats.queued, stats.dropped, stats.pending,
+		stats.pending_max, stats.observed, stats.stale, stats.indexed,
+		stats.refs, stats.ref_bytes, stats.aliases, stats.deltas,
+		stats.delta_bytes, stats.alias_attempts, stats.alias_hits,
+		stats.delta_attempts, stats.delta_hits, stats.saved_bytes,
+		stats.saved_bytes_total, stats.conversion_failures,
+		stats.decode_failures, stats.flatten_failures,
+		stats.limit_rejects);
+}
+
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
 #define FOUR_K(x) ((x) * (1 << (PAGE_SHIFT - 12)))
 static ssize_t bd_stat_show(struct device *dev,
@@ -3350,6 +3391,7 @@ static ssize_t debug_stat_show(struct device *dev,
 
 static DEVICE_ATTR_RO(io_stat);
 static DEVICE_ATTR_RO(mm_stat);
+static DEVICE_ATTR_RO(sddc_stat);
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
 static DEVICE_ATTR_RO(bd_stat);
 static DEVICE_ATTR_RO(zms_stat);
@@ -5439,6 +5481,7 @@ static struct attribute *zram_disk_attrs[] = {
 #endif
 	&dev_attr_io_stat.attr,
 	&dev_attr_mm_stat.attr,
+	&dev_attr_sddc_stat.attr,
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
 	&dev_attr_bd_stat.attr,
 	&dev_attr_zms_stat.attr,

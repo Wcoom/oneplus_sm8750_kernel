@@ -37,6 +37,32 @@ struct crystal_sddc_job_key {
 	u8 prio;
 };
 
+struct crystal_sddc_stats_snapshot {
+	u64 queued;
+	u64 dropped;
+	u64 observed;
+	u64 stale;
+	u64 indexed;
+	u64 refs;
+	u64 ref_bytes;
+	u64 aliases;
+	u64 deltas;
+	u64 delta_bytes;
+	u64 alias_attempts;
+	u64 alias_hits;
+	u64 delta_attempts;
+	u64 delta_hits;
+	u64 saved_bytes;
+	u64 saved_bytes_total;
+	u64 conversion_failures;
+	u64 decode_failures;
+	u64 flatten_failures;
+	u64 limit_rejects;
+	u64 pending_max;
+	u32 pending;
+	bool enabled;
+};
+
 #if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC)
 int crystal_sddc_create(struct zram *zram, unsigned long nr_pages);
 void crystal_sddc_stop(struct zram *zram);
@@ -67,6 +93,8 @@ void crystal_sddc_zram_account_add_locked(struct zram *zram, u32 index);
 void crystal_sddc_zram_ref_account(struct zram *zram, u64 memcg_id,
 		size_t size, bool add);
 bool crystal_sddc_zram_memory_limit_ok(struct zram *zram);
+void crystal_sddc_get_stats(struct zram *zram,
+		struct crystal_sddc_stats_snapshot *stats);
 #else
 static inline int crystal_sddc_create(struct zram *zram,
 		unsigned long nr_pages)
@@ -130,6 +158,12 @@ static inline int crystal_sddc_flatten(struct zram *zram, u32 index,
 		size_t *size)
 {
 	return -EOPNOTSUPP;
+}
+
+static inline void crystal_sddc_get_stats(struct zram *zram,
+		struct crystal_sddc_stats_snapshot *stats)
+{
+	memset(stats, 0, sizeof(*stats));
 }
 #endif
 

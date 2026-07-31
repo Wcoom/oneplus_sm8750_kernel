@@ -132,15 +132,16 @@ config CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD
 	  The codec format and its 8 KiB delta window require 4 KiB pages.
 
 config CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST
-	bool "KUnit tests for the private LZ4KD delta codec"
+	bool "KUnit tests for private SDDC and LZ4KD"
 	depends on KUNIT=y
 	depends on CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD
 	default n
 	help
 	  Test ordinary and delta round trips, raw 4 KiB payloads, malformed
-	  streams, and the full 8 KiB reference/current boundary.  These tests
-	  exercise only the private codec contract; the higher-level SDDC index,
-	  lifetime, and writeback tests are provided with those later phases.
+	  streams, and the full 8 KiB reference/current boundary.  Also exercise
+	  the higher-level SDDC reference publication, generation cookies, slot
+	  ownership, snapshot identity, stale-job rejection, flatten retry, wire
+	  header validation, and manager admission state.
 
 config CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP
 	string "Default Crystal Hybridswap zram compressor"

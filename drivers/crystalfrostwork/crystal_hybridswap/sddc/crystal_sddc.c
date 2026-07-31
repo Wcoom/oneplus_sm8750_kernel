@@ -18,6 +18,10 @@
 #include <linux/zsmalloc.h>
 #include <linux/bit_spinlock.h>
 
+#if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST)
+#include <kunit/test.h>
+#endif
+
 #include "../crystal_hybridswap_internal.h"
 #include "../zram_drv.h"
 #include "crystal_sddc.h"
@@ -43,6 +47,7 @@ struct crystal_sddc_slot {
 	u64 mutation_seq;
 	struct crystal_sddc_cookie ref;
 	u32 accounted_size;
+	u32 saved_size;
 	u8 kind;
 };
 
@@ -80,10 +85,21 @@ struct crystal_sddc_stats {
 	atomic64_t stale;
 	atomic64_t indexed;
 	atomic64_t refs;
+	atomic64_t ref_bytes;
 	atomic64_t aliases;
 	atomic64_t deltas;
+	atomic64_t delta_bytes;
+	atomic64_t alias_attempts;
+	atomic64_t alias_hits;
+	atomic64_t delta_attempts;
+	atomic64_t delta_hits;
+	atomic64_t saved_bytes;
+	atomic64_t saved_bytes_total;
 	atomic64_t conversion_failures;
 	atomic64_t decode_failures;
+	atomic64_t flatten_failures;
+	atomic64_t limit_rejects;
+	atomic64_t pending_max;
 };
 
 struct crystal_sddc_ref {
@@ -203,6 +219,19 @@ static void crystal_sddc_manager_put(struct crystal_sddc *sddc)
 		wake_up_all(&sddc->active_wait);
 }
 
+static void crystal_sddc_atomic64_update_max(atomic64_t *value, s64 candidate)
+{
+	s64 old = atomic64_read(value);
+
+	while (old < candidate) {
+		s64 previous = atomic64_cmpxchg(value, old, candidate);
+
+		if (previous == old)
+			break;
+		old = previous;
+	}
+}
+
 static void *crystal_sddc_workspace_alloc(gfp_t gfp_mask, void *pool_data)
 {
 	struct crystal_sddc_workspace *workspace;
@@ -245,6 +274,7 @@ static void crystal_sddc_ref_release(struct crystal_sddc_ref *ref)
 			false);
 	ida_free(&sddc->ref_ids, ref->cookie.id);
 	atomic64_dec(&sddc->stats.refs);
+	atomic64_sub(ref->size, &sddc->stats.ref_bytes);
 	kfree(ref);
 }
 
@@ -307,6 +337,23 @@ static void crystal_sddc_ref_abort(struct crystal_sddc_ref *ref)
 	xa_release(&sddc->refs, ref->cookie.id);
 	ida_free(&sddc->ref_ids, ref->cookie.id);
 	kfree(ref);
+}
+
+static bool crystal_sddc_ref_publish(struct crystal_sddc *sddc,
+		struct crystal_sddc_ref *ref)
+{
+	XA_STATE(xas, &sddc->refs, 0);
+	unsigned long flags;
+	bool published = false;
+
+	xas_set(&xas, ref->cookie.id);
+	xa_lock_irqsave(&sddc->refs, flags);
+	if (xa_is_zero(xas_load(&xas))) {
+		xas_store(&xas, ref);
+		published = !xas_error(&xas);
+	}
+	xa_unlock_irqrestore(&sddc->refs, flags);
+	return published;
 }
 
 static struct crystal_sddc_ref *
@@ -525,12 +572,9 @@ static struct crystal_sddc_ref *
 crystal_sddc_promote_source(struct crystal_sddc *sddc,
 		struct crystal_sddc_source *source)
 {
-	XA_STATE(xas, &sddc->refs, 0);
 	struct crystal_sddc_ref *ref;
 	struct crystal_sddc_slot *slot;
 	struct zram *zram = sddc->zram;
-	unsigned long flags;
-	bool published = false;
 
 	if (source->ref)
 		return source->ref;
@@ -558,14 +602,7 @@ crystal_sddc_promote_source(struct crystal_sddc *sddc,
 	ref->size = source->key.size;
 	ref->prio = source->key.prio;
 	refcount_set(&ref->refs, 2);
-	xas_set(&xas, ref->cookie.id);
-	xa_lock_irqsave(&sddc->refs, flags);
-	if (xa_is_zero(xas_load(&xas))) {
-		xas_store(&xas, ref);
-		published = true;
-	}
-	xa_unlock_irqrestore(&sddc->refs, flags);
-	if (!published)
+	if (!crystal_sddc_ref_publish(sddc, ref))
 		goto fail_unlock;
 
 	crystal_sddc_zram_account_sub_locked(zram, source->key.index);
@@ -575,9 +612,11 @@ crystal_sddc_promote_source(struct crystal_sddc *sddc,
 	slot->kind = CRYSTAL_SDDC_REF;
 	slot->ref = ref->cookie;
 	slot->accounted_size = 0;
+	slot->saved_size = 0;
 	crystal_sddc_zram_account_add_locked(zram, source->key.index);
 	crystal_sddc_zram_ref_account(zram, ref->memcg_id, ref->size, true);
 	atomic64_inc(&sddc->stats.refs);
+	atomic64_add(ref->size, &sddc->stats.ref_bytes);
 	crystal_sddc_slot_unlock(zram, source->key.index);
 	source->ref = ref;
 	source->cookie = ref->cookie;
@@ -597,6 +636,7 @@ static bool crystal_sddc_commit_target(struct crystal_sddc *sddc,
 	struct zram *zram = sddc->zram;
 	unsigned long old_handle;
 	u32 old_size;
+	u32 saved_size;
 	bool committed = false;
 
 	crystal_sddc_slot_lock(zram, target->index);
@@ -605,6 +645,7 @@ static bool crystal_sddc_commit_target(struct crystal_sddc *sddc,
 
 	old_handle = zram->table[target->index].handle;
 	old_size = crystal_sddc_obj_size(zram, target->index);
+	saved_size = old_size > new_size ? old_size - new_size : 0;
 	crystal_sddc_zram_account_sub_locked(zram, target->index);
 	crystal_sddc_clear_storage_flags(zram, target->index);
 	zs_free(zram->mem_pool, old_handle);
@@ -614,9 +655,18 @@ static bool crystal_sddc_commit_target(struct crystal_sddc *sddc,
 	sddc->slots[target->index].kind = kind;
 	sddc->slots[target->index].ref = ref->cookie;
 	sddc->slots[target->index].accounted_size = new_size;
+	sddc->slots[target->index].saved_size = saved_size;
 	if (new_size)
 		atomic64_add(new_size, &zram->stats.compr_data_size);
 	crystal_sddc_zram_account_add_locked(zram, target->index);
+	atomic64_add(saved_size, &sddc->stats.saved_bytes);
+	atomic64_add(saved_size, &sddc->stats.saved_bytes_total);
+	if (kind == CRYSTAL_SDDC_ALIAS) {
+		atomic64_inc(&sddc->stats.aliases);
+	} else if (kind == CRYSTAL_SDDC_DELTA) {
+		atomic64_inc(&sddc->stats.deltas);
+		atomic64_add(new_size, &sddc->stats.delta_bytes);
+	}
 	committed = true;
 
 unlock:
@@ -639,15 +689,17 @@ static bool crystal_sddc_try_alias(struct crystal_sddc *sddc,
 		goto put_source;
 
 	ref = crystal_sddc_promote_source(sddc, &source);
-	if (!ref)
+	if (!ref) {
+		atomic64_inc(&sddc->stats.conversion_failures);
 		goto put_source;
+	}
 	if (crystal_sddc_commit_target(sddc, target, ref,
 			CRYSTAL_SDDC_ALIAS, 0, 0)) {
-		atomic64_inc(&sddc->stats.aliases);
 		return true;
 	}
 
 	crystal_sddc_ref_put(ref);
+	atomic64_inc(&sddc->stats.conversion_failures);
 	return false;
 
 put_source:
@@ -687,8 +739,11 @@ static bool crystal_sddc_try_delta(struct crystal_sddc *sddc,
 	if (!ret && delta_len && delta_len <= out_limit)
 		delta = kmemdup(zstrm->buffer, delta_len, GFP_NOWAIT);
 	zcomp_stream_put(sddc->zram->comps[target->prio]);
-	if (!delta)
+	if (!delta) {
+		if (!ret && delta_len && delta_len <= out_limit)
+			atomic64_inc(&sddc->stats.conversion_failures);
 		goto put_source;
+	}
 
 	wire_size = sizeof(header) + delta_len;
 	if (zs_lookup_class_index(sddc->zram->mem_pool, wire_size) >=
@@ -696,14 +751,21 @@ static bool crystal_sddc_try_delta(struct crystal_sddc *sddc,
 		goto free_delta_put;
 	handle = zs_malloc(sddc->zram->mem_pool, wire_size,
 			GFP_NOIO | __GFP_HIGHMEM | __GFP_MOVABLE | __GFP_CMA);
-	if (IS_ERR_VALUE(handle))
+	if (IS_ERR_VALUE(handle)) {
+		atomic64_inc(&sddc->stats.conversion_failures);
 		goto free_delta_put;
-	if (!crystal_sddc_zram_memory_limit_ok(sddc->zram))
+	}
+	if (!crystal_sddc_zram_memory_limit_ok(sddc->zram)) {
+		atomic64_inc(&sddc->stats.limit_rejects);
+		atomic64_inc(&sddc->stats.conversion_failures);
 		goto free_handle;
+	}
 
 	ref = crystal_sddc_promote_source(sddc, &source);
-	if (!ref)
+	if (!ref) {
+		atomic64_inc(&sddc->stats.conversion_failures);
 		goto free_handle;
+	}
 	header.magic = cpu_to_le32(CRYSTAL_SDDC_DELTA_MAGIC);
 	header.version = cpu_to_le16(CRYSTAL_SDDC_DELTA_VERSION);
 	header.header_size = cpu_to_le16(sizeof(header));
@@ -718,13 +780,13 @@ static bool crystal_sddc_try_delta(struct crystal_sddc *sddc,
 
 	if (crystal_sddc_commit_target(sddc, target, ref,
 			CRYSTAL_SDDC_DELTA, handle, wire_size)) {
-		atomic64_inc(&sddc->stats.deltas);
 		kfree(delta);
 		return true;
 	}
 
 	crystal_sddc_ref_put(ref);
 	source.ref = NULL;
+	atomic64_inc(&sddc->stats.conversion_failures);
 free_handle:
 	zs_free(sddc->zram->mem_pool, handle);
 free_delta_put:
@@ -757,8 +819,10 @@ static bool crystal_sddc_try_convert(struct crystal_sddc *sddc,
 			ARRAY_SIZE(candidates));
 	spin_unlock(&sddc->index_lock);
 	for (i = 0; i < count; i++) {
+		atomic64_inc(&sddc->stats.alias_attempts);
 		if (crystal_sddc_try_alias(sddc, target, target_data,
 				&candidates[i], ref_data)) {
+			atomic64_inc(&sddc->stats.alias_hits);
 			converted = true;
 			goto out;
 		}
@@ -774,8 +838,10 @@ static bool crystal_sddc_try_convert(struct crystal_sddc *sddc,
 			ARRAY_SIZE(candidates));
 	spin_unlock(&sddc->index_lock);
 	for (i = 0; i < count; i++) {
+		atomic64_inc(&sddc->stats.delta_attempts);
 		if (crystal_sddc_try_delta(sddc, target, target_data,
 				&candidates[i], ref_data)) {
+			atomic64_inc(&sddc->stats.delta_hits);
 			converted = true;
 			goto out;
 		}
@@ -996,21 +1062,29 @@ enum crystal_sddc_kind crystal_sddc_slot_free_locked(struct zram *zram,
 	struct crystal_sddc *sddc = zram->sddc;
 	struct crystal_sddc_cookie cookie;
 	enum crystal_sddc_kind kind;
+	u32 accounted_size;
+	u32 saved_size;
 
 	if (!sddc || index >= sddc->nr_slots)
 		return CRYSTAL_SDDC_NONE;
 
 	kind = sddc->slots[index].kind;
 	cookie = sddc->slots[index].ref;
+	accounted_size = sddc->slots[index].accounted_size;
+	saved_size = sddc->slots[index].saved_size;
 	sddc->slots[index].kind = CRYSTAL_SDDC_NONE;
 	sddc->slots[index].accounted_size = 0;
+	sddc->slots[index].saved_size = 0;
 	memset(&sddc->slots[index].ref, 0,
 	       sizeof(sddc->slots[index].ref));
 	sddc->slots[index].mutation_seq++;
 	if (kind == CRYSTAL_SDDC_ALIAS)
 		atomic64_dec(&sddc->stats.aliases);
-	else if (kind == CRYSTAL_SDDC_DELTA)
+	else if (kind == CRYSTAL_SDDC_DELTA) {
 		atomic64_dec(&sddc->stats.deltas);
+		atomic64_sub(accounted_size, &sddc->stats.delta_bytes);
+	}
+	atomic64_sub(saved_size, &sddc->stats.saved_bytes);
 	if (kind != CRYSTAL_SDDC_NONE)
 		crystal_sddc_ref_drop_cookie(sddc, &cookie);
 
@@ -1024,6 +1098,7 @@ void crystal_sddc_slot_stored_locked(struct zram *zram, u32 index)
 	if (sddc && index < sddc->nr_slots) {
 		sddc->slots[index].kind = CRYSTAL_SDDC_NONE;
 		sddc->slots[index].accounted_size = 0;
+		sddc->slots[index].saved_size = 0;
 		memset(&sddc->slots[index].ref, 0,
 		       sizeof(sddc->slots[index].ref));
 		sddc->slots[index].mutation_seq++;
@@ -1133,6 +1208,24 @@ bool crystal_sddc_snapshot_matches_locked(struct zram *zram, u32 index,
 		crystal_sddc_cookie_equal(&current_snapshot.ref, &snapshot->ref);
 }
 
+static bool crystal_sddc_delta_header_valid(
+		const struct crystal_sddc_ref *ref,
+		const struct crystal_sddc_delta_header *header, u32 wire_size)
+{
+	if (!ref || !header || wire_size <= sizeof(*header) ||
+	    wire_size > PAGE_SIZE)
+		return false;
+	if (le32_to_cpu(header->magic) != CRYSTAL_SDDC_DELTA_MAGIC ||
+	    le16_to_cpu(header->version) != CRYSTAL_SDDC_DELTA_VERSION ||
+	    le16_to_cpu(header->header_size) != sizeof(*header) ||
+	    le32_to_cpu(header->ref_size) != ref->size ||
+	    !le32_to_cpu(header->target_size) ||
+	    le32_to_cpu(header->target_size) > PAGE_SIZE)
+		return false;
+	return le32_to_cpu(header->ref_id) == ref->cookie.id &&
+		le32_to_cpu(header->ref_generation) == ref->cookie.generation;
+}
+
 static int crystal_sddc_restore_ordinary(struct crystal_sddc *sddc,
 		struct crystal_sddc_ref *ref, enum crystal_sddc_kind kind,
 		const void *wire, u32 wire_size, const void *ref_data, void *dst,
@@ -1149,17 +1242,7 @@ static int crystal_sddc_restore_ordinary(struct crystal_sddc *sddc,
 		return 0;
 	}
 	if (kind != CRYSTAL_SDDC_DELTA ||
-	    wire_size <= sizeof(*header) || wire_size > PAGE_SIZE)
-		return -EIO;
-	if (le32_to_cpu(header->magic) != CRYSTAL_SDDC_DELTA_MAGIC ||
-	    le16_to_cpu(header->version) != CRYSTAL_SDDC_DELTA_VERSION ||
-	    le16_to_cpu(header->header_size) != sizeof(*header) ||
-	    le32_to_cpu(header->ref_size) != ref->size ||
-	    !le32_to_cpu(header->target_size) ||
-	    le32_to_cpu(header->target_size) > PAGE_SIZE)
-		return -EIO;
-	if (le32_to_cpu(header->ref_id) != ref->cookie.id ||
-	    le32_to_cpu(header->ref_generation) != ref->cookie.generation)
+	    !crystal_sddc_delta_header_valid(ref, header, wire_size))
 		return -EIO;
 	if (!sddc->zram->comps[ref->prio] ||
 	    !zcomp_supports_delta(sddc->zram->comps[ref->prio]))
@@ -1347,11 +1430,57 @@ int crystal_sddc_flatten(struct zram *zram, u32 index,
 		atomic64_inc(&sddc->stats.decode_failures);
 
 out:
+	if (ret && ret != -EAGAIN)
+		atomic64_inc(&sddc->stats.flatten_failures);
 	crystal_sddc_ref_put(ref);
 	if (workspace)
 		mempool_free(workspace, sddc->workspace_pool);
 	crystal_sddc_manager_put(sddc);
 	return ret;
+}
+
+void crystal_sddc_get_stats(struct zram *zram,
+		struct crystal_sddc_stats_snapshot *stats)
+{
+	struct crystal_sddc *sddc;
+
+	if (!stats)
+		return;
+	memset(stats, 0, sizeof(*stats));
+	if (!zram)
+		return;
+	sddc = crystal_sddc_manager_get(zram);
+	if (!sddc)
+		return;
+
+	stats->enabled = true;
+	stats->queued = atomic64_read(&sddc->stats.queued);
+	stats->dropped = atomic64_read(&sddc->stats.dropped);
+	stats->observed = atomic64_read(&sddc->stats.observed);
+	stats->stale = atomic64_read(&sddc->stats.stale);
+	stats->indexed = atomic64_read(&sddc->stats.indexed);
+	stats->refs = atomic64_read(&sddc->stats.refs);
+	stats->ref_bytes = atomic64_read(&sddc->stats.ref_bytes);
+	stats->aliases = atomic64_read(&sddc->stats.aliases);
+	stats->deltas = atomic64_read(&sddc->stats.deltas);
+	stats->delta_bytes = atomic64_read(&sddc->stats.delta_bytes);
+	stats->alias_attempts = atomic64_read(&sddc->stats.alias_attempts);
+	stats->alias_hits = atomic64_read(&sddc->stats.alias_hits);
+	stats->delta_attempts = atomic64_read(&sddc->stats.delta_attempts);
+	stats->delta_hits = atomic64_read(&sddc->stats.delta_hits);
+	stats->saved_bytes = atomic64_read(&sddc->stats.saved_bytes);
+	stats->saved_bytes_total =
+		atomic64_read(&sddc->stats.saved_bytes_total);
+	stats->conversion_failures =
+		atomic64_read(&sddc->stats.conversion_failures);
+	stats->decode_failures = atomic64_read(&sddc->stats.decode_failures);
+	stats->flatten_failures = atomic64_read(&sddc->stats.flatten_failures);
+	stats->limit_rejects = atomic64_read(&sddc->stats.limit_rejects);
+	stats->pending_max = atomic64_read(&sddc->stats.pending_max);
+	spin_lock(&sddc->state_lock);
+	stats->pending = sddc->pending;
+	spin_unlock(&sddc->state_lock);
+	crystal_sddc_manager_put(sddc);
 }
 
 void crystal_sddc_queue_observation(struct zram *zram,
@@ -1384,6 +1513,8 @@ void crystal_sddc_queue_observation(struct zram *zram,
 	if (!READ_ONCE(sddc->stopping) &&
 	    sddc->pending < CRYSTAL_SDDC_MAX_PENDING) {
 		sddc->pending++;
+		crystal_sddc_atomic64_update_max(&sddc->stats.pending_max,
+				sddc->pending);
 		atomic_inc(&sddc->active_ops);
 		queued = queue_work(sddc->workqueue, &observe->work);
 		if (WARN_ON_ONCE(!queued)) {
@@ -1406,3 +1537,393 @@ free_observe:
 put_manager:
 	crystal_sddc_manager_put(sddc);
 }
+
+#if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST)
+
+#define CRYSTAL_SDDC_TEST_SLOTS	2
+
+struct crystal_sddc_test_ctx {
+	struct zram zram;
+	struct crystal_sddc sddc;
+	struct crystal_sddc_slot slots[CRYSTAL_SDDC_TEST_SLOTS];
+	struct zram_table_entry table[CRYSTAL_SDDC_TEST_SLOTS];
+	struct zcomp comp;
+};
+
+static int crystal_sddc_test_compress_delta(struct zcomp_strm *zstrm,
+		const void *ref, unsigned int ref_len, const void *src,
+		unsigned int src_len, void *dst, unsigned int *dst_len,
+		unsigned int out_limit)
+{
+	return -EOPNOTSUPP;
+}
+
+static int crystal_sddc_test_decompress_delta(struct zcomp_strm *zstrm,
+		const void *src, unsigned int src_len, const void *ref,
+		unsigned int ref_len, void *dst, unsigned int *dst_len)
+{
+	return -EOPNOTSUPP;
+}
+
+static const struct zcomp_backend_ops crystal_sddc_test_ops = {
+	.compress_delta = crystal_sddc_test_compress_delta,
+	.decompress_delta = crystal_sddc_test_decompress_delta,
+};
+
+static int crystal_sddc_state_test_init(struct kunit *test)
+{
+	struct crystal_sddc_test_ctx *ctx;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+
+	ctx->zram.table = ctx->table;
+	ctx->zram.sddc = &ctx->sddc;
+	ctx->comp.ops = &crystal_sddc_test_ops;
+	ctx->zram.comps[ZRAM_PRIMARY_COMP] = &ctx->comp;
+	spin_lock_init(&ctx->zram.sddc_lock);
+
+	ctx->sddc.zram = &ctx->zram;
+	ctx->sddc.slots = ctx->slots;
+	ctx->sddc.nr_slots = CRYSTAL_SDDC_TEST_SLOTS;
+	spin_lock_init(&ctx->sddc.state_lock);
+	spin_lock_init(&ctx->sddc.index_lock);
+	ida_init(&ctx->sddc.ref_ids);
+	xa_init(&ctx->sddc.refs);
+	atomic_set(&ctx->sddc.active_ops, 0);
+	init_waitqueue_head(&ctx->sddc.active_wait);
+
+	test->priv = ctx;
+	return 0;
+}
+
+static void crystal_sddc_state_test_exit(struct kunit *test)
+{
+	struct crystal_sddc_test_ctx *ctx = test->priv;
+
+	mempool_destroy(ctx->sddc.workspace_pool);
+	xa_destroy(&ctx->sddc.refs);
+	ida_destroy(&ctx->sddc.ref_ids);
+}
+
+static bool crystal_sddc_test_job_matches(struct crystal_sddc_test_ctx *ctx,
+		const struct crystal_sddc_job_key *key)
+{
+	bool matches;
+
+	crystal_sddc_slot_lock(&ctx->zram, key->index);
+	matches = crystal_sddc_job_matches_locked(&ctx->sddc, key);
+	crystal_sddc_slot_unlock(&ctx->zram, key->index);
+	return matches;
+}
+
+static bool crystal_sddc_test_snapshot_matches(
+		struct crystal_sddc_test_ctx *ctx, u32 index,
+		const struct crystal_sddc_snapshot *snapshot)
+{
+	bool matches;
+
+	crystal_sddc_slot_lock(&ctx->zram, index);
+	matches = crystal_sddc_snapshot_matches_locked(&ctx->zram, index,
+			snapshot);
+	crystal_sddc_slot_unlock(&ctx->zram, index);
+	return matches;
+}
+
+static void crystal_sddc_ref_publish_test(struct kunit *test)
+{
+	struct crystal_sddc_test_ctx *ctx = test->priv;
+	struct crystal_sddc_ref ref = {
+		.sddc = &ctx->sddc,
+		.cookie = { .id = 17, .generation = 5 },
+	};
+	void *entry;
+	int ret;
+
+	ret = xa_reserve(&ctx->sddc.refs, ref.cookie.id, GFP_KERNEL);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	entry = xa_load(&ctx->sddc.refs, ref.cookie.id);
+	KUNIT_ASSERT_TRUE(test, xa_is_zero(entry));
+
+	KUNIT_EXPECT_TRUE(test, crystal_sddc_ref_publish(&ctx->sddc, &ref));
+	KUNIT_EXPECT_PTR_EQ(test, xa_load(&ctx->sddc.refs, ref.cookie.id),
+			&ref);
+	KUNIT_EXPECT_FALSE(test, crystal_sddc_ref_publish(&ctx->sddc, &ref));
+	KUNIT_EXPECT_PTR_EQ(test, xa_load(&ctx->sddc.refs, ref.cookie.id),
+			&ref);
+	xa_erase(&ctx->sddc.refs, ref.cookie.id);
+}
+
+static void crystal_sddc_ref_generation_test(struct kunit *test)
+{
+	struct crystal_sddc_test_ctx *ctx = test->priv;
+	struct crystal_sddc_ref ref = {
+		.sddc = &ctx->sddc,
+		.cookie = { .id = 23, .generation = 11 },
+	};
+	struct crystal_sddc_cookie stale = ref.cookie;
+	struct crystal_sddc_ref *pinned;
+	int ret;
+
+	refcount_set(&ref.refs, 1);
+	ret = xa_reserve(&ctx->sddc.refs, ref.cookie.id, GFP_KERNEL);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_TRUE(test,
+			crystal_sddc_ref_publish(&ctx->sddc, &ref));
+
+	stale.generation++;
+	KUNIT_EXPECT_NULL(test, crystal_sddc_ref_pin(&ctx->sddc, &stale));
+	KUNIT_EXPECT_EQ(test, refcount_read(&ref.refs), 1U);
+
+	pinned = crystal_sddc_ref_pin(&ctx->sddc, &ref.cookie);
+	KUNIT_ASSERT_PTR_EQ(test, pinned, &ref);
+	KUNIT_EXPECT_EQ(test, refcount_read(&ref.refs), 2U);
+	crystal_sddc_ref_put(pinned);
+	KUNIT_EXPECT_EQ(test, refcount_read(&ref.refs), 1U);
+	xa_erase(&ctx->sddc.refs, ref.cookie.id);
+}
+
+static void crystal_sddc_snapshot_identity_test(struct kunit *test)
+{
+	struct crystal_sddc_test_ctx *ctx = test->priv;
+	struct crystal_sddc_slot *slot = &ctx->slots[0];
+	struct crystal_sddc_snapshot snapshot;
+
+	slot->mutation_seq = 41;
+	slot->kind = CRYSTAL_SDDC_DELTA;
+	slot->ref.id = 9;
+	slot->ref.generation = 3;
+	crystal_sddc_slot_lock(&ctx->zram, 0);
+	crystal_sddc_snapshot_locked(&ctx->zram, 0, &snapshot);
+	crystal_sddc_slot_unlock(&ctx->zram, 0);
+	KUNIT_ASSERT_TRUE(test,
+			crystal_sddc_test_snapshot_matches(ctx, 0, &snapshot));
+
+	slot->mutation_seq++;
+	KUNIT_EXPECT_FALSE(test,
+			crystal_sddc_test_snapshot_matches(ctx, 0, &snapshot));
+	slot->mutation_seq = snapshot.mutation_seq;
+	slot->kind = CRYSTAL_SDDC_ALIAS;
+	KUNIT_EXPECT_FALSE(test,
+			crystal_sddc_test_snapshot_matches(ctx, 0, &snapshot));
+	slot->kind = snapshot.kind;
+	slot->ref.generation++;
+	KUNIT_EXPECT_FALSE(test,
+			crystal_sddc_test_snapshot_matches(ctx, 0, &snapshot));
+	slot->ref = snapshot.ref;
+	slot->ref.id++;
+	KUNIT_EXPECT_FALSE(test,
+			crystal_sddc_test_snapshot_matches(ctx, 0, &snapshot));
+	slot->ref = snapshot.ref;
+	KUNIT_EXPECT_TRUE(test,
+			crystal_sddc_test_snapshot_matches(ctx, 0, &snapshot));
+}
+
+static void crystal_sddc_slot_owner_test(struct kunit *test)
+{
+	struct crystal_sddc_test_ctx *ctx = test->priv;
+	struct crystal_sddc_slot *slot = &ctx->slots[0];
+	struct crystal_sddc_ref ref = {
+		.sddc = &ctx->sddc,
+		.cookie = { .id = 31, .generation = 7 },
+	};
+	enum crystal_sddc_kind kind;
+	int ret;
+
+	refcount_set(&ref.refs, 3);
+	ret = xa_reserve(&ctx->sddc.refs, ref.cookie.id, GFP_KERNEL);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_TRUE(test,
+			crystal_sddc_ref_publish(&ctx->sddc, &ref));
+	slot->mutation_seq = 12;
+	slot->kind = CRYSTAL_SDDC_DELTA;
+	slot->ref = ref.cookie;
+	slot->accounted_size = 80;
+	slot->saved_size = 64;
+	atomic64_set(&ctx->sddc.stats.deltas, 1);
+	atomic64_set(&ctx->sddc.stats.delta_bytes, 80);
+	atomic64_set(&ctx->sddc.stats.saved_bytes, 64);
+
+	crystal_sddc_slot_lock(&ctx->zram, 0);
+	kind = crystal_sddc_slot_free_locked(&ctx->zram, 0);
+	crystal_sddc_slot_unlock(&ctx->zram, 0);
+	KUNIT_EXPECT_EQ(test, kind, CRYSTAL_SDDC_DELTA);
+	KUNIT_EXPECT_EQ(test, refcount_read(&ref.refs), 2U);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&ctx->sddc.stats.deltas),
+			(s64)0);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&ctx->sddc.stats.delta_bytes),
+			(s64)0);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&ctx->sddc.stats.saved_bytes),
+			(s64)0);
+
+	crystal_sddc_slot_lock(&ctx->zram, 0);
+	kind = crystal_sddc_slot_free_locked(&ctx->zram, 0);
+	crystal_sddc_slot_unlock(&ctx->zram, 0);
+	KUNIT_EXPECT_EQ(test, kind, CRYSTAL_SDDC_NONE);
+	KUNIT_EXPECT_EQ(test, refcount_read(&ref.refs), 2U);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&ctx->sddc.stats.delta_bytes),
+			(s64)0);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&ctx->sddc.stats.saved_bytes),
+			(s64)0);
+	xa_erase(&ctx->sddc.refs, ref.cookie.id);
+}
+
+static void crystal_sddc_stale_job_key_test(struct kunit *test)
+{
+	struct crystal_sddc_test_ctx *ctx = test->priv;
+	struct crystal_sddc_job_key key = {
+		.mutation_seq = 19,
+		.handle = 0x1234,
+		.index = 0,
+		.size = 512,
+		.prio = ZRAM_PRIMARY_COMP,
+	};
+
+	ctx->slots[0].mutation_seq = key.mutation_seq;
+	ctx->table[0].handle = key.handle;
+	crystal_sddc_set_obj_size(&ctx->zram, 0, key.size);
+	KUNIT_ASSERT_TRUE(test, crystal_sddc_test_job_matches(ctx, &key));
+
+	ctx->slots[0].mutation_seq++;
+	KUNIT_EXPECT_FALSE(test, crystal_sddc_test_job_matches(ctx, &key));
+	ctx->slots[0].mutation_seq = key.mutation_seq;
+	ctx->table[0].handle++;
+	KUNIT_EXPECT_FALSE(test, crystal_sddc_test_job_matches(ctx, &key));
+	ctx->table[0].handle = key.handle;
+	ctx->slots[0].kind = CRYSTAL_SDDC_ALIAS;
+	KUNIT_EXPECT_FALSE(test, crystal_sddc_test_job_matches(ctx, &key));
+}
+
+static void crystal_sddc_flatten_snapshot_test(struct kunit *test)
+{
+	struct crystal_sddc_test_ctx *ctx = test->priv;
+	struct crystal_sddc_snapshot snapshot;
+	void *dst;
+	size_t size = 123;
+	int ret;
+
+	ctx->sddc.workspace_pool = mempool_create(1,
+			crystal_sddc_workspace_alloc, crystal_sddc_workspace_free,
+			NULL);
+	KUNIT_ASSERT_NOT_NULL(test, ctx->sddc.workspace_pool);
+	ctx->slots[0].mutation_seq = 27;
+	ctx->slots[0].kind = CRYSTAL_SDDC_ALIAS;
+	ctx->slots[0].ref.id = 2;
+	ctx->slots[0].ref.generation = 4;
+	crystal_sddc_slot_lock(&ctx->zram, 0);
+	crystal_sddc_snapshot_locked(&ctx->zram, 0, &snapshot);
+	crystal_sddc_slot_unlock(&ctx->zram, 0);
+	ctx->slots[0].mutation_seq++;
+	dst = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, dst);
+
+	ret = crystal_sddc_flatten(&ctx->zram, 0, &snapshot, dst, &size);
+	KUNIT_EXPECT_EQ(test, ret, -EAGAIN);
+	KUNIT_EXPECT_EQ(test, size, (size_t)123);
+	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->sddc.active_ops), 0);
+	KUNIT_EXPECT_EQ(test,
+			atomic64_read(&ctx->sddc.stats.flatten_failures), (s64)0);
+}
+
+static void crystal_sddc_delta_header_test(struct kunit *test)
+{
+	struct crystal_sddc_ref ref = {
+		.cookie = { .id = 37, .generation = 13 },
+		.size = 768,
+	};
+	struct crystal_sddc_delta_header header = {
+		.magic = cpu_to_le32(CRYSTAL_SDDC_DELTA_MAGIC),
+		.version = cpu_to_le16(CRYSTAL_SDDC_DELTA_VERSION),
+		.header_size = cpu_to_le16(sizeof(header)),
+		.ref_id = cpu_to_le32(ref.cookie.id),
+		.ref_generation = cpu_to_le32(ref.cookie.generation),
+		.ref_size = cpu_to_le32(ref.size),
+		.target_size = cpu_to_le32(640),
+	};
+	struct crystal_sddc_delta_header bad;
+	u32 wire_size = sizeof(header) + 8;
+
+	KUNIT_ASSERT_TRUE(test,
+			crystal_sddc_delta_header_valid(&ref, &header, wire_size));
+
+	bad = header;
+	bad.magic = cpu_to_le32(CRYSTAL_SDDC_DELTA_MAGIC ^ 1);
+	KUNIT_EXPECT_FALSE(test,
+			crystal_sddc_delta_header_valid(&ref, &bad, wire_size));
+	bad = header;
+	bad.version = cpu_to_le16(CRYSTAL_SDDC_DELTA_VERSION + 1);
+	KUNIT_EXPECT_FALSE(test,
+			crystal_sddc_delta_header_valid(&ref, &bad, wire_size));
+	bad = header;
+	bad.header_size = cpu_to_le16(sizeof(bad) - 1);
+	KUNIT_EXPECT_FALSE(test,
+			crystal_sddc_delta_header_valid(&ref, &bad, wire_size));
+	bad = header;
+	bad.ref_id = cpu_to_le32(ref.cookie.id + 1);
+	KUNIT_EXPECT_FALSE(test,
+			crystal_sddc_delta_header_valid(&ref, &bad, wire_size));
+	bad = header;
+	bad.ref_generation = cpu_to_le32(ref.cookie.generation + 1);
+	KUNIT_EXPECT_FALSE(test,
+			crystal_sddc_delta_header_valid(&ref, &bad, wire_size));
+	bad = header;
+	bad.ref_size = cpu_to_le32(ref.size + 1);
+	KUNIT_EXPECT_FALSE(test,
+			crystal_sddc_delta_header_valid(&ref, &bad, wire_size));
+	bad = header;
+	bad.target_size = 0;
+	KUNIT_EXPECT_FALSE(test,
+			crystal_sddc_delta_header_valid(&ref, &bad, wire_size));
+	bad = header;
+	bad.target_size = cpu_to_le32(PAGE_SIZE + 1);
+	KUNIT_EXPECT_FALSE(test,
+			crystal_sddc_delta_header_valid(&ref, &bad, wire_size));
+	KUNIT_EXPECT_FALSE(test, crystal_sddc_delta_header_valid(&ref, &header,
+			sizeof(header)));
+	KUNIT_EXPECT_FALSE(test, crystal_sddc_delta_header_valid(&ref, &header,
+			PAGE_SIZE + 1));
+}
+
+static void crystal_sddc_manager_admission_test(struct kunit *test)
+{
+	struct crystal_sddc_test_ctx *ctx = test->priv;
+	struct crystal_sddc *held;
+
+	held = crystal_sddc_manager_get(&ctx->zram);
+	KUNIT_ASSERT_PTR_EQ(test, held, &ctx->sddc);
+	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->sddc.active_ops), 1);
+
+	spin_lock(&ctx->zram.sddc_lock);
+	WRITE_ONCE(ctx->sddc.stopping, true);
+	spin_unlock(&ctx->zram.sddc_lock);
+	KUNIT_EXPECT_NULL(test, crystal_sddc_manager_get(&ctx->zram));
+	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->sddc.active_ops), 1);
+
+	crystal_sddc_manager_put(held);
+	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->sddc.active_ops), 0);
+	KUNIT_EXPECT_NULL(test, crystal_sddc_manager_get(&ctx->zram));
+}
+
+static struct kunit_case crystal_sddc_state_test_cases[] = {
+	KUNIT_CASE(crystal_sddc_ref_publish_test),
+	KUNIT_CASE(crystal_sddc_ref_generation_test),
+	KUNIT_CASE(crystal_sddc_snapshot_identity_test),
+	KUNIT_CASE(crystal_sddc_slot_owner_test),
+	KUNIT_CASE(crystal_sddc_stale_job_key_test),
+	KUNIT_CASE(crystal_sddc_flatten_snapshot_test),
+	KUNIT_CASE(crystal_sddc_delta_header_test),
+	KUNIT_CASE(crystal_sddc_manager_admission_test),
+	{}
+};
+
+static struct kunit_suite crystal_sddc_state_test_suite = {
+	.name = "crystal-sddc-state",
+	.init = crystal_sddc_state_test_init,
+	.exit = crystal_sddc_state_test_exit,
+	.test_cases = crystal_sddc_state_test_cases,
+};
+
+kunit_test_suite(crystal_sddc_state_test_suite);
+
+#endif /* CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST */

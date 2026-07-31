@@ -14,6 +14,9 @@
 #include <linux/vmalloc.h>
 
 #include "zcomp.h"
+#if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD)
+#include "sddc/crystal_sddc_codec.h"
+#endif
 
 static const char * const backends[] = {
 #if IS_ENABLED(CONFIG_CRYPTO_LZO)
@@ -29,7 +32,8 @@ static const char * const backends[] = {
 #if IS_ENABLED(CONFIG_CRYPTO_LZ4K)
 	"lz4k",
 #endif
-#if IS_ENABLED(CONFIG_CRYPTO_LZ4KD)
+#if IS_ENABLED(CONFIG_CRYPTO_LZ4KD) || \
+	IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD)
 	"lz4kd",
 #endif
 #if IS_ENABLED(CONFIG_CRYPTO_DEFLATE)
@@ -43,13 +47,125 @@ static const char * const backends[] = {
 #endif
 };
 
+static int crypto_backend_create(struct zcomp_strm *zstrm, const char *name)
+{
+	zstrm->tfm = crypto_alloc_comp(name, 0, 0);
+	if (IS_ERR_OR_NULL(zstrm->tfm)) {
+		zstrm->tfm = NULL;
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
+static void crypto_backend_destroy(struct zcomp_strm *zstrm)
+{
+	if (zstrm->tfm)
+		crypto_free_comp(zstrm->tfm);
+	zstrm->tfm = NULL;
+}
+
+static int crypto_backend_compress(struct zcomp_strm *zstrm,
+		const void *src, unsigned int src_len, void *dst,
+		unsigned int *dst_len)
+{
+	return crypto_comp_compress(zstrm->tfm, src, src_len, dst, dst_len);
+}
+
+static int crypto_backend_decompress(struct zcomp_strm *zstrm,
+		const void *src, unsigned int src_len, void *dst,
+		unsigned int *dst_len)
+{
+	return crypto_comp_decompress(zstrm->tfm, src, src_len, dst, dst_len);
+}
+
+static const struct zcomp_backend_ops crypto_backend_ops = {
+	.create = crypto_backend_create,
+	.destroy = crypto_backend_destroy,
+	.compress = crypto_backend_compress,
+	.decompress = crypto_backend_decompress,
+};
+
+#if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD)
+static int lz4kd_backend_create(struct zcomp_strm *zstrm, const char *name)
+{
+	struct crystal_sddc_codec *codec;
+
+	(void)name;
+	codec = crystal_sddc_codec_create();
+	if (IS_ERR(codec))
+		return PTR_ERR(codec);
+	zstrm->backend_data = codec;
+	return 0;
+}
+
+static void lz4kd_backend_destroy(struct zcomp_strm *zstrm)
+{
+	crystal_sddc_codec_destroy(zstrm->backend_data);
+	zstrm->backend_data = NULL;
+}
+
+static int lz4kd_backend_compress(struct zcomp_strm *zstrm,
+		const void *src, unsigned int src_len, void *dst,
+		unsigned int *dst_len)
+{
+	return crystal_sddc_codec_compress(zstrm->backend_data, src, src_len,
+					   dst, dst_len);
+}
+
+static int lz4kd_backend_decompress(struct zcomp_strm *zstrm,
+		const void *src, unsigned int src_len, void *dst,
+		unsigned int *dst_len)
+{
+	return crystal_sddc_codec_decompress(zstrm->backend_data, src, src_len,
+					     dst, dst_len);
+}
+
+static int lz4kd_backend_compress_delta(struct zcomp_strm *zstrm,
+		const void *ref, unsigned int ref_len, const void *src,
+		unsigned int src_len, void *dst, unsigned int *dst_len,
+		unsigned int out_limit)
+{
+	return crystal_sddc_codec_compress_delta(zstrm->backend_data, ref,
+			ref_len, src, src_len, dst, dst_len, out_limit);
+}
+
+static int lz4kd_backend_decompress_delta(struct zcomp_strm *zstrm,
+		const void *src, unsigned int src_len, const void *ref,
+		unsigned int ref_len, void *dst, unsigned int *dst_len)
+{
+	return crystal_sddc_codec_decompress_delta(zstrm->backend_data, src,
+			src_len, ref, ref_len, dst, dst_len);
+}
+
+static const struct zcomp_backend_ops lz4kd_backend_ops = {
+	.create = lz4kd_backend_create,
+	.destroy = lz4kd_backend_destroy,
+	.compress = lz4kd_backend_compress,
+	.decompress = lz4kd_backend_decompress,
+	.compress_delta = lz4kd_backend_compress_delta,
+	.decompress_delta = lz4kd_backend_decompress_delta,
+};
+#endif
+
+static const struct zcomp_backend_ops *zcomp_backend(const char *name)
+{
+#if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD)
+	if (!strcmp(name, "lz4kd"))
+		return &lz4kd_backend_ops;
+#endif
+	return &crypto_backend_ops;
+}
+
 static void zcomp_strm_free(struct zcomp_strm *zstrm)
 {
-	if (!IS_ERR_OR_NULL(zstrm->tfm))
-		crypto_free_comp(zstrm->tfm);
+	if (zstrm->ops && zstrm->ops->destroy)
+		zstrm->ops->destroy(zstrm);
 	vfree(zstrm->buffer);
 	zstrm->tfm = NULL;
+	zstrm->backend_data = NULL;
 	zstrm->buffer = NULL;
+	zstrm->ops = NULL;
 }
 
 /*
@@ -59,21 +175,35 @@ static void zcomp_strm_free(struct zcomp_strm *zstrm)
 static int zcomp_strm_init(struct zcomp_strm *zstrm,
 				       struct zcomp *comp)
 {
-	zstrm->tfm = crypto_alloc_comp(comp->name, 0, 0);
+	int ret;
+
+	zstrm->ops = comp->ops;
+	zstrm->tfm = NULL;
+	zstrm->backend_data = NULL;
 	/*
 	 * allocate 2 pages. 1 for compressed data, plus 1 extra for the
 	 * case when compressed size is larger than the original one
 	 */
 	zstrm->buffer = vzalloc(2 * PAGE_SIZE);
-	if (IS_ERR_OR_NULL(zstrm->tfm) || !zstrm->buffer) {
+	if (!zstrm->buffer) {
 		zcomp_strm_free(zstrm);
 		return -ENOMEM;
+	}
+
+	ret = zstrm->ops->create(zstrm, comp->name);
+	if (ret) {
+		zcomp_strm_free(zstrm);
+		return ret;
 	}
 	return 0;
 }
 
 bool zcomp_available_algorithm(const char *comp)
 {
+#if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD)
+	if (!strcmp(comp, "lz4kd"))
+		return crystal_sddc_codec_available();
+#endif
 	/*
 	 * Crypto does not ignore a trailing new line symbol,
 	 * so make sure you don't supply a string containing
@@ -144,9 +274,8 @@ int zcomp_compress(struct zcomp_strm *zstrm,
 	 */
 	*dst_len = PAGE_SIZE * 2;
 
-	return crypto_comp_compress(zstrm->tfm,
-			src, PAGE_SIZE,
-			zstrm->buffer, dst_len);
+	return zstrm->ops->compress(zstrm, src, PAGE_SIZE, zstrm->buffer,
+				    dst_len);
 }
 
 int zcomp_decompress(struct zcomp_strm *zstrm,
@@ -154,9 +283,37 @@ int zcomp_decompress(struct zcomp_strm *zstrm,
 {
 	unsigned int dst_len = PAGE_SIZE;
 
-	return crypto_comp_decompress(zstrm->tfm,
-			src, src_len,
-			dst, &dst_len);
+	return zstrm->ops->decompress(zstrm, src, src_len, dst, &dst_len);
+}
+
+bool zcomp_supports_delta(const struct zcomp *comp)
+{
+	return comp && comp->ops && comp->ops->compress_delta &&
+		comp->ops->decompress_delta;
+}
+
+int zcomp_compress_delta(struct zcomp_strm *zstrm, const void *ref,
+		unsigned int ref_len, const void *src, unsigned int src_len,
+		unsigned int *dst_len, unsigned int out_limit)
+{
+	if (!zstrm->ops->compress_delta)
+		return -EOPNOTSUPP;
+
+	*dst_len = 2 * PAGE_SIZE;
+	return zstrm->ops->compress_delta(zstrm, ref, ref_len, src, src_len,
+			zstrm->buffer, dst_len, out_limit);
+}
+
+int zcomp_decompress_delta(struct zcomp_strm *zstrm, const void *src,
+		unsigned int src_len, const void *ref, unsigned int ref_len,
+		void *dst, unsigned int *dst_len)
+{
+	if (!zstrm->ops->decompress_delta)
+		return -EOPNOTSUPP;
+
+	*dst_len = PAGE_SIZE;
+	return zstrm->ops->decompress_delta(zstrm, src, src_len, ref,
+			ref_len, dst, dst_len);
 }
 
 int zcomp_cpu_up_prepare(unsigned int cpu, struct hlist_node *node)
@@ -237,6 +394,7 @@ struct zcomp *zcomp_create(const char *alg)
 		return ERR_PTR(-ENOMEM);
 
 	comp->name = alg;
+	comp->ops = zcomp_backend(alg);
 	error = zcomp_init(comp);
 	if (error) {
 		kfree(comp);

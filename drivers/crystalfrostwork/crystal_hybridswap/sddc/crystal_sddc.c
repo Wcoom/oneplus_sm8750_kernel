@@ -1352,8 +1352,11 @@ int crystal_sddc_read_page(struct zram *zram, struct page *page, u32 index)
 	ret = crystal_sddc_capture_locked(sddc, index, NULL, &kind, &ref,
 			workspace->wire, &wire_size);
 	crystal_sddc_slot_unlock(zram, index);
-	if (ret)
+	if (ret) {
+		if (ret != -EAGAIN)
+			atomic64_inc(&sddc->stats.decode_failures);
 		goto out;
+	}
 
 	crystal_sddc_copy_ref(ref, workspace->ref_data);
 	ret = crystal_sddc_restore_ordinary(sddc, ref, kind, workspace->wire,
@@ -1420,8 +1423,11 @@ int crystal_sddc_flatten(struct zram *zram, u32 index,
 	ret = crystal_sddc_capture_locked(sddc, index, snapshot, &kind, &ref,
 			workspace->wire, &wire_size);
 	crystal_sddc_slot_unlock(zram, index);
-	if (ret)
+	if (ret) {
+		if (ret != -EAGAIN)
+			atomic64_inc(&sddc->stats.decode_failures);
 		goto out;
+	}
 
 	crystal_sddc_copy_ref(ref, workspace->ref_data);
 	ret = crystal_sddc_restore_ordinary(sddc, ref, kind, workspace->wire,
@@ -1824,6 +1830,17 @@ static void crystal_sddc_flatten_snapshot_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->sddc.active_ops), 0);
 	KUNIT_EXPECT_EQ(test,
 			atomic64_read(&ctx->sddc.stats.flatten_failures), (s64)0);
+
+	crystal_sddc_slot_lock(&ctx->zram, 0);
+	crystal_sddc_snapshot_locked(&ctx->zram, 0, &snapshot);
+	crystal_sddc_slot_unlock(&ctx->zram, 0);
+	ret = crystal_sddc_flatten(&ctx->zram, 0, &snapshot, dst, &size);
+	KUNIT_EXPECT_EQ(test, ret, -EIO);
+	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->sddc.active_ops), 0);
+	KUNIT_EXPECT_EQ(test,
+			atomic64_read(&ctx->sddc.stats.decode_failures), (s64)1);
+	KUNIT_EXPECT_EQ(test,
+			atomic64_read(&ctx->sddc.stats.flatten_failures), (s64)1);
 }
 
 static void crystal_sddc_delta_header_test(struct kunit *test)

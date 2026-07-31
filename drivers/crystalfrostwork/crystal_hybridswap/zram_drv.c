@@ -45,6 +45,7 @@
 
 #include "zram_drv.h"
 #include "crystal_hybridswap_internal.h"
+#include "sddc/crystal_sddc.h"
 
 static DEFINE_IDR(zram_index_idr);
 /* idr index must be protected */
@@ -3311,6 +3312,7 @@ static void zram_meta_free(struct zram *zram, u64 disksize)
 	for (index = 0; index < num_pages; index++)
 		zram_free_page(zram, index);
 	zram_memcg_stats_clear_all(zram);
+	crystal_sddc_destroy(zram);
 
 	zs_destroy_pool(zram->mem_pool);
 	vfree(zram->table);
@@ -3349,6 +3351,7 @@ static void zram_free_page(struct zram *zram, size_t index)
 	size_t size;
 
 	zram_memcg_stats_sub_current(zram, index);
+	crystal_sddc_slot_free_locked(zram, index);
 	zram->table[index].memcg_id = 0;
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_TRACK_ENTRY_ACTIME
 	zram->table[index].ac_time = 0;
@@ -3806,11 +3809,13 @@ static void zram_commit_prepared_page(struct zram *zram, u32 index,
 	/* Update stats */
 	atomic64_inc(&zram->stats.pages_stored);
 	zram_memcg_stats_add_current(zram, index);
+	crystal_sddc_slot_stored_locked(zram, index);
 }
 
 static int zram_write_page_with_memcg(struct zram *zram, struct page *page,
 		u32 index, u64 memcg_id)
 {
+	struct crystal_sddc_job_key sddc_key;
 	struct zram_prepared_page prep;
 	int ret;
 
@@ -3823,7 +3828,9 @@ static int zram_write_page_with_memcg(struct zram *zram, struct page *page,
 
 	zram_slot_lock(zram, index);
 	zram_commit_prepared_page(zram, index, &prep, memcg_id);
+	crystal_sddc_job_key_locked(zram, index, &sddc_key);
 	zram_slot_unlock(zram, index);
+	crystal_sddc_queue_observation(zram, &sddc_key);
 	return 0;
 }
 
@@ -4690,6 +4697,7 @@ static int zram_recompress(struct zram *zram, u32 index, struct page *page,
 	atomic64_add(comp_len_new, &zram->stats.compr_data_size);
 	atomic64_inc(&zram->stats.pages_stored);
 	zram_memcg_stats_add_current(zram, index);
+	crystal_sddc_slot_stored_locked(zram, index);
 
 	return 0;
 }
@@ -5055,6 +5063,7 @@ static void zram_reset_device(struct zram *zram)
 {
 	u64 disksize;
 
+	crystal_sddc_stop(zram);
 	down_write(&zram->init_lock);
 
 	disksize = zram->disksize;
@@ -5139,6 +5148,9 @@ static ssize_t disksize_store(struct device *dev,
 		zram->comps[prio] = comp;
 		zram->num_active_comps++;
 	}
+	err = crystal_sddc_create(zram, nr_pages);
+	if (err)
+		goto out_free_comps;
 	zram->disksize = disksize;
 	set_capacity_and_notify(zram->disk, zram->disksize >> SECTOR_SHIFT);
 	up_write(&zram->init_lock);
@@ -5483,6 +5495,7 @@ static int zram_remove(struct zram *zram)
 	zram_begin_remove(zram);
 	zram_debugfs_unregister(zram);
 	crystal_hybridswap_private_zram_unregister(disk_to_dev(zram->disk));
+	crystal_sddc_stop(zram);
 	zram_wait_for_refs(zram);
 
 	if (claimed) {

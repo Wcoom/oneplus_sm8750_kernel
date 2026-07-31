@@ -1608,6 +1608,9 @@ static void crystal_sddc_state_test_exit(struct kunit *test)
 {
 	struct crystal_sddc_test_ctx *ctx = test->priv;
 
+	if (!ctx)
+		return;
+
 	mempool_destroy(ctx->sddc.workspace_pool);
 	xa_destroy(&ctx->sddc.refs);
 	ida_destroy(&ctx->sddc.ref_ids);
@@ -1644,13 +1647,12 @@ static void crystal_sddc_ref_publish_test(struct kunit *test)
 		.sddc = &ctx->sddc,
 		.cookie = { .id = 17, .generation = 5 },
 	};
-	void *entry;
 	int ret;
 
 	ret = xa_reserve(&ctx->sddc.refs, ref.cookie.id, GFP_KERNEL);
 	KUNIT_ASSERT_EQ(test, ret, 0);
-	entry = xa_load(&ctx->sddc.refs, ref.cookie.id);
-	KUNIT_ASSERT_TRUE(test, xa_is_zero(entry));
+	KUNIT_ASSERT_NULL(test, xa_load(&ctx->sddc.refs, ref.cookie.id));
+	KUNIT_ASSERT_FALSE(test, xa_empty(&ctx->sddc.refs));
 
 	KUNIT_EXPECT_TRUE(test, crystal_sddc_ref_publish(&ctx->sddc, &ref));
 	KUNIT_EXPECT_PTR_EQ(test, xa_load(&ctx->sddc.refs, ref.cookie.id),

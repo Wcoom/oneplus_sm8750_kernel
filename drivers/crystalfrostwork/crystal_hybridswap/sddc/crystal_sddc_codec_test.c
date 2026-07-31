@@ -31,6 +31,9 @@ static void crystal_sddc_codec_test_exit(struct kunit *test)
 {
 	struct crystal_sddc_codec_test_ctx *ctx = test->priv;
 
+	if (!ctx)
+		return;
+
 	crystal_sddc_codec_destroy(ctx->codec);
 }
 

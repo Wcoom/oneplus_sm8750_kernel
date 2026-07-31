@@ -208,6 +208,7 @@ struct zram_stats {
 struct zram_memcg_stats_entry {
 	struct hlist_node node;
 	u64 cgroup_id;
+	u32 writeback_scan_cursor;
 	atomic64_t resident_pages;
 	atomic64_t writeback_pages;
 	atomic64_t same_pages;

@@ -153,6 +153,10 @@ struct zms {
 	atomic_long_t clean_cache_evictions;
 	atomic_long_t clean_cache_fullness_drops;
 	atomic_long_t clean_cache_demand_hits;
+	atomic_long_t store_batch_calls;
+	atomic_long_t store_batch_items;
+	atomic_long_t store_batch_resident_reuses;
+	atomic_long_t store_batch_new_blocks;
 	atomic_long_t alloc_run_success_pages;
 	atomic_long_t alloc_run_partial_pages;
 	atomic_long_t alloc_run_fallback_pages;
@@ -475,8 +479,7 @@ static bool zms_clean_cache_eligible(const struct zms_block *block)
 	if (!block || block->dirty || !block->used || !zms_block_data_load(block))
 		return false;
 
-	return block->fullness == ZMS_FG_FULL ||
-	       block->fullness == ZMS_FG_ALMOST_FULL;
+	return block->fullness >= ZMS_FG_MID;
 }
 
 static void zms_clean_cache_del(struct zms *zms, struct zms_block *block)
@@ -1429,7 +1432,7 @@ static void zms_fix_fullness_locked(struct zms *zms, struct zms_class *class,
 	list_move_tail(&block->list, &class->fullness[fullness]);
 	block->fullness = fullness;
 	zms_fullness_stats_add(zms, block->fullness, block->pages);
-	if (fullness < ZMS_FG_ALMOST_FULL) {
+	if (fullness <= ZMS_FG_LOW) {
 		if (READ_ONCE(block->clean_cached))
 			atomic_long_inc(&zms->clean_cache_fullness_drops);
 		zms_clean_cache_del(zms, block);
@@ -2314,6 +2317,12 @@ int zms_get_stats(struct zms *zms, struct zms_stats *stats)
 		atomic_long_read(&zms->clean_cache_fullness_drops);
 	stats->clean_cache_demand_hits =
 		atomic_long_read(&zms->clean_cache_demand_hits);
+	stats->store_batch_calls = atomic_long_read(&zms->store_batch_calls);
+	stats->store_batch_items = atomic_long_read(&zms->store_batch_items);
+	stats->store_batch_resident_reuses =
+		atomic_long_read(&zms->store_batch_resident_reuses);
+	stats->store_batch_new_blocks =
+		atomic_long_read(&zms->store_batch_new_blocks);
 	load_total = (u64)stats->load_resident_hits + stats->load_disk_misses;
 	if (load_total)
 		stats->load_resident_hit_pct =
@@ -2352,34 +2361,10 @@ int zms_get_stats(struct zms *zms, struct zms_stats *stats)
 	return 0;
 }
 
-int zms_store(struct zms *zms, unsigned long handle, const void *src,
-	      size_t size, gfp_t gfp, struct zms_io *io)
+static int zms_prepare_store_handle(struct zms *zms, unsigned long handle)
 {
-	struct zms_class *class;
-	struct zms_block *block;
-	void *data;
-	unsigned long slot;
 	unsigned int retries = 0;
-	bool frozen = false;
 	int ret;
-
-	zms_io_clear(io);
-	if (!zms || !src || !size || size > PAGE_SIZE ||
-	    handle == 0 || handle > zms->nr_handles)
-		return -EINVAL;
-
-	class = zms_class_for_size(zms, size);
-	if (!class)
-		return -EINVAL;
-
-	if (zms_dirty_pages(zms) > zms->dirty_hard_pages) {
-		ret = zms_flush_to(zms, zms->dirty_high_pages, gfp, io);
-		if (ret && ret != -EAGAIN)
-			return ret;
-		if (ret == -EAGAIN &&
-		    zms_dirty_pages(zms) > zms->dirty_hard_pages)
-			return ret;
-	}
 
 retry:
 	if (zms_handle_pending_locked(zms, handle)) {
@@ -2392,38 +2377,57 @@ retry:
 	if (zms_handle_pending_locked(zms, handle))
 		return -EEXIST;
 
-	mutex_lock(&class->lock);
-	if (zms_handle_valid_locked(zms, handle)) {
-		mutex_unlock(&class->lock);
+	return 0;
+}
+
+static int zms_store_locked(struct zms *zms, struct zms_class *class,
+			    unsigned long handle, const void *src, size_t size,
+			    gfp_t gfp, struct zms_io *io,
+			    struct zms_block **batch_block)
+{
+	struct zms_block *block = batch_block ? *batch_block : NULL;
+	void *data;
+	unsigned long slot;
+	int ret;
+
+	if (zms_handle_valid_locked(zms, handle))
 		return -EEXIST;
-	}
 
-	block = zms_find_block_locked(zms, class, gfp);
 	if (!block) {
-		mutex_unlock(&class->lock);
-		return -ENOSPC;
-	}
-	frozen = true;
+		bool resident;
 
-	ret = zms_read_frozen_block_unlocked(zms, class, block, gfp, io);
-	if (ret) {
-		zms_block_unfreeze(zms, block);
-		mutex_unlock(&class->lock);
-		return ret;
+		block = zms_find_block_locked(zms, class, gfp);
+		if (!block)
+			return -ENOSPC;
+		resident = zms_block_data_load(block);
+		if (batch_block) {
+			if (!block->listed)
+				atomic_long_inc(&zms->store_batch_new_blocks);
+			else if (resident)
+				atomic_long_inc(&zms->store_batch_resident_reuses);
+		}
+
+		ret = zms_read_frozen_block_unlocked(zms, class, block, gfp, io);
+		if (ret) {
+			zms_block_unfreeze(zms, block);
+			return ret;
+		}
+		zms_clean_cache_del(zms, block);
 	}
-	zms_clean_cache_del(zms, block);
 
 	slot = find_first_zero_bit(block->bitmap, block->slots);
 	if (WARN_ON_ONCE(slot >= block->slots)) {
+		if (batch_block)
+			*batch_block = NULL;
 		zms_block_unfreeze(zms, block);
-		mutex_unlock(&class->lock);
 		return -ENOSPC;
 	}
 
 	data = zms_block_data_load(block);
 	if (WARN_ON_ONCE(!data)) {
+		if (batch_block)
+			*batch_block = NULL;
 		zms_block_unfreeze(zms, block);
-		mutex_unlock(&class->lock);
 		return -EIO;
 	}
 
@@ -2451,23 +2455,152 @@ retry:
 		empty = !block->used;
 		if (!empty) {
 			zms_fix_fullness_locked(zms, class, block);
-			zms_block_unfreeze(zms, block);
+			if (batch_block)
+				*batch_block = block;
+			else
+				zms_block_unfreeze(zms, block);
 		} else {
-			if (!zms_free_empty_block_locked(zms, class, block)) {
-				mutex_unlock(&class->lock);
+			if (batch_block)
+				*batch_block = NULL;
+			if (!zms_free_empty_block_locked(zms, class, block))
 				return -EEXIST;
-			}
 		}
-		mutex_unlock(&class->lock);
 		return -EEXIST;
 	}
 
 	zms_mark_dirty_locked(zms, block, true);
-	ret = 0;
-	if (frozen)
+	if (batch_block && block->used < block->slots) {
+		*batch_block = block;
+	} else {
+		if (batch_block)
+			*batch_block = NULL;
 		zms_block_unfreeze(zms, block);
+	}
+	return 0;
+}
+
+int zms_store(struct zms *zms, unsigned long handle, const void *src,
+	      size_t size, gfp_t gfp, struct zms_io *io)
+{
+	struct zms_class *class;
+	int ret;
+
+	zms_io_clear(io);
+	if (!zms || !src || !size || size > PAGE_SIZE ||
+	    handle == 0 || handle > zms->nr_handles)
+		return -EINVAL;
+
+	class = zms_class_for_size(zms, size);
+	if (!class)
+		return -EINVAL;
+
+	if (zms_dirty_pages(zms) > zms->dirty_hard_pages) {
+		ret = zms_flush_to(zms, zms->dirty_high_pages, gfp, io);
+		if (ret && ret != -EAGAIN)
+			return ret;
+		if (ret == -EAGAIN &&
+		    zms_dirty_pages(zms) > zms->dirty_hard_pages)
+			return ret;
+	}
+
+	ret = zms_prepare_store_handle(zms, handle);
+	if (ret)
+		return ret;
+
+	mutex_lock(&class->lock);
+	ret = zms_store_locked(zms, class, handle, src, size,
+			       gfp, io, NULL);
 	mutex_unlock(&class->lock);
-	zms_kick_flush(zms);
+	if (!ret)
+		zms_kick_flush(zms);
+
+	return ret;
+}
+
+int zms_store_batch(struct zms *zms, struct zms_store_item *items,
+		    unsigned int nr, gfp_t gfp, struct zms_io *io)
+{
+	struct zms_class *class;
+	struct zms_block *batch_block = NULL;
+	unsigned int stored = 0;
+	unsigned int i;
+	int first_err = 0;
+	int ret;
+
+	zms_io_clear(io);
+	if (!zms || !items || !nr)
+		return -EINVAL;
+
+	class = zms_class_for_size(zms, items[0].size);
+	if (!class)
+		return -EINVAL;
+	for (i = 0; i < nr; i++) {
+		items[i].ret = 0;
+		if (!items[i].src || !items[i].size ||
+		    items[i].size > PAGE_SIZE || !items[i].handle ||
+		    items[i].handle > zms->nr_handles ||
+		    zms_class_for_size(zms, items[i].size) != class) {
+			first_err = -EINVAL;
+			break;
+		}
+	}
+	if (first_err) {
+		for (i = 0; i < nr; i++)
+			items[i].ret = first_err;
+		return first_err;
+	}
+
+	if (zms_dirty_pages(zms) > zms->dirty_hard_pages) {
+		ret = zms_flush_to(zms, zms->dirty_high_pages, gfp, io);
+		if (ret && ret != -EAGAIN)
+			goto fail_all;
+		if (ret == -EAGAIN &&
+		    zms_dirty_pages(zms) > zms->dirty_hard_pages)
+			goto fail_all;
+	}
+
+	for (i = 0; i < nr; i++) {
+		items[i].ret = zms_prepare_store_handle(zms, items[i].handle);
+		if (items[i].ret && !first_err)
+			first_err = items[i].ret;
+	}
+
+	mutex_lock(&class->lock);
+	for (i = 0; i < nr; i++) {
+		if (items[i].ret)
+			continue;
+		items[i].ret = zms_store_locked(zms, class, items[i].handle,
+						items[i].src, items[i].size,
+						gfp, io, &batch_block);
+		if (!items[i].ret) {
+			stored++;
+			continue;
+		}
+		if (!first_err)
+			first_err = items[i].ret;
+		if (items[i].ret == -ENOSPC) {
+			unsigned int j;
+
+			for (j = i + 1; j < nr; j++) {
+				if (!items[j].ret)
+					items[j].ret = -ENOSPC;
+			}
+			break;
+		}
+	}
+	if (batch_block)
+		zms_block_unfreeze(zms, batch_block);
+	mutex_unlock(&class->lock);
+
+	atomic_long_inc(&zms->store_batch_calls);
+	atomic_long_add(stored, &zms->store_batch_items);
+	if (stored)
+		zms_kick_flush(zms);
+	return first_err;
+
+fail_all:
+	for (i = 0; i < nr; i++)
+		items[i].ret = ret;
 
 	return ret;
 }

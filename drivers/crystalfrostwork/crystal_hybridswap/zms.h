@@ -89,6 +89,10 @@ struct zms_stats {
 	unsigned long clean_cache_evictions;
 	unsigned long clean_cache_fullness_drops;
 	unsigned long clean_cache_demand_hits;
+	unsigned long store_batch_calls;
+	unsigned long store_batch_items;
+	unsigned long store_batch_resident_reuses;
+	unsigned long store_batch_new_blocks;
 	u64 stored_bytes;
 	u64 packed_bytes;
 	u64 physical_read_pages;
@@ -99,6 +103,13 @@ struct zms_stats {
 	u64 physical_write_failed_pages;
 	u64 bd_stat_read_pages;
 	u64 bd_stat_write_pages;
+};
+
+struct zms_store_item {
+	unsigned long handle;
+	const void *src;
+	size_t size;
+	int ret;
 };
 
 struct zms_load_item {
@@ -137,6 +148,8 @@ int zms_get_stats(struct zms *zms, struct zms_stats *stats);
 
 int zms_store(struct zms *zms, unsigned long handle, const void *src,
 	      size_t size, gfp_t gfp, struct zms_io *io);
+int zms_store_batch(struct zms *zms, struct zms_store_item *items,
+		    unsigned int nr, gfp_t gfp, struct zms_io *io);
 int zms_load(struct zms *zms, unsigned long handle, void *dst, size_t *size,
 	     gfp_t gfp, struct zms_io *io);
 int zms_load_cached_ref(struct zms *zms, unsigned long handle,

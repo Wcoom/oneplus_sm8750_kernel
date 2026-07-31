@@ -82,6 +82,71 @@ Description:
 		statistics (orig_data_size, compr_data_size, etc.) in a format
 		similar to block layer statistics file format.
 
+What:		/sys/block/zram<id>/sddc_stat
+Date:		August 2026
+Contact:	whitewhale0612 <2136512929@qq.com>
+Description:
+		The sddc_stat file is read-only and reports the per-device
+		Crystal SDDC similarity-deduplication and delta-compression
+		state. It emits one unsigned decimal "name: value" pair per
+		line:
+
+		enabled: <bool>
+		queued: <count>
+		dropped: <count>
+		pending: <count>
+		pending_max: <count>
+		observed: <count>
+		stale: <count>
+		indexed: <count>
+		refs: <count>
+		ref_bytes: <bytes>
+		aliases: <count>
+		deltas: <count>
+		delta_bytes: <bytes>
+		alias_attempts: <count>
+		alias_hits: <count>
+		delta_attempts: <count>
+		delta_hits: <count>
+		saved_bytes: <bytes>
+		saved_bytes_total: <bytes>
+		conversion_failures: <count>
+		decode_failures: <count>
+		flatten_failures: <count>
+		limit_rejects: <count>
+
+		enabled is one when a running SDDC manager supplied the
+		snapshot. queued, dropped, pending, and pending_max describe the
+		observation workqueue. observed counts completed candidate
+		processing, stale counts jobs whose captured slot identity no
+		longer matched, and indexed counts observations retained as
+		future candidates.
+
+		refs and ref_bytes are current immutable reference objects and
+		their payload bytes. aliases and deltas are current managed slots;
+		delta_bytes includes the complete resident delta wire objects.
+		The attempts and hits fields are cumulative exact-alias and
+		similar-delta candidate results.
+
+		saved_bytes is the current sum of ordinary target bytes avoided
+		by live aliases and deltas. saved_bytes_total is the cumulative
+		sum at successful commits. These byte counters use exact object
+		lengths and do not include zsmalloc class rounding, fragmentation,
+		or SDDC metadata.
+
+		conversion_failures reports conversion resource, allocation,
+		promotion, limit, or stale-commit failures after an actionable
+		candidate result. Codec no-gain and same-zsmalloc-class misses are
+		not failures. decode_failures reports resident restoration errors;
+		flatten_failures reports non-transient restoration errors while
+		preparing ordinary streams for writeback. limit_rejects is the
+		subset of delta allocations rejected by the zram memory limit.
+
+		Current gauges decrease when slots and references are freed.
+		Cumulative fields reset with the zram device. If SDDC is not built,
+		cannot run with the selected compressor, or is quiescing, every
+		field is zero, including enabled.
+
 What:		/sys/block/zram<id>/debug_stat
 Date:		July 2016
 Contact:	Sergey Senozhatsky <sergey.senozhatsky@gmail.com>

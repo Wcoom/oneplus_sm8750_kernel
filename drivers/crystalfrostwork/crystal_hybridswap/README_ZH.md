@@ -70,6 +70,9 @@ Crystal 因此保留有利于部署和维护的用户可见部分，但重写内
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK`：启用私有 zram 写回数据面。
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MEMORY_TRACKING`：在具备 debugfs 支持时启用更详细的内存跟踪。
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MULTI_COMP`：在平台支持时启用多压缩流或多压缩器能力。
+- `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC`：按设备启用可选的相似性索引、精确 alias 和驻留 delta 表示。
+- `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD`：构建 SDDC 使用的私有 4 KiB LZ4KD 普通/delta 后端，不向全局 Crypto API 注册算法。
+- `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST`：构建私有 codec 和 SDDC 状态机 KUnit 测试。
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP`：选择默认压缩算法。
 
 ### 2.2 组件分层
@@ -107,6 +110,8 @@ Crystal Hybridswap 使用 zram slot 状态，而不是 extent 级对象模型。
 | `ZRAM_INCOMPRESSIBLE` | 当前压缩器无法有效压缩该页面。 |
 
 所有页状态迁移都受 slot 级锁保护。写回和 batch-in 使用显式所有权规则，避免读、写、回收、reset 和设备移除路径并发破坏 slot 状态。
+
+启用 SDDC 且 primary compressor 支持 delta 时，普通 zram 对象会被异步观察。完全相同的 stream 可以作为无 handle alias 共享一个 immutable reference，相似 stream 则可以保存为相对该 reference 的 LZ4KD delta。SDDC 在 commit、read 和 writeback 边界同时校验 slot mutation 与 reference generation。alias/delta 在进入 ZMS 前会 flatten 回普通 zram stream，因此驻留 reference graph 不会持久化。representation、wire format、所有权、锁序、记账和失败恢复不变量详见 [sddc/DESIGN.md](sddc/DESIGN.md)。
 
 ### 2.4 控制面
 
@@ -160,6 +165,7 @@ force swapin 是 best-effort batch-in 操作。它选择目标设备和页面，
 | force shrink | 在平台支持时提供 memcg 级匿名页和文件页收缩控制。 |
 | per-memcg 策略与统计 | 暴露 cgroup 级压力、参数、操作结果和 per-app 摘要。 |
 | multi-zram 处理 | 多个 zram 设备同时存在时选择合适目标。 |
+| SDDC 与 LZ4KD delta | 可选地去重完全相同的驻留 stream，并将相似 stream 保存为经过校验的 delta，同时保持普通 zram 和 ZMS 行为。 |
 | 压力通知 | 通过 eventfd 报告 low、medium、critical 三档内存压力。 |
 | 诊断能力 | 提供轻量 sysfs 统计、详细 Crystal 统计、操作快照、debugfs 报告和内核日志。 |
 
@@ -232,6 +238,7 @@ echo '...' > /sys/fs/cgroup/memory/<cg_path>/memory.swapd_single_memcg_param
 | `writeback` | 触发页面写回。 |
 | `writeback_limit` | 设置写回限制。 |
 | `writeback_limit_enable` | 启用或关闭写回限制。 |
+| `sddc_stat` | 显示 SDDC manager 状态、候选活动、驻留 reference/alias/delta、节省字节和失败计数；SDDC 不可用时报告全零。 |
 | `bd_stat` | 三字段 data-path backing-device 统计，使用 ZMS 物理 4K block 口径。 |
 | `zms_stat` | 显示 Crystal ZMS backing-store 状态、打包情况、block 分配、dirty 数据和 read-merge 诊断。 |
 | `writeback_cold_stat` | 显示启用 entry access-time tracking 时自动写回使用的 age/cold-page 选择计数。 |
@@ -305,6 +312,7 @@ memcg，`-2` 表示存在多个 UID，非负数表示真实 Linux UID。
 cat /sys/block/<zramX>/hybridswap_vmstat
 cat /sys/block/<zramX>/hybridswap_crystal_stat
 cat /sys/block/<zramX>/hybridswap_stat_snap
+cat /sys/block/<zramX>/sddc_stat
 cat /sys/kernel/debug/crystal_hybridswap/stats
 cat /sys/kernel/debug/crystal_hybridswap/report
 dmesg | grep -i hybridswap
@@ -344,9 +352,10 @@ Crystal Hybridswap 保留标准 zram 对外 ABI：
 Crystal 专属接口分为：
 
 1. zram bridge 节点：`hybridswap_vmstat`、`hybridswap_crystal_stat`、`hybridswap_report`、`hybridswap_stat_snap` 及相关控制节点。
-2. memcg bridge 节点：`memory.force_swapout`、`memory.force_swapin`、`memory.force_shrink_*`、`memory.swapd_*` 和 per-app 摘要节点。
-3. pressure eventfd 接口：注册并通知 low、medium、critical 压力等级。
-4. debugfs 接口：详细计数、快照和诊断报告。
+2. zram 数据面诊断节点：只读的 `sddc_stat`、`zms_stat` 和 `writeback_cold_stat`。
+3. memcg bridge 节点：`memory.force_swapout`、`memory.force_swapin`、`memory.force_shrink_*`、`memory.swapd_*` 和 per-app 摘要节点。
+4. pressure eventfd 接口：注册并通知 low、medium、critical 压力等级。
+5. debugfs 接口：详细计数、快照和诊断报告。
 
 ### 5.3 兼容占位 API 边界
 
@@ -388,6 +397,7 @@ Crystal 专属接口分为：
 - debugfs 面向开发和深度诊断，不应视为稳定生产 ABI。
 - 兼容占位 API 默认关闭，只应在用户态确实需要时启用。
 - 旧 `memory.swapd_memcgs_param` 策略 ABI 默认关闭；只有旧用户态需要该控制面及其 score/`ub_zram2ufs_ratio` 自动 memcg 写回行为时才应启用。
+- SDDC 默认关闭，需要 4 KiB page 和支持 delta 的 primary compressor，其 delta wire format 只在内存中驻留；可通过 `sddc_stat` 确认 manager 是否运行。
 - 模块不提供 OPPO 官方内部 extent / rmap / fault-out 数据路径。
 - 自动策略依赖运行时压力、quota、memcg 状态和 backing-device 可用性，应视为自适应策略而非确定性事务。
 
@@ -461,6 +471,7 @@ data-path 物理 4K block 口径，并排除 ZMS 内部维护 I/O。完整 ZMS
 | pressure interface | 维护 eventfd 注册、通知等级和压力原因报告。 |
 | debugfs stats | 维护详细计数和诊断报告，但不要将 debugfs 当作稳定 ABI。 |
 | compression layer | 维护压缩器选择、压缩流处理和 zram 数据面预期兼容性。 |
+| SDDC layer | 维护 immutable reference 所有权、slot/cookie ABA 防护、驻留 decode/flatten 行为和精确 payload 字节记账。 |
 
 ### 9.2 核心不变量
 
@@ -476,6 +487,8 @@ data-path 物理 4K block 口径，并排除 ZMS 内部维护 I/O。完整 ZMS
 8. 标准 zram 节点必须保持兼容；Crystal 专属数据应放在 Crystal 扩展节点或 debugfs。
 9. 兼容占位 API 不应悄悄获得真实旧数据路径语义。
 10. 旧 `memory.swapd_memcgs_param` 策略行为必须始终受 `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM` 控制；关闭该选项时不得影响自动 memcg 写回。
+11. SDDC source/target 工作在 commit 前必须校验完整捕获身份，writeback 必须同时校验 zram 与 SDDC snapshot。
+12. SDDC reference 必须通过 slot ownership 释放，teardown 不得强制清空仍有 owner 的 reference。
 
 ### 9.3 维护建议
 

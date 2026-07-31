@@ -70,6 +70,9 @@ Relevant optional symbols include:
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK`: enables the private zram writeback data path.
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MEMORY_TRACKING`: enables more detailed memory tracking when debugfs support is available.
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MULTI_COMP`: enables multi-stream or multi-compressor support where supported by the platform.
+- `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC`: enables the opt-in per-device similarity index, exact aliases, and resident delta representation.
+- `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD`: builds the private 4 KiB LZ4KD ordinary/delta backend used by SDDC without registering a global Crypto API algorithm.
+- `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST`: builds the private codec and SDDC state-machine KUnit coverage.
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP`: selects the default compression algorithm.
 
 ### 2.2 Component Layout
@@ -107,6 +110,16 @@ Crystal Hybridswap uses zram slot state rather than an extent-level object model
 | `ZRAM_INCOMPRESSIBLE` | The active compressor could not compress the page efficiently. |
 
 All page state transitions are protected by slot-level locking. Writeback and batch-in use explicit ownership rules so that concurrent read, write, reclaim, reset, and device teardown paths do not corrupt slot state.
+
+When SDDC is enabled with a delta-capable primary compressor, ordinary zram
+objects are observed asynchronously. Exact streams can share one immutable
+reference as handle-less aliases, while similar streams can be stored as an
+LZ4KD delta against that reference. SDDC validates slot mutation and reference
+generation at every commit, read, and writeback boundary. Before ZMS
+writeback, aliases and deltas are flattened back to an ordinary zram stream,
+so the resident reference graph is never persisted. See
+[sddc/DESIGN.md](sddc/DESIGN.md) for the representation, wire format,
+ownership, locking, accounting, and recovery invariants.
 
 ### 2.4 Control Plane
 
@@ -160,6 +173,7 @@ Force swapin is a best-effort batch-in operation. It selects target devices and 
 | Force shrink | Provides memcg-level anonymous and file page shrink controls where available. |
 | Per-memcg policy and statistics | Exposes cgroup-level pressure, parameters, operation results, and per-application summaries. |
 | Multi-zram handling | Selects appropriate zram targets when multiple zram devices are present. |
+| SDDC and LZ4KD delta | Optionally deduplicates exact resident streams and stores similar streams as validated deltas while preserving normal zram and ZMS behavior. |
 | Pressure notification | Reports low, medium, and critical memory pressure through eventfd notification. |
 | Diagnostics | Provides lightweight sysfs statistics, detailed Crystal statistics, operation snapshots, debugfs reports, and kernel logs. |
 
@@ -232,6 +246,7 @@ echo '...' > /sys/fs/cgroup/memory/<cg_path>/memory.swapd_single_memcg_param
 | `writeback` | Triggers page writeback. |
 | `writeback_limit` | Sets writeback limit. |
 | `writeback_limit_enable` | Enables or disables writeback limit enforcement. |
+| `sddc_stat` | Shows SDDC manager state, candidate activity, resident references/aliases/deltas, byte savings, and failure counters. It reports zero values when SDDC is unavailable. |
 | `bd_stat` | Three-field data-path backing-device statistics using physical ZMS 4K-block units. |
 | `zms_stat` | Shows Crystal ZMS backing-store state, packing, block allocation, dirty data, and read-merge diagnostics. |
 | `writeback_cold_stat` | Shows age/cold-page selection counters used by automatic writeback when entry access-time tracking is enabled. |
@@ -306,6 +321,7 @@ Recommended diagnostic order:
 cat /sys/block/<zramX>/hybridswap_vmstat
 cat /sys/block/<zramX>/hybridswap_crystal_stat
 cat /sys/block/<zramX>/hybridswap_stat_snap
+cat /sys/block/<zramX>/sddc_stat
 cat /sys/kernel/debug/crystal_hybridswap/stats
 cat /sys/kernel/debug/crystal_hybridswap/report
 dmesg | grep -i hybridswap
@@ -346,9 +362,10 @@ full ZMS physical I/O counters stay in `zms_stat`.
 Crystal-specific interfaces are grouped as:
 
 1. zram bridge nodes: `hybridswap_vmstat`, `hybridswap_crystal_stat`, `hybridswap_report`, `hybridswap_stat_snap`, and related controls.
-2. memcg bridge nodes: `memory.force_swapout`, `memory.force_swapin`, `memory.force_shrink_*`, `memory.swapd_*`, and per-application summary nodes.
-3. pressure eventfd interface: registration and notification for low, medium, and critical pressure levels.
-4. debugfs interface: detailed counters, snapshots, and diagnostic reports.
+2. zram data-path diagnostics: the read-only `sddc_stat`, `zms_stat`, and `writeback_cold_stat` nodes.
+3. memcg bridge nodes: `memory.force_swapout`, `memory.force_swapin`, `memory.force_shrink_*`, `memory.swapd_*`, and per-application summary nodes.
+4. pressure eventfd interface: registration and notification for low, medium, and critical pressure levels.
+5. debugfs interface: detailed counters, snapshots, and diagnostic reports.
 
 ### 5.3 Compatibility Placeholder APIs
 
@@ -390,6 +407,7 @@ The practical result is that Crystal Hybridswap behaves like a zram-compatible s
 - debugfs is intended for development and deep diagnostics, not as a stable production ABI.
 - Compatibility placeholder APIs are disabled by default and should only be enabled when required by user space.
 - The legacy `memory.swapd_memcgs_param` policy ABI is disabled by default; enable it only when old user space needs that control surface and its score/`ub_zram2ufs_ratio` automatic memcg writeback behavior.
+- SDDC is opt-in, requires 4 KiB pages and a delta-capable primary compressor, and keeps its delta wire format resident-only. `sddc_stat` reports whether a manager is active.
 - The module does not provide the OPPO official internal extent/rmap/fault-out data path.
 - Automatic policy decisions depend on runtime pressure, quota, memcg state, and backing-device availability; they should be treated as adaptive rather than deterministic.
 
@@ -464,6 +482,7 @@ Use multiple evidence sources:
 | pressure interface | Maintain eventfd registration, notification levels, and pressure reason reporting. |
 | debugfs stats | Maintain detailed counters and diagnostic reports without treating debugfs as stable ABI. |
 | compression layer | Maintain compressor selection, stream handling, and compatibility with zram data-plane expectations. |
+| SDDC layer | Maintain immutable-reference ownership, slot and cookie ABA protection, resident decode/flatten behavior, and exact payload-byte accounting. |
 
 ### 9.2 Core Invariants
 
@@ -479,6 +498,8 @@ When changing the module, preserve these invariants:
 8. Standard zram nodes must remain compatible; Crystal-specific data should stay in Crystal extension nodes or debugfs.
 9. Compatibility placeholder APIs must not silently acquire real old-data-path semantics.
 10. Legacy `memory.swapd_memcgs_param` policy behavior must remain behind `CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM`; when that option is disabled it must not influence automatic memcg writeback.
+11. SDDC source/target work must validate the complete captured identity before commit, and writeback must validate both zram and SDDC snapshots.
+12. SDDC references must be released through slot ownership; teardown must not force-drain a live reference.
 
 ### 9.3 Maintenance Recommendations
 

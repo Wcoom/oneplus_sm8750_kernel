@@ -124,8 +124,8 @@ static int encode_any2(
 	while (true) {
 		uint_fast32_t off0 = 0;
 		uint_fast32_t utag = 0;
-		const uint8_t *q = 0;
-		const uint8_t *r_end = 0;
+		const uint8_t *q = NULL;
+		const uint8_t *r_end = NULL;
 		const uint8_t *s = r;
 		uint_fast32_t step = 1 << STEP_LOG2;
 		while (true) {
@@ -147,7 +147,7 @@ static int encode_any2(
 			goto REPEAT_DONE; /* match_max(q, s, r_bytes_max + 1) below */
 		step = Q_MAX - 1;
 		while ((off0 = past_offset[off0]) && (q >= in || step > 0)) {
-			const uint8_t *r_start = 0;
+			const uint8_t *r_start = NULL;
 			--step;
 			if (!match_max((q = in0 + off0), s, r_bytes_max + 1))
 				continue;
@@ -191,7 +191,7 @@ static int encode_delta_fast(
 			 nr_log2, false); /* !check_out */
 }
 
-int crystal_lz4kd_encode_delta_slow(
+static int crystal_lz4kd_encode_delta_slow(
 	uint16_t *const ht,
 	const uint8_t *const in0,
 	const uint8_t *const in,

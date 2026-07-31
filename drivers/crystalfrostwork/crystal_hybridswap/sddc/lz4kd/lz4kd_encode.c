@@ -298,10 +298,10 @@ static int encode_any(
 	const uint8_t *nr0 = r++;
 	uint8_t *out_at = out + 1; /* +1 for header */
 	for (; ; nr0 = r) {
-		const uint8_t *q = 0;
+		const uint8_t *q = NULL;
 		uint_fast32_t step = 1 << STEP_LOG2;
 		uint_fast32_t utag = 0;
-		const uint8_t *r_end = 0;
+		const uint8_t *r_end = NULL;
 		uint_fast32_t r_bytes_max = 0;
 		while (true) {
 			if (equal4(q = hashed(in0, ht, hash(r), r), r))

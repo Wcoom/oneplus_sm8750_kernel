@@ -148,8 +148,8 @@ static int decode_any(
 		uint_fast32_t nr_bytes_max = utag >> (off_log2 + r_log2),
 			      r_bytes_max = ((utag >> off_log2) & mask(r_log2)) +
 					    REPEAT_MIN;
-		const uint8_t *out_from = 0;
-		uint8_t *out_copy_end = 0;
+		const uint8_t *out_from = NULL;
+		uint8_t *out_copy_end = NULL;
 		in_at += TAG_BYTES_MAX;
 		if (unlikely(nr_bytes_max == mask(nr_log2))) {
 			in_at = get_size(&nr_bytes_max, in_at, in_end);

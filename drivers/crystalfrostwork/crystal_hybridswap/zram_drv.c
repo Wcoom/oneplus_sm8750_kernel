@@ -619,6 +619,7 @@ static void zram_memcg_stats_sub_current(struct zram *zram, u32 index)
 	zram_memcg_stats_apply(zram, &account, false);
 }
 
+#if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC)
 void crystal_sddc_zram_account_sub_locked(struct zram *zram, u32 index)
 {
 	zram_memcg_stats_sub_current(zram, index);
@@ -643,6 +644,7 @@ void crystal_sddc_zram_ref_account(struct zram *zram, u64 memcg_id,
 		zram_memcg_stats_update(&entry->zram_compressed_size, size, add);
 	spin_unlock(&zram->memcg_stats_lock);
 }
+#endif
 
 static void zram_memcg_stats_clear_all(struct zram *zram)
 {
@@ -749,6 +751,7 @@ static inline void update_used_max(struct zram *zram,
 					  &cur_max, pages));
 }
 
+#if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC)
 bool crystal_sddc_zram_memory_limit_ok(struct zram *zram)
 {
 	unsigned long pages = zs_get_total_pages(zram->mem_pool);
@@ -756,6 +759,7 @@ bool crystal_sddc_zram_memory_limit_ok(struct zram *zram)
 	update_used_max(zram, pages);
 	return !zram->limit_pages || pages <= zram->limit_pages;
 }
+#endif
 
 static void zram_atomic64_update_max(atomic64_t *max, s64 val)
 {
@@ -3127,7 +3131,11 @@ static ssize_t sddc_stat_show(struct device *dev,
 	return sysfs_emit(buf,
 		"enabled: %u\n"
 		"queued: %llu\n"
+		"coalesced: %llu\n"
 		"dropped: %llu\n"
+		"ineligible: %llu\n"
+		"shutdown_discarded: %llu\n"
+		"worker_runs: %llu\n"
 		"pending: %u\n"
 		"pending_max: %llu\n"
 		"observed: %llu\n"
@@ -3148,8 +3156,10 @@ static ssize_t sddc_stat_show(struct device *dev,
 		"decode_failures: %llu\n"
 		"flatten_failures: %llu\n"
 		"limit_rejects: %llu\n",
-		stats.enabled, stats.queued, stats.dropped, stats.pending,
-		stats.pending_max, stats.observed, stats.stale, stats.indexed,
+		stats.enabled, stats.queued, stats.coalesced, stats.dropped,
+		stats.ineligible, stats.shutdown_discarded, stats.worker_runs,
+		stats.pending, stats.pending_max, stats.observed, stats.stale,
+		stats.indexed,
 		stats.refs, stats.ref_bytes, stats.aliases, stats.deltas,
 		stats.delta_bytes, stats.alias_attempts, stats.alias_hits,
 		stats.delta_attempts, stats.delta_hits, stats.saved_bytes,

@@ -39,15 +39,28 @@ SDDC. It is either a compressed stream shorter than `PAGE_SIZE`, or the raw
 4 KiB page when ordinary compression did not reduce its size. SDDC compares
 and delta-compresses these ordinary streams, not decompressed page contents.
 
-Every SDDC slot record also contains:
+Every logical slot has an 8-byte `mutation_seq`, advanced by the ordinary
+store/free lifecycle. The sequence remains dense because ordinary slots need
+the same ABA protection as managed slots. All other SDDC state is sparse: an
+XArray node exists only while the slot is `REF`, `ALIAS`, or `DELTA`. That node
+contains the reference cookie, `accounted_size`, `saved_size`, and kind. A
+normal `NONE` slot therefore consumes no managed-state node. In-place SDDC
+transitions retain the mutation sequence and are additionally identified by
+their kind and reference cookie.
 
-- `mutation_seq`, advanced by the ordinary store/free lifecycle; in-place SDDC
-  transitions are additionally identified by their kind and reference cookie;
-- a reference cookie for `REF`, `ALIAS`, and `DELTA`;
-- `accounted_size`, which is zero for `REF`/`ALIAS` and the resident wire size
-  for `DELTA`; and
-- `saved_size`, the original target stream size minus its committed SDDC
-  resident size.
+State-node allocation and XArray reservation happen before a slot lock is
+taken. Publication consumes that reservation without sleeping and precedes
+the representation change. Allocation or reservation failure abandons only
+the opportunistic conversion; it never fails the ordinary zram store. If the
+manager's fixed metadata cannot be allocated at device initialization, zram
+continues with ordinary LZ4KD compression and no SDDC manager.
+
+The reservation owner also retains the target/source mutation sequence for its
+abort path. A concurrent free/store leaves the reservation in place and bumps
+that sequence, so abort releases the reservation and schedules one latest-state
+observation afterward. An ordinary no-gain, same-class, or resource miss keeps
+the sequence unchanged and is not requeued; this prevents a permanent retry
+loop on data that cannot benefit from SDDC.
 
 ### 2.1 Immutable references
 
@@ -115,18 +128,45 @@ compressor priority. The object must:
 - use a compressor with delta support; and
 - not be `SAME`, `WB`, `UNDER_WB`, or already SDDC-managed.
 
-The key is queued to the device's ordered, reclaim-capable observation
-workqueue. At most 1024 observation jobs may be pending. The producer and the
-worker each hold their own SDDC manager lifetime token, and the work also owns
-a private zram reference.
+The key is used as an admission hint, then only its slot index is enqueued. A
+device owns one pending bit per slot in an `nr_slots`-sized bitmap and two
+embedded, reclaim-capable observation work items. The workqueue itself is
+ordered, so only one callback drains the bitmap at a time; the second item
+closes the hand-off window while a callback is returning. Under `state_lock`,
+the producer sets the bit and increments `pending` only when it was previously
+clear. Repeated stores for the same slot therefore increment `coalesced`
+instead of allocating another work item; the queue has latest-state semantics,
+not a backlog of stale keys. `queued` counts these unique bit insertions.
 
-The worker holds `init_lock` for read while it validates the job key and copies
-the target stream under the slot lock. Hashing, codec calls, and allocations
-happen after releasing the slot lock. Three hashes are calculated:
+The producer that successfully queues a work item transfers one zram reference
+and one SDDC `active_ops` token to that callback. If both embedded items are
+already queued or running, the bit remains set and one of those callbacks owns
+the drain; a failed `queue_work()` attempt does not clear it. The worker drains
+bits in round-robin order, clears a bit and decrements `pending` under
+`state_lock`, then reacquires the slot lock to read the current handle, size,
+flags, and mutation sequence. A store that raced with enqueue is consequently
+observed using its newest representation. Each callback has a bounded slot
+budget and hands remaining bits to the alternate embedded work item, so a
+continuously rewritten device cannot keep freezer or reset waiting indefinitely.
+There is no fixed 1024-entry allocation; the observation buffers come from the
+bounded workspace pool rather than from each store event. A transient workspace
+allocation failure leaves the bits intact and requeues through the alternate
+embedded callback; pending work is discarded only once stop has closed
+admission.
+
+The worker holds `init_lock` for read while it validates the latest job key and
+copies the target stream under the slot lock. Hashing, codec calls, and
+allocations happen after releasing the slot lock. Three hashes are calculated:
 
 - an exact hash over the complete ordinary stream;
 - a hash over the first 16 bytes; and
 - a hash over the last 16 bytes.
+
+If no conversion commits, the worker validates the same job key once more
+under the slot lock before publishing any exact or sample index cell. A store
+or free that raced with hashing therefore cannot leave a candidate cell for a
+different object. The mutation sequence and complete identity remain the
+authoritative check at every later candidate lookup.
 
 There are 4096 exact buckets and 4096 sample buckets, each with four
 round-robin ways. Streams larger than 256 bytes enter both head and tail
@@ -139,7 +179,9 @@ candidate cell can resolve the new `REF`; the kind and cookie then identify
 that in-place representation transition.
 
 Candidate lookup first returns up to four exact candidates. If none commits,
-it combines and de-duplicates up to eight head/tail sample candidates.
+it combines and de-duplicates up to eight head/tail sample candidates. The
+candidate arrays are bounded stack storage, so duplicate head/tail index cells
+cannot multiply codec work for one target.
 
 ## 5. Conversion Transaction
 
@@ -253,7 +295,8 @@ The teardown protocol is ordered as follows:
 ```text
 sddc_lifecycle_lock
   -> close admission under sddc_lock (set stopping)
-  -> flush observation work and wait for active_ops == 0
+  -> clear pending bitmap under state_lock and account shutdown discards
+  -> flush observation work items and wait for active_ops == 0
   -> acquire init_lock for write
   -> free slots and their reference owners
   -> detach the quiesced manager under sddc_lock
@@ -274,10 +317,12 @@ The individual locks have narrow ownership:
 | `sddc_lock` | Manager pointer, admission, and `stopping` transition | Held only briefly; never held while flushing or waiting. |
 | `init_lock` | zram table, compressors, and initialized-device lifetime | Observation work holds read; reset takes write only after admission drains. |
 | slot bit lock | zram entry and matching per-slot SDDC record | Required for identity capture, validation, representation commit, and free. |
+| slot-state XArray lock | Sparse managed-state publication and removal | Taken briefly below the matching slot lock; never used to acquire a slot lock. |
 | reference XArray lock | Cookie lookup, publication, pin, erase, and refcount-to-zero | May be taken below a slot lock; no path takes a slot lock while holding it. |
 | `memcg_stats_lock` | Per-memcg cached accounting | May be taken below a slot lock during representation accounting. |
-| `index_lock` | Exact/sample bucket cells | Released before any candidate slot is locked. |
-| `state_lock` | Pending-job count and queue admission bookkeeping | Never held across slot or index processing. |
+| `index_lock` | Exact/sample bucket cells | Candidate lookup releases it before locking a slot; final index publication may take it below the validated target slot lock. |
+| `state_lock` | Pending bitmap, round-robin cursor, worker admission, and queue counters | Never held across slot or index processing. |
+| `active_lock` | `active_ops` decrement/wakeup and teardown idle confirmation | The final put and the idle check are serialized so teardown cannot free the manager while a put is still waking its waitqueue. |
 
 Every operation that can retain a manager pointer beyond the caller's
 `init_lock`/slot critical section obtains an `active_ops` token through
@@ -285,7 +330,9 @@ Every operation that can retain a manager pointer beyond the caller's
 caller-owned device lifetime protection. Setting `stopping` prevents new
 tokens. Observation submission keeps separate producer and worker tokens so
 completion of one cannot expose manager or statistics memory to use-after-free
-by the other.
+by the other. The final `active_ops` put performs its wakeup while holding
+`active_lock`; teardown takes that lock after the wait condition becomes true,
+which closes the last-put versus manager-free window.
 
 Slot `mutation_seq`, full job-key validation, writeback SDDC snapshots, and
 reference generations address different ABA domains and must all remain in
@@ -331,8 +378,12 @@ metadata overhead.
 
 The data path follows these recovery rules:
 
-- invalid or resource-constrained observations are dropped while their slots
-  remain ordinary;
+- requests that cannot acquire manager admission or a zram lifetime reference
+  are dropped while their slots remain ordinary; those early failures cannot
+  be attributed to a manager that may already be gone. A request whose
+  pending bit is already set is coalesced instead of dropped;
+- a consumed bit whose latest slot is empty, raw-ineligible, writeback-owned,
+  or already managed is counted as ineligible and leaves the slot ordinary;
 - a stale job, source candidate, or target commit is rejected by identity
   validation;
 - codec no-gain results and same-class results are normal misses, not data
@@ -346,13 +397,19 @@ The data path follows these recovery rules:
   mismatched reference;
 - non-stale flatten failures leave the resident slot intact, clear writeback
   ownership in the caller, and are visible in diagnostics; and
-- reset first closes admission and drains active operations, then frees every
-  slot so reference teardown follows normal ownership rules.
+- reset first closes admission, clears unconsumed bitmap bits (accounting them
+  as shutdown discards), and drains the observation workers and active
+  operations;
+  it then frees every slot so reference teardown follows normal ownership
+  rules. A worker-owned bit is allowed to finish before teardown.
 
-The workspace mempool keeps read and flatten restoration available under
-reclaim pressure. Reference payload release uses a dedicated reclaim-capable,
-unbound, high-priority workqueue so zsmalloc release is not performed inside a
-slot lock.
+The workspace mempool supplies bounded PAGE_SIZE buffers for observation and
+read/flatten restoration under reclaim pressure. Observation borrows a workspace
+for the target stream and returns it after candidate indexing or conversion;
+queue coalescing means the pool is sized for active workers rather than the
+number of store events. Reference payload release uses a dedicated
+reclaim-capable, unbound, high-priority workqueue so zsmalloc release is not
+performed inside a slot lock.
 
 ## 10. Diagnostics
 
@@ -362,12 +419,16 @@ slot lock.
 | Field | Unit | Meaning |
 |---|---|---|
 | `enabled` | boolean | A running SDDC manager admitted the snapshot. |
-| `queued` | count | Observation jobs successfully queued. |
-| `dropped` | count | Valid observations lost to queue/resource/admission limits after manager lookup. |
-| `pending` | count | Observation jobs currently owned by the queue/worker. |
-| `pending_max` | count | Maximum observed pending count. |
+| `queued` | count | Observation requests that set a previously clear per-slot pending bit. |
+| `coalesced` | count | Repeated requests merged into an already-set slot bit. |
+| `dropped` | count | Requests rejected after an active manager was found (for example, an invalid slot index or a stop race). Requests rejected before a manager can own the statistic are not attributed here. |
+| `ineligible` | count | Bits consumed after the latest slot state was no longer a valid observation target. |
+| `shutdown_discarded` | count | Pending bits cleared during stop/reset without being consumed. |
+| `worker_runs` | count | Executions of either embedded observation work item. |
+| `pending` | count | Set bitmap bits not yet taken by the worker. |
+| `pending_max` | count | Maximum observed number of set pending bits. |
 | `observed` | count | Jobs that completed candidate processing. |
-| `stale` | count | Jobs rejected when their captured target identity no longer matched. |
+| `stale` | count | Target observations whose identity changed before final index publication. |
 | `indexed` | count | Observations inserted as future candidates after no conversion committed. |
 | `refs` | count | Current immutable reference objects. |
 | `ref_bytes` | bytes | Current immutable reference payload bytes. |
@@ -389,6 +450,10 @@ Attempts, hits, cumulative totals, and failures reset when the zram device is
 reset and its manager is destroyed. Current gauges fall as slots and
 references are freed. If SDDC is not built, cannot run for the selected
 compressor, or is quiescing, the node reports `enabled: 0` and zero values.
+The queue counters are diagnostic rather than a success ratio: a high
+`coalesced` count is expected when a hot slot is rewritten repeatedly, while
+`ineligible` and `shutdown_discarded` identify work that did not reach
+candidate discovery.
 
 Codec and state-machine KUnit coverage is selected by
 `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST`. Tests should preserve the wire

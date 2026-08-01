@@ -93,7 +93,11 @@ Description:
 
 		enabled: <bool>
 		queued: <count>
+		coalesced: <count>
 		dropped: <count>
+		ineligible: <count>
+		shutdown_discarded: <count>
+		worker_runs: <count>
 		pending: <count>
 		pending_max: <count>
 		observed: <count>
@@ -116,11 +120,26 @@ Description:
 		limit_rejects: <count>
 
 		enabled is one when a running SDDC manager supplied the
-		snapshot. queued, dropped, pending, and pending_max describe the
-		observation workqueue. observed counts completed candidate
-		processing, stale counts jobs whose captured slot identity no
-		longer matched, and indexed counts observations retained as
-		future candidates.
+		snapshot. The observation queue has one pending bit per zram slot and
+		two embedded work items. The workqueue is ordered, so only one callback
+		drains the bitmap at a time. queued counts requests that set a previously
+		clear bit; coalesced counts repeated requests for a slot whose bit was
+		already set. A coalesced request does not add another work item: the
+		worker reads the slot's current identity when it consumes the bit, so
+		the queue has latest-state semantics. dropped counts observable requests
+		rejected after an active manager was found (for example, an invalid slot
+		index or a stop race). Requests that cannot acquire a zram reference or
+		manager are rejected too, but are not attributed to a manager that may
+		already be gone. ineligible counts bits consumed after the
+		slot stopped being a valid observation target. shutdown_discarded
+		counts bits cleared during stop/reset without being consumed.
+
+		pending is the number of set bits not yet taken by the worker;
+		pending_max is its high-water mark. worker_runs counts executions of
+		either embedded work item, not individual slots. observed counts completed
+		candidate processing, stale counts final target identities that changed
+		before index publication, and indexed counts
+		observations retained as future candidates.
 
 		refs and ref_bytes are current immutable reference objects and
 		their payload bytes. aliases and deltas are current managed slots;

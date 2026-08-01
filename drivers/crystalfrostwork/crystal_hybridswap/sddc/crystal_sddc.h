@@ -39,7 +39,11 @@ struct crystal_sddc_job_key {
 
 struct crystal_sddc_stats_snapshot {
 	u64 queued;
+	u64 coalesced;
 	u64 dropped;
+	u64 ineligible;
+	u64 shutdown_discarded;
+	u64 worker_runs;
 	u64 observed;
 	u64 stale;
 	u64 indexed;

@@ -11,6 +11,7 @@
 #include <linux/mm.h>
 #include <linux/refcount.h>
 #include <linux/slab.h>
+#include <linux/sort.h>
 #include <linux/spinlock.h>
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
@@ -27,23 +28,25 @@
 #include "../zram_drv.h"
 #include "crystal_sddc.h"
 
-#define CRYSTAL_SDDC_HASH_BITS		12
+#define CRYSTAL_SDDC_HASH_BITS		16
 #define CRYSTAL_SDDC_HASH_BUCKETS	(1U << CRYSTAL_SDDC_HASH_BITS)
-#define CRYSTAL_SDDC_BUCKET_WAYS	4
+#define CRYSTAL_SDDC_BUCKET_WAYS	8
 #define CRYSTAL_SDDC_SAMPLE_SIZE	16
 #define CRYSTAL_SDDC_INDEX_MIN_SIZE	256
 #define CRYSTAL_SDDC_OBSERVE_WORKS	2
 #define CRYSTAL_SDDC_MAX_SLOTS	(UINT_MAX - (BITS_PER_LONG - 1))
 #define CRYSTAL_SDDC_HASH_SEED		0x1e35a7bdU
 #define CRYSTAL_SDDC_DELTA_GAIN_MIN	8
+#define CRYSTAL_SDDC_DELTA_MIN_SIZE	(PAGE_SIZE / 8)
+#define CRYSTAL_SDDC_SIMILARITY_MIN	16
 #define CRYSTAL_SDDC_DELTA_MAGIC	0x43444453U
 #define CRYSTAL_SDDC_DELTA_VERSION	1
 #define CRYSTAL_SDDC_WORKSPACE_MIN	2
 #define CRYSTAL_SDDC_OBSERVE_BUDGET	64
 
 enum crystal_sddc_sample_kind {
-	CRYSTAL_SDDC_SAMPLE_HEAD,
-	CRYSTAL_SDDC_SAMPLE_TAIL,
+	CRYSTAL_SDDC_SAMPLE_HEAD = BIT(0),
+	CRYSTAL_SDDC_SAMPLE_TAIL = BIT(1),
 };
 
 struct crystal_sddc_slot_state {
@@ -70,14 +73,23 @@ struct crystal_sddc_workspace {
 };
 
 struct crystal_sddc_candidate {
-	u64 mutation_seq;
 	u32 index;
 	u8 sample_kind;
 };
 
 struct crystal_sddc_bucket {
-	struct crystal_sddc_candidate cells[CRYSTAL_SDDC_BUCKET_WAYS];
+	/* Zero is empty; non-zero stores slot index + 1.  Keeping the index
+	 * compact leaves room for the Huawei-sized candidate tables without
+	 * giving up the generation checks in the managed state. */
+	u32 cells[CRYSTAL_SDDC_BUCKET_WAYS];
 	u8 next;
+};
+
+struct crystal_sddc_ranked_candidate {
+	struct crystal_sddc_candidate candidate;
+	u32 match_bytes;
+	u32 ref_count;
+	u32 source_size;
 };
 
 struct crystal_sddc;
@@ -109,6 +121,10 @@ struct crystal_sddc_stats {
 	atomic64_t alias_hits;
 	atomic64_t delta_attempts;
 	atomic64_t delta_hits;
+	atomic64_t delta_matches;
+	atomic64_t delta_small_rejects;
+	atomic64_t delta_no_gain;
+	atomic64_t delta_match_bytes_max;
 	atomic64_t saved_bytes;
 	atomic64_t saved_bytes_total;
 	atomic64_t conversion_failures;
@@ -625,6 +641,16 @@ static void crystal_sddc_ref_put(struct crystal_sddc_ref *ref)
 		crystal_sddc_ref_queue_free(ref);
 }
 
+/* ref_pin() contributes one temporary reference.  Index heuristics must
+ * compare the resident owner/consumer count, not the snapshot's pin. */
+static u32 crystal_sddc_ref_count_without_pin(
+		const struct crystal_sddc_ref *ref)
+{
+	u32 count = refcount_read(&ref->refs);
+
+	return count ? count - 1 : 0;
+}
+
 static void crystal_sddc_ref_drop_cookie(struct crystal_sddc *sddc,
 		const struct crystal_sddc_cookie *cookie)
 {
@@ -697,17 +723,118 @@ static bool crystal_sddc_job_matches_locked(struct crystal_sddc *sddc,
 		zcomp_supports_delta(zram->comps[key->prio]);
 }
 
-static void crystal_sddc_index_insert(struct crystal_sddc_bucket *index,
-		u32 hash, u32 slot_index, u64 mutation_seq, u8 sample_kind)
+static u32 crystal_sddc_index_cell(u32 index)
+{
+	/* Slot zero is valid, so reserve zero as the empty marker. */
+	return index + 1;
+}
+
+static u32 crystal_sddc_index_decode(u32 cell)
+{
+	return cell - 1;
+}
+
+static void crystal_sddc_index_quality(struct crystal_sddc *sddc,
+		u32 cell, u32 *ref_count, u32 *size)
+{
+	struct zram *zram = sddc->zram;
+	struct crystal_sddc_slot_state *state;
+	struct crystal_sddc_ref *ref = NULL;
+	void *entry;
+	u32 index;
+
+	*ref_count = 0;
+	*size = 0;
+	if (!cell)
+		return;
+	index = crystal_sddc_index_decode(cell);
+	if (index >= sddc->nr_slots || !zram->table) {
+		/* An unresolvable cell is protected from eviction.  It will be
+		 * rejected by source validation and naturally replaced later. */
+		*ref_count = U32_MAX;
+		*size = U32_MAX;
+		return;
+	}
+
+	/* Insertion runs under index_lock, while publication runs under a slot
+	 * lock and then takes index_lock.  Never wait for the slot here: a
+	 * blocking acquisition would invert that order and can deadlock against
+	 * a concurrent publication.  A busy cell is simply protected for this
+	 * insertion attempt and will be reconsidered on a later replacement. */
+	if (!bit_spin_trylock(ZRAM_LOCK, &zram->table[index].flags)) {
+		*ref_count = U32_MAX;
+		*size = U32_MAX;
+		return;
+	}
+	entry = crystal_sddc_state_load_raw(sddc, index);
+	if (entry && entry != XA_ZERO_ENTRY && !xa_is_err(entry)) {
+		state = entry;
+		if (state->kind == CRYSTAL_SDDC_REF)
+			ref = crystal_sddc_ref_pin(sddc, &state->ref);
+	}
+	if (ref) {
+		*ref_count = crystal_sddc_ref_count_without_pin(ref);
+		*size = ref->size;
+	} else if (!entry) {
+		*size = crystal_sddc_obj_size(zram, index);
+	}
+	bit_spin_unlock(ZRAM_LOCK, &zram->table[index].flags);
+	crystal_sddc_ref_put(ref);
+}
+
+/* Huawei's table keeps highly shared references resident even when a new
+ * object has the same sample score.  Ordinary objects (ref_count == 0) and
+ * one-use references are allowed to rotate on a tie so the table does not
+ * become permanently pinned by its first occupants. */
+static bool crystal_sddc_index_candidate_worse(u32 incumbent_ref,
+		u32 incumbent_size, u32 candidate_ref, u32 candidate_size)
+{
+	if (candidate_ref != incumbent_ref)
+		return candidate_ref < incumbent_ref;
+	if (candidate_size != incumbent_size)
+		return candidate_size < incumbent_size;
+	return incumbent_ref <= 2;
+}
+
+static void crystal_sddc_index_insert(struct crystal_sddc *sddc,
+		struct crystal_sddc_bucket *index, u32 hash, u32 slot_index)
 {
 	struct crystal_sddc_bucket *bucket;
-	struct crystal_sddc_candidate *candidate;
+	u32 replacement = U32_MAX;
+	u32 replacement_ref = 0;
+	u32 replacement_size = 0;
+	u32 slot;
+	unsigned int i;
 
 	bucket = &index[hash & (CRYSTAL_SDDC_HASH_BUCKETS - 1)];
-	candidate = &bucket->cells[bucket->next];
-	candidate->index = slot_index;
-	candidate->mutation_seq = mutation_seq;
-	candidate->sample_kind = sample_kind;
+	slot = crystal_sddc_index_cell(slot_index);
+	for (i = 0; i < CRYSTAL_SDDC_BUCKET_WAYS; i++) {
+		u32 ref_count;
+		u32 size;
+
+		if (bucket->cells[i] == slot)
+			return;
+		if (!bucket->cells[i]) {
+			replacement = i;
+			replacement_ref = 0;
+			replacement_size = 0;
+			break;
+		}
+		crystal_sddc_index_quality(sddc, bucket->cells[i], &ref_count,
+				&size);
+		if (replacement == U32_MAX ||
+			crystal_sddc_index_candidate_worse(replacement_ref,
+				replacement_size, ref_count, size)) {
+			replacement = i;
+			replacement_ref = ref_count;
+			replacement_size = size;
+		}
+	}
+	/* A busy or otherwise unresolvable cell is protected.  If every way is
+	 * protected, defer this insertion rather than evicting one blindly. */
+	if (replacement == U32_MAX || replacement_ref == U32_MAX)
+		return;
+	bucket->cells[replacement] = slot;
 	bucket->next = (bucket->next + 1) % CRYSTAL_SDDC_BUCKET_WAYS;
 }
 
@@ -722,26 +849,164 @@ static unsigned int crystal_sddc_index_candidates(
 
 	bucket = &index[hash & (CRYSTAL_SDDC_HASH_BUCKETS - 1)];
 	for (i = 0; i < CRYSTAL_SDDC_BUCKET_WAYS && count < max; i++) {
-		struct crystal_sddc_candidate *candidate = &bucket->cells[i];
+		u32 cell = bucket->cells[i];
 		bool duplicate = false;
 
-		if (!candidate->mutation_seq ||
-		    candidate->sample_kind != sample_kind)
+		if (!cell)
 			continue;
 		for (j = 0; j < count; j++) {
-			if (candidates[j].index == candidate->index) {
-				if (candidate->mutation_seq >
-				    candidates[j].mutation_seq)
-					candidates[j] = *candidate;
+			if (candidates[j].index == crystal_sddc_index_decode(cell)) {
+				candidates[j].sample_kind |= sample_kind;
 				duplicate = true;
 				break;
 			}
 		}
-		if (!duplicate)
-			candidates[count++] = *candidate;
+		if (!duplicate) {
+			candidates[count].index = crystal_sddc_index_decode(cell);
+			candidates[count].sample_kind = sample_kind;
+			count++;
+		}
 	}
 
 	return count;
+}
+
+static bool crystal_sddc_source_snapshot(struct crystal_sddc *sddc,
+		const struct crystal_sddc_candidate *candidate,
+		const struct crystal_sddc_job_key *target, void *payload,
+		struct crystal_sddc_source *source);
+
+static u32 crystal_sddc_head_match_bytes(const u8 *target, u32 target_size,
+		const u8 *source, u32 source_size)
+{
+	u32 common;
+	u32 score = CRYSTAL_SDDC_SAMPLE_SIZE;
+	u32 offset;
+
+	if (memcmp(target, source, CRYSTAL_SDDC_SAMPLE_SIZE))
+		return 0;
+	common = min(target_size, source_size);
+	for (offset = CRYSTAL_SDDC_SAMPLE_SIZE;
+	     offset + sizeof(u64) <= common; offset += sizeof(u64)) {
+		if (!memcmp(target + offset, source + offset, sizeof(u64)))
+			score += sizeof(u64);
+	}
+	return score;
+}
+
+static u32 crystal_sddc_tail_match_bytes(const u8 *target, u32 target_size,
+		const u8 *source, u32 source_size)
+{
+	u32 target_offset = target_size - CRYSTAL_SDDC_SAMPLE_SIZE;
+	u32 source_offset = source_size - CRYSTAL_SDDC_SAMPLE_SIZE;
+	u32 score = CRYSTAL_SDDC_SAMPLE_SIZE;
+
+	if (memcmp(target + target_offset, source + source_offset,
+		   CRYSTAL_SDDC_SAMPLE_SIZE))
+		return 0;
+	while (target_offset >= sizeof(u64) && source_offset >= sizeof(u64)) {
+		target_offset -= sizeof(u64);
+		source_offset -= sizeof(u64);
+		if (!memcmp(target + target_offset, source + source_offset,
+			    sizeof(u64)))
+			score += sizeof(u64);
+	}
+	return score;
+}
+
+static u32 crystal_sddc_match_bytes(const void *target, u32 target_size,
+		const void *source, u32 source_size, u8 sample_kind)
+{
+	u32 score = 0;
+
+	if (target_size < CRYSTAL_SDDC_SAMPLE_SIZE ||
+	    source_size < CRYSTAL_SDDC_SAMPLE_SIZE)
+		return 0;
+	if (sample_kind & CRYSTAL_SDDC_SAMPLE_HEAD)
+		score = crystal_sddc_head_match_bytes(target, target_size, source,
+				source_size);
+	if (sample_kind & CRYSTAL_SDDC_SAMPLE_TAIL)
+		score = max(score, crystal_sddc_tail_match_bytes(target,
+				target_size, source, source_size));
+	return score;
+}
+
+static bool crystal_sddc_sample_eligible(u32 size)
+{
+	return size > CRYSTAL_SDDC_INDEX_MIN_SIZE && size <= PAGE_SIZE;
+}
+
+static bool crystal_sddc_rank_candidate(struct crystal_sddc *sddc,
+		const struct crystal_sddc_job_key *target, const void *target_data,
+		const struct crystal_sddc_candidate *candidate,
+		struct crystal_sddc_workspace *workspace,
+		struct crystal_sddc_ranked_candidate *ranked)
+{
+	struct crystal_sddc_source source;
+	u32 match_bytes = 0;
+
+	if (!crystal_sddc_source_snapshot(sddc, candidate, target,
+			workspace->ref_data, &source))
+		return false;
+
+	if ((candidate->sample_kind & CRYSTAL_SDDC_SAMPLE_HEAD) &&
+	    source.key.size == target->size &&
+	    !memcmp(workspace->ref_data, target_data, target->size))
+		match_bytes = target->size;
+	else if ((source.key.size == PAGE_SIZE) ==
+			(target->size == PAGE_SIZE))
+		match_bytes = crystal_sddc_match_bytes(target_data, target->size,
+				workspace->ref_data, source.key.size,
+				candidate->sample_kind);
+
+	ranked->candidate = *candidate;
+	ranked->match_bytes = match_bytes;
+	ranked->ref_count = source.ref ?
+		crystal_sddc_ref_count_without_pin(source.ref) : 0;
+	ranked->source_size = source.key.size;
+	crystal_sddc_ref_put(source.ref);
+	return true;
+}
+
+static int crystal_sddc_ranked_candidate_cmp(const void *left,
+		const void *right)
+{
+	const struct crystal_sddc_ranked_candidate *a = left;
+	const struct crystal_sddc_ranked_candidate *b = right;
+
+	if (a->match_bytes != b->match_bytes)
+		return a->match_bytes < b->match_bytes ? 1 : -1;
+	if (a->ref_count != b->ref_count)
+		return a->ref_count < b->ref_count ? 1 : -1;
+	if (a->source_size != b->source_size)
+		return a->source_size < b->source_size ? 1 : -1;
+	return 0;
+}
+
+static unsigned int crystal_sddc_rank_candidates(struct crystal_sddc *sddc,
+		const struct crystal_sddc_job_key *target, const void *target_data,
+		struct crystal_sddc_candidate *candidates, unsigned int count,
+		struct crystal_sddc_workspace *workspace,
+		struct crystal_sddc_ranked_candidate *ranked)
+{
+	unsigned int i;
+	unsigned int ranked_count = 0;
+
+	for (i = 0; i < count; i++) {
+		if (crystal_sddc_rank_candidate(sddc, target, target_data,
+				&candidates[i], workspace, &ranked[ranked_count]))
+			ranked_count++;
+	}
+	sort(ranked, ranked_count, sizeof(*ranked),
+		crystal_sddc_ranked_candidate_cmp, NULL);
+	return ranked_count;
+}
+
+static bool crystal_sddc_delta_target_eligible(u32 size)
+{
+	return size > CRYSTAL_SDDC_DELTA_MIN_SIZE &&
+		size > sizeof(struct crystal_sddc_delta_header) +
+		CRYSTAL_SDDC_DELTA_GAIN_MIN;
 }
 
 static bool crystal_sddc_source_snapshot(struct crystal_sddc *sddc,
@@ -764,15 +1029,13 @@ static bool crystal_sddc_source_snapshot(struct crystal_sddc *sddc,
 	if (state_entry == XA_ZERO_ENTRY || xa_is_err(state_entry))
 		goto unlock;
 	state = state_entry;
-	if (sddc->mutation_seq[candidate->index] !=
-			candidate->mutation_seq ||
-	    crystal_sddc_test_flag(zram, candidate->index, ZRAM_SAME) ||
+	if (crystal_sddc_test_flag(zram, candidate->index, ZRAM_SAME) ||
 	    crystal_sddc_test_flag(zram, candidate->index, ZRAM_WB) ||
 	    crystal_sddc_test_flag(zram, candidate->index, ZRAM_UNDER_WB))
 		goto unlock;
 
 	source->key.index = candidate->index;
-	source->key.mutation_seq = candidate->mutation_seq;
+	source->key.mutation_seq = sddc->mutation_seq[candidate->index];
 	if (state && state->kind == CRYSTAL_SDDC_REF) {
 		source->cookie = state->ref;
 		source->ref = crystal_sddc_ref_pin(sddc, &state->ref);
@@ -1022,10 +1285,15 @@ static bool crystal_sddc_try_delta(struct crystal_sddc *sddc,
 	bool committed = false;
 	int ret;
 
-	if (target->size <= sizeof(header) + CRYSTAL_SDDC_DELTA_GAIN_MIN ||
-	    !crystal_sddc_source_snapshot(sddc, candidate, target,
-			workspace->ref_data,
-			&source))
+	/* Keep the async delta path aligned with Huawei's high-yield admission
+	 * heuristic.  Smaller objects may still use the exact-alias path, but the
+	 * 24-byte delta header and codec work are not worthwhile below this floor. */
+	if (!crystal_sddc_delta_target_eligible(target->size)) {
+		atomic64_inc(&sddc->stats.delta_small_rejects);
+		return false;
+	}
+	if (!crystal_sddc_source_snapshot(sddc, candidate, target,
+			workspace->ref_data, &source))
 		return false;
 	if ((source.key.size == PAGE_SIZE) != (target->size == PAGE_SIZE))
 		goto out;
@@ -1054,15 +1322,16 @@ static bool crystal_sddc_try_delta(struct crystal_sddc *sddc,
 		delta = NULL;
 	zcomp_stream_put(sddc->zram->comps[target->prio]);
 	if (!delta) {
-		if (!ret && delta_len && delta_len <= out_limit)
-			atomic64_inc(&sddc->stats.conversion_failures);
+		atomic64_inc(&sddc->stats.delta_no_gain);
 		goto out;
 	}
 
 	wire_size = sizeof(header) + delta_len;
 	if (zs_lookup_class_index(sddc->zram->mem_pool, wire_size) >=
-	    zs_lookup_class_index(sddc->zram->mem_pool, target->size))
+	    zs_lookup_class_index(sddc->zram->mem_pool, target->size)) {
+		atomic64_inc(&sddc->stats.delta_no_gain);
 		goto out;
+	}
 	handle = zs_malloc(sddc->zram->mem_pool, wire_size,
 			GFP_NOIO | __GFP_HIGHMEM | __GFP_MOVABLE | __GFP_CMA);
 	if (IS_ERR_VALUE(handle)) {
@@ -1128,6 +1397,7 @@ static bool crystal_sddc_try_convert(struct crystal_sddc *sddc,
 		struct crystal_sddc_workspace *workspace)
 {
 	struct crystal_sddc_candidate candidates[CRYSTAL_SDDC_BUCKET_WAYS * 2];
+	struct crystal_sddc_ranked_candidate ranked[ARRAY_SIZE(candidates)];
 	unsigned int count = 0;
 	unsigned int i;
 	bool converted = false;
@@ -1135,16 +1405,22 @@ static bool crystal_sddc_try_convert(struct crystal_sddc *sddc,
 	spin_lock(&sddc->index_lock);
 	count = crystal_sddc_index_candidates(sddc->exact_index, exact_hash,
 			CRYSTAL_SDDC_SAMPLE_HEAD, candidates, count,
-			ARRAY_SIZE(candidates));
+				ARRAY_SIZE(candidates));
 	spin_unlock(&sddc->index_lock);
+	count = crystal_sddc_rank_candidates(sddc, target, target_data,
+			candidates, count, workspace, ranked);
 	for (i = 0; i < count; i++) {
 		atomic64_inc(&sddc->stats.alias_attempts);
 		if (crystal_sddc_try_alias(sddc, target, target_data,
-				&candidates[i], workspace->ref_data)) {
+				&ranked[i].candidate, workspace->ref_data)) {
 			atomic64_inc(&sddc->stats.alias_hits);
 			converted = true;
 			goto out;
 		}
+	}
+	if (!crystal_sddc_delta_target_eligible(target->size)) {
+		atomic64_inc(&sddc->stats.delta_small_rejects);
+		goto out;
 	}
 
 	count = 0;
@@ -1153,13 +1429,20 @@ static bool crystal_sddc_try_convert(struct crystal_sddc *sddc,
 			CRYSTAL_SDDC_SAMPLE_HEAD, candidates, count,
 			ARRAY_SIZE(candidates));
 	count = crystal_sddc_index_candidates(sddc->sample_index, tail_hash,
-			CRYSTAL_SDDC_SAMPLE_TAIL, candidates, count,
-			ARRAY_SIZE(candidates));
+				CRYSTAL_SDDC_SAMPLE_TAIL, candidates, count,
+				ARRAY_SIZE(candidates));
 	spin_unlock(&sddc->index_lock);
+	count = crystal_sddc_rank_candidates(sddc, target, target_data,
+			candidates, count, workspace, ranked);
 	for (i = 0; i < count; i++) {
+		if (ranked[i].match_bytes < CRYSTAL_SDDC_SIMILARITY_MIN)
+			break;
+		atomic64_inc(&sddc->stats.delta_matches);
+		crystal_sddc_atomic64_update_max(&sddc->stats.delta_match_bytes_max,
+				ranked[i].match_bytes);
 		atomic64_inc(&sddc->stats.delta_attempts);
 		if (crystal_sddc_try_delta(sddc, target, target_data,
-				&candidates[i], workspace)) {
+				&ranked[i].candidate, workspace)) {
 			atomic64_inc(&sddc->stats.delta_hits);
 			converted = true;
 			goto out;
@@ -1272,10 +1555,10 @@ static void crystal_sddc_observe_index(struct crystal_sddc *sddc,
 			head_hash, tail_hash, workspace);
 
 	if (!converted) {
-		/* A conversion can race a rewrite after the initial snapshot.  Do
-		 * not publish an index cell for an identity that is no longer live.
-		 * Keep the slot lock through publication so validation and the index
-		 * cell describe one immutable target identity. */
+		/* A conversion can race a rewrite after the initial snapshot.  Do not
+		 * publish an empty or managed slot.  Index cells intentionally carry
+		 * only a slot number; later source validation resolves the latest
+		 * representation and makes stale cells harmless. */
 		crystal_sddc_slot_lock(zram, index);
 		still_matches = crystal_sddc_job_matches_locked(sddc, &key, false);
 		if (!still_matches) {
@@ -1284,18 +1567,18 @@ static void crystal_sddc_observe_index(struct crystal_sddc *sddc,
 			goto observed;
 		}
 		spin_lock(&sddc->index_lock);
-		crystal_sddc_index_insert(sddc->exact_index, exact_hash,
-				key.index, key.mutation_seq,
-				CRYSTAL_SDDC_SAMPLE_HEAD);
-		if (key.size > CRYSTAL_SDDC_INDEX_MIN_SIZE) {
-			crystal_sddc_index_insert(sddc->sample_index, head_hash,
-					key.index, key.mutation_seq,
-					CRYSTAL_SDDC_SAMPLE_HEAD);
-			crystal_sddc_index_insert(sddc->sample_index, tail_hash,
-					key.index, key.mutation_seq,
-					CRYSTAL_SDDC_SAMPLE_TAIL);
+		crystal_sddc_index_insert(sddc, sddc->exact_index, exact_hash,
+				key.index);
+		if (crystal_sddc_sample_eligible(key.size)) {
+			crystal_sddc_index_insert(sddc, sddc->sample_index, head_hash,
+					key.index);
+			crystal_sddc_index_insert(sddc, sddc->sample_index, tail_hash,
+					key.index);
 		}
 		spin_unlock(&sddc->index_lock);
+		/* Keep validation and publication in one slot critical section.  A
+		 * rewrite cannot invalidate the identity between the final check and
+		 * insertion of its candidate cell. */
 		crystal_sddc_slot_unlock(zram, index);
 		atomic64_inc(&sddc->stats.indexed);
 	}
@@ -1502,8 +1785,12 @@ int crystal_sddc_create(struct zram *zram, unsigned long nr_pages)
 	if (!sddc->workspace_pool)
 		goto fail;
 
+	/* Huawei runs SDDC recompression from a reclaim-capable worker.  Keep the
+	 * ordered/budgeted hand-off, but do not let freezer state postpone the
+	 * index while memory pressure is actively building.  reset still closes
+	 * admission and flushes this queue before taking init_lock for write. */
 	sddc->workqueue = alloc_ordered_workqueue("%s-sddc",
-				WQ_MEM_RECLAIM | WQ_FREEZABLE, zram->disk->disk_name);
+				WQ_MEM_RECLAIM | WQ_HIGHPRI, zram->disk->disk_name);
 	if (!sddc->workqueue)
 		goto fail;
 	sddc->free_workqueue = alloc_workqueue("%s-sddc-free",
@@ -1715,7 +2002,10 @@ void crystal_sddc_job_key_locked(struct zram *zram, u32 index,
 	handle = zram->table[index].handle;
 	size = crystal_sddc_obj_size(zram, index);
 	prio = crystal_sddc_priority(zram, index);
-	if (!handle || size < CRYSTAL_SDDC_SAMPLE_SIZE || size > PAGE_SIZE ||
+	/* Small streams do not enter the asynchronous SDDC index.  This keeps
+	 * index pressure and observation CPU focused on objects with useful
+	 * sharing/delta potential, matching the original admission heuristic. */
+	if (!handle || size <= CRYSTAL_SDDC_INDEX_MIN_SIZE || size > PAGE_SIZE ||
 	    prio != ZRAM_PRIMARY_COMP || !zram->comps[prio] ||
 	    !zcomp_supports_delta(zram->comps[prio]))
 		return;
@@ -2079,6 +2369,12 @@ void crystal_sddc_get_stats(struct zram *zram,
 	stats->alias_hits = atomic64_read(&sddc->stats.alias_hits);
 	stats->delta_attempts = atomic64_read(&sddc->stats.delta_attempts);
 	stats->delta_hits = atomic64_read(&sddc->stats.delta_hits);
+	stats->delta_matches = atomic64_read(&sddc->stats.delta_matches);
+	stats->delta_small_rejects =
+		atomic64_read(&sddc->stats.delta_small_rejects);
+	stats->delta_no_gain = atomic64_read(&sddc->stats.delta_no_gain);
+	stats->delta_match_bytes_max =
+		atomic64_read(&sddc->stats.delta_match_bytes_max);
 	stats->saved_bytes = atomic64_read(&sddc->stats.saved_bytes);
 	stats->saved_bytes_total =
 		atomic64_read(&sddc->stats.saved_bytes_total);
@@ -2353,6 +2649,84 @@ static void crystal_sddc_observe_discard_test(struct kunit *test)
 		bitmap_empty(ctx->sddc.observe_pending, CRYSTAL_SDDC_TEST_SLOTS));
 	KUNIT_EXPECT_EQ(test,
 		atomic64_read(&ctx->sddc.stats.shutdown_discarded), (s64)2);
+}
+
+static void crystal_sddc_index_quality_test(struct kunit *test)
+{
+	struct crystal_sddc_ref ref = { };
+
+	refcount_set(&ref.refs, 3);
+	KUNIT_EXPECT_EQ(test, crystal_sddc_ref_count_without_pin(&ref), 2U);
+	refcount_set(&ref.refs, 1);
+	KUNIT_EXPECT_EQ(test, crystal_sddc_ref_count_without_pin(&ref), 0U);
+
+	/* Lower reference count and smaller payloads are the first eviction
+	 * candidates; a highly shared reference survives an exact tie. */
+	KUNIT_EXPECT_TRUE(test,
+		crystal_sddc_index_candidate_worse(4, 512, 3, 1024));
+	KUNIT_EXPECT_FALSE(test,
+		crystal_sddc_index_candidate_worse(3, 512, 4, 256));
+	KUNIT_EXPECT_TRUE(test,
+		crystal_sddc_index_candidate_worse(3, 512, 3, 256));
+	KUNIT_EXPECT_FALSE(test,
+		crystal_sddc_index_candidate_worse(3, 512, 3, 1024));
+	KUNIT_EXPECT_FALSE(test,
+		crystal_sddc_index_candidate_worse(3, 512, 3, 512));
+	KUNIT_EXPECT_TRUE(test,
+		crystal_sddc_index_candidate_worse(2, 512, 2, 512));
+}
+
+static void crystal_sddc_similarity_test(struct kunit *test)
+{
+	u8 target[64];
+	u8 shifted[72];
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(target); i++)
+		target[i] = i;
+	memset(shifted, 0xa5, sizeof(shifted));
+	memcpy(shifted + 8, target, sizeof(target));
+
+	KUNIT_EXPECT_EQ(test,
+		crystal_sddc_match_bytes(target, sizeof(target), target,
+			sizeof(target), CRYSTAL_SDDC_SAMPLE_HEAD),
+		(u32)sizeof(target));
+	KUNIT_EXPECT_EQ(test,
+		crystal_sddc_match_bytes(target, sizeof(target), target,
+			sizeof(target), CRYSTAL_SDDC_SAMPLE_TAIL),
+		(u32)sizeof(target));
+	KUNIT_EXPECT_EQ(test,
+		crystal_sddc_match_bytes(target, sizeof(target), shifted,
+			sizeof(shifted), CRYSTAL_SDDC_SAMPLE_TAIL),
+		(u32)sizeof(target));
+	KUNIT_EXPECT_EQ(test,
+		crystal_sddc_match_bytes(target, sizeof(target), shifted,
+			sizeof(shifted), CRYSTAL_SDDC_SAMPLE_HEAD |
+			CRYSTAL_SDDC_SAMPLE_TAIL),
+		(u32)sizeof(target));
+	KUNIT_EXPECT_EQ(test,
+		crystal_sddc_match_bytes(target, sizeof(target), shifted,
+			sizeof(shifted), CRYSTAL_SDDC_SAMPLE_HEAD), 0U);
+}
+
+static void crystal_sddc_sample_eligibility_test(struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE(test,
+		crystal_sddc_sample_eligible(CRYSTAL_SDDC_INDEX_MIN_SIZE));
+	KUNIT_EXPECT_TRUE(test,
+		crystal_sddc_sample_eligible(CRYSTAL_SDDC_INDEX_MIN_SIZE + 1));
+	KUNIT_EXPECT_TRUE(test, crystal_sddc_sample_eligible(PAGE_SIZE));
+	KUNIT_EXPECT_FALSE(test, crystal_sddc_sample_eligible(PAGE_SIZE + 1));
+}
+
+static void crystal_sddc_delta_admission_test(struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE(test,
+		crystal_sddc_delta_target_eligible(CRYSTAL_SDDC_INDEX_MIN_SIZE + 1));
+	KUNIT_EXPECT_FALSE(test,
+		crystal_sddc_delta_target_eligible(CRYSTAL_SDDC_DELTA_MIN_SIZE));
+	KUNIT_EXPECT_TRUE(test,
+		crystal_sddc_delta_target_eligible(CRYSTAL_SDDC_DELTA_MIN_SIZE + 1));
 }
 
 static bool crystal_sddc_test_job_matches(struct crystal_sddc_test_ctx *ctx,
@@ -2759,6 +3133,10 @@ static struct kunit_case crystal_sddc_state_test_cases[] = {
 	KUNIT_CASE(crystal_sddc_manager_admission_test),
 	KUNIT_CASE(crystal_sddc_observe_bitmap_test),
 	KUNIT_CASE(crystal_sddc_observe_discard_test),
+	KUNIT_CASE(crystal_sddc_index_quality_test),
+	KUNIT_CASE(crystal_sddc_similarity_test),
+	KUNIT_CASE(crystal_sddc_sample_eligibility_test),
+	KUNIT_CASE(crystal_sddc_delta_admission_test),
 	{}
 };
 

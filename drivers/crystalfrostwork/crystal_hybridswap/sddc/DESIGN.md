@@ -123,7 +123,7 @@ An ordinary store captures a job key under the slot lock. A valid key contains
 the slot index, mutation sequence, zsmalloc handle, exact object size, and
 compressor priority. The object must:
 
-- be between 16 bytes and `PAGE_SIZE`;
+- be larger than 256 bytes and no larger than `PAGE_SIZE`;
 - use the primary compressor;
 - use a compressor with delta support; and
 - not be `SAME`, `WB`, `UNDER_WB`, or already SDDC-managed.
@@ -168,20 +168,29 @@ or free that raced with hashing therefore cannot leave a candidate cell for a
 different object. The mutation sequence and complete identity remain the
 authoritative check at every later candidate lookup.
 
-There are 4096 exact buckets and 4096 sample buckets, each with four
-round-robin ways. Streams larger than 256 bytes enter both head and tail
-sample buckets; shorter streams enter only the exact index. An index cell
-stores an index and mutation sequence rather than owning the slot. Cells are
+There are 65536 exact buckets and 65536 sample buckets, each with eight
+ways. Observation admission starts above 256 bytes. Such streams, including
+raw `PAGE_SIZE` streams, enter both the exact index and the head/tail sample
+buckets; shorter streams are kept out of the asynchronous index path.
+An index cell stores a slot index only; the dense per-slot mutation sequence is
+checked separately and the cell does not own the slot. Cells are
 not synchronously removed when a slot changes. Every later use revalidates the
 mutation sequence and complete slot identity, making stale cells harmless.
-Source promotion intentionally retains its mutation sequence so an existing
-candidate cell can resolve the new `REF`; the kind and cookie then identify
-that in-place representation transition.
+The replacement score follows Huawei's high-yield heuristic: lower-reference
+and smaller objects are evicted first, while a highly shared reference survives
+an equal-size tie. Replacement scoring only tries a candidate slot lock while
+holding the index lock; a busy cell is protected for that insertion instead of
+reversing the publication lock order. Source promotion intentionally retains
+its mutation sequence so an existing candidate cell can resolve the new `REF`;
+the kind and cookie then identify that in-place representation transition.
 
-Candidate lookup first returns up to four exact candidates. If none commits,
-it combines and de-duplicates up to eight head/tail sample candidates. The
-candidate arrays are bounded stack storage, so duplicate head/tail index cells
-cannot multiply codec work for one target.
+Candidate lookup first returns up to eight exact candidates. If none commits,
+it combines and de-duplicates up to sixteen head/tail sample candidates. A slot
+present in both buckets retains both sample bits and is ranked by its better
+head/tail score. Tail scoring anchors before the terminal 16-byte sample, so a
+score never exceeds the shorter input. The candidate arrays are bounded stack
+storage, so duplicate head/tail index cells cannot multiply codec work for one
+target.
 
 ## 5. Conversion Transaction
 
@@ -203,8 +212,8 @@ reference and the target ordinary stream as its current data.
 
 A delta is eligible only when all of these checks pass:
 
-- the target can accommodate the 24-byte header plus at least an 8-byte
-  logical gain;
+- the target is larger than `PAGE_SIZE / 8` and can accommodate the 24-byte
+  header plus at least an 8-byte logical gain;
 - the codec output fits the resulting limit;
 - the complete wire object maps to a strictly smaller zsmalloc size class
   than the old target object;
@@ -320,7 +329,7 @@ The individual locks have narrow ownership:
 | slot-state XArray lock | Sparse managed-state publication and removal | Taken briefly below the matching slot lock; never used to acquire a slot lock. |
 | reference XArray lock | Cookie lookup, publication, pin, erase, and refcount-to-zero | May be taken below a slot lock; no path takes a slot lock while holding it. |
 | `memcg_stats_lock` | Per-memcg cached accounting | May be taken below a slot lock during representation accounting. |
-| `index_lock` | Exact/sample bucket cells | Candidate lookup releases it before locking a slot; final index publication may take it below the validated target slot lock. |
+| `index_lock` | Exact/sample bucket cells | Candidate lookup releases it before blocking on a slot; final index publication may take it below the validated target slot lock. Replacement scoring uses only a non-blocking slot trylock. |
 | `state_lock` | Pending bitmap, round-robin cursor, worker admission, and queue counters | Never held across slot or index processing. |
 | `active_lock` | `active_ops` decrement/wakeup and teardown idle confirmation | The final put and the idle check are serialized so teardown cannot free the manager while a put is still waking its waitqueue. |
 
@@ -439,6 +448,10 @@ performed inside a slot lock.
 | `alias_hits` | count | Exact candidates successfully committed as aliases. |
 | `delta_attempts` | count | Head/tail sample candidates examined for delta conversion. |
 | `delta_hits` | count | Delta candidates successfully committed. |
+| `delta_matches` | count | Ranked candidates that passed the 16-byte similarity floor. |
+| `delta_small_rejects` | count | Targets rejected from sample/delta processing because they were at or below the `PAGE_SIZE / 8` delta admission floor. |
+| `delta_no_gain` | count | Candidates whose codec output or zsmalloc size class did not produce a physical gain. |
+| `delta_match_bytes_max` | bytes | Largest byte-match score seen by delta candidate ranking, bounded by the shorter ordinary stream. |
 | `saved_bytes` | bytes | Current logical resident payload bytes avoided by live targets. |
 | `saved_bytes_total` | bytes | Cumulative bytes avoided at successful target commits. |
 | `conversion_failures` | count | Resource, promotion, allocation, limit, or stale-commit failures after a conversion path had actionable output. |

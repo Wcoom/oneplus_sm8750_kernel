@@ -56,6 +56,10 @@ struct crystal_sddc_stats_snapshot {
 	u64 alias_hits;
 	u64 delta_attempts;
 	u64 delta_hits;
+	u64 delta_matches;
+	u64 delta_small_rejects;
+	u64 delta_no_gain;
+	u64 delta_match_bytes_max;
 	u64 saved_bytes;
 	u64 saved_bytes_total;
 	u64 conversion_failures;

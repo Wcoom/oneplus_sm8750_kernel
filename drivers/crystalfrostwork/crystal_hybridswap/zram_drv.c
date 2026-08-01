@@ -3150,6 +3150,10 @@ static ssize_t sddc_stat_show(struct device *dev,
 		"alias_hits: %llu\n"
 		"delta_attempts: %llu\n"
 		"delta_hits: %llu\n"
+		"delta_matches: %llu\n"
+		"delta_small_rejects: %llu\n"
+		"delta_no_gain: %llu\n"
+		"delta_match_bytes_max: %llu\n"
 		"saved_bytes: %llu\n"
 		"saved_bytes_total: %llu\n"
 		"conversion_failures: %llu\n"
@@ -3162,7 +3166,9 @@ static ssize_t sddc_stat_show(struct device *dev,
 		stats.indexed,
 		stats.refs, stats.ref_bytes, stats.aliases, stats.deltas,
 		stats.delta_bytes, stats.alias_attempts, stats.alias_hits,
-		stats.delta_attempts, stats.delta_hits, stats.saved_bytes,
+		stats.delta_attempts, stats.delta_hits, stats.delta_matches,
+		stats.delta_small_rejects, stats.delta_no_gain,
+		stats.delta_match_bytes_max, stats.saved_bytes,
 		stats.saved_bytes_total, stats.conversion_failures,
 		stats.decode_failures, stats.flatten_failures,
 		stats.limit_rejects);

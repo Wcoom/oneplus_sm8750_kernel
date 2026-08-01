@@ -20,6 +20,10 @@ enum {
 	NR_COPY_MIN = 1 << NR_COPY_LOG2
 };
 
+struct crystal_lz4kd_simd {
+	bool active;
+};
+
 inline static uint32_t u_32(int64_t i)
 {
 	return (uint32_t)i;
@@ -119,7 +123,10 @@ const uint8_t *crystal_lz4kd_repeat_end(
 	const uint8_t *q,
 	const uint8_t *r,
 	const uint8_t *const in_end_safe,
-	const uint8_t *const in_end);
+	const uint8_t *const in_end,
+	struct crystal_lz4kd_simd *simd);
+
+void crystal_lz4kd_simd_finish(struct crystal_lz4kd_simd *simd);
 
 int crystal_lz4kd_encode_fast(
 	void *const state,

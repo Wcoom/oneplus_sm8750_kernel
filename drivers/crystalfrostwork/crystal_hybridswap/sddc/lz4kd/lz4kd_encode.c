@@ -9,6 +9,12 @@
 #include "lz4kd_private.h"
 #include "lz4kd_encode_private.h"
 
+#if defined(CONFIG_ARM64) && defined(CONFIG_KERNEL_MODE_NEON)
+#include <asm/neon.h>
+#include <asm/simd.h>
+#include "lz4kd_neon.h"
+#endif
+
 enum {
 	HT_LOG2 = 12, /* ==11 #3 max drop in CR */
 	STEP_LOG2 = 5 /* ==3 #2 avg drop in CR */
@@ -221,12 +227,41 @@ uint8_t *crystal_lz4kd_out_tuple(
 				nr_log2, off_log2);
 }
 
+#if defined(CONFIG_ARM64) && defined(CONFIG_KERNEL_MODE_NEON)
+static bool crystal_lz4kd_simd_begin(struct crystal_lz4kd_simd *simd)
+{
+	if (!simd->active) {
+		if (!may_use_simd())
+			return false;
+		kernel_neon_begin();
+		simd->active = true;
+	}
+	return true;
+}
+#endif
+
+void crystal_lz4kd_simd_finish(struct crystal_lz4kd_simd *simd)
+{
+#if defined(CONFIG_ARM64) && defined(CONFIG_KERNEL_MODE_NEON)
+	if (simd->active) {
+		kernel_neon_end();
+		simd->active = false;
+	}
+#else
+	(void)simd;
+#endif
+}
+
 static const uint8_t *repeat_end(
 	const uint8_t *q,
 	const uint8_t *r,
 	const uint8_t *const in_end_safe,
-	const uint8_t *const in_end)
+	const uint8_t *const in_end,
+	struct crystal_lz4kd_simd *simd)
 {
+	unsigned int warmup = 128 / sizeof(uint64_t);
+
+	(void)simd;
 	q += REPEAT_MIN;
 	r += REPEAT_MIN;
 	/* caller guarantees r+12<=in_end */
@@ -239,7 +274,22 @@ static const uint8_t *repeat_end(
 		/* some bytes differ: count of trailing 0-bits/bytes */
 		q += sizeof(uint64_t);
 		r += sizeof(uint64_t);
-	} while (likely(r <= in_end_safe)); /* once, at input block end */
+	} while (--warmup && likely(r <= in_end_safe));
+
+#if defined(CONFIG_ARM64) && defined(CONFIG_KERNEL_MODE_NEON)
+	if (!warmup && in_end - r >= 128 &&
+	    crystal_lz4kd_simd_begin(simd))
+		return crystal_lz4kd_repeat_end_neon(q, r, in_end);
+#endif
+
+	while (likely(r <= in_end_safe)) {
+		const u64 x = read8_at(q) ^ read8_at(r);
+
+		if (x)
+			return r + (__builtin_ctzl(x) >> BYTE_BITS_LOG2);
+		q += sizeof(uint64_t);
+		r += sizeof(uint64_t);
+	}
 	while (r < in_end) {
 		if (*q != *r) return r;
 		++q;
@@ -252,9 +302,10 @@ const uint8_t *crystal_lz4kd_repeat_end(
 	const uint8_t *q,
 	const uint8_t *r,
 	const uint8_t *const in_end_safe,
-	const uint8_t *const in_end)
+	const uint8_t *const in_end,
+	struct crystal_lz4kd_simd *simd)
 {
-	return repeat_end(q, r, in_end_safe, in_end);
+	return repeat_end(q, r, in_end_safe, in_end, simd);
 }
 
 /* CR increase order: +STEP, have OFFSETS, use _5b(most impact) */
@@ -287,7 +338,8 @@ static int encode_any(
 	const uint8_t *const in0,
 	const uint8_t *const in_end,
 	uint8_t *const out,
-	uint8_t *const out_end)
+	uint8_t *const out_end,
+	struct crystal_lz4kd_simd *simd)
 {
 	enum {
 		NR_LOG2 = NR_4KB_LOG2,
@@ -314,7 +366,7 @@ static int encode_any(
 						NR_LOG2, OFF_LOG2);
 		}
 		utag = u_32(r - q);
-		r_end = repeat_end(q, r, in_end_safe, in_end);
+		r_end = repeat_end(q, r, in_end_safe, in_end, simd);
 		r_bytes_max = u_32(r_end - r);
 		if (unlikely(nr0 == r))
 			out_at = out_repeat(out_at, utag, r_bytes_max,
@@ -337,7 +389,13 @@ int crystal_lz4kd_encode_fast(
 	const uint_fast32_t in_max,
 	const uint_fast32_t out_max)
 {
-	return encode_any((uint16_t*)state, in, in + in_max, out, out + out_max);
+	struct crystal_lz4kd_simd simd = { };
+	int ret;
+
+	ret = encode_any((uint16_t *)state, in, in + in_max, out,
+			 out + out_max, &simd);
+	crystal_lz4kd_simd_finish(&simd);
+	return ret;
 }
 
 int crystal_lz4kd_encode(

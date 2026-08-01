@@ -226,6 +226,14 @@ A delta is eligible only when all of these checks pass:
 The size-class check is important: a smaller byte count that occupies the same
 zsmalloc class is not a physical allocator improvement and is rejected.
 
+On ARM64, ordinary and delta LZ4KD encoding share a NEON long-match scanner.
+It is entered only after a 128-byte scalar prefix and with at least 128 bytes
+left;
+unsupported or unsuitable contexts retain the scalar scanner. The FPSIMD
+context is entered lazily and at most once per encode. A vector mismatch is
+resolved with the same 8-byte XOR and bit scan as the scalar path, preserving
+the encoded bytes and compression ratio.
+
 ### 5.3 Commit rules
 
 Reference allocation and delta encoding happen outside slot locks. Source

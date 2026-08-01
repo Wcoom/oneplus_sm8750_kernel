@@ -111,7 +111,8 @@ static int encode_any2(
 	uint8_t *const out,
 	uint8_t *const out_end, /* ==out_limit for !check_out */
 	const uint_fast32_t nr_log2,
-	const bool check_out)
+	const bool check_out,
+	struct crystal_lz4kd_simd *simd)
 {
 	uint8_t *out_at = out + 1; /* +1 for header */
 	const uint8_t *const in_end_safe = in_end - NR_COPY_MIN;
@@ -141,7 +142,7 @@ static int encode_any2(
 					 in_end, nr_log2, OFF_LOG2, check_out);
 		} /* for */
 		utag = (uint_fast32_t)(s - q);
-		r_end = crystal_lz4kd_repeat_end(q, s, in_end_safe, in_end);
+		r_end = crystal_lz4kd_repeat_end(q, s, in_end_safe, in_end, simd);
 		r_bytes_max = (uint_fast32_t)(r_end - (r = repeat_start(q, s, nr0, in1)));
 		if (s + r_bytes_max >= in_end) /* see the bottom of while() below */
 			goto REPEAT_DONE; /* match_max(q, s, r_bytes_max + 1) below */
@@ -152,7 +153,7 @@ static int encode_any2(
 			if (!match_max((q = in0 + off0), s, r_bytes_max + 1))
 				continue;
 			r_end = crystal_lz4kd_repeat_end(q, s, in_end_safe,
-						   in_end);
+						   in_end, simd);
 			r_start = repeat_start(q, s, nr0, in1);
 			if (r_bytes_max > (uint_fast32_t)(r_end - r_start))
 				continue;
@@ -185,10 +186,11 @@ static int encode_delta_fast(
 	uint8_t *const out,
 	const uint_fast32_t in_max,
 	const uint_fast32_t out_max,
-	const uint_fast32_t nr_log2)
+	const uint_fast32_t nr_log2,
+	struct crystal_lz4kd_simd *simd)
 {
 	return encode_any2(ht, in0, in, in + in_max, out, out + out_max,
-			 nr_log2, false); /* !check_out */
+			 nr_log2, false, simd); /* !check_out */
 }
 
 static int crystal_lz4kd_encode_delta_slow(
@@ -198,10 +200,11 @@ static int crystal_lz4kd_encode_delta_slow(
 	uint8_t *const out,
 	const uint_fast32_t in_max,
 	const uint_fast32_t out_max,
-	const uint_fast32_t nr_log2)
+	const uint_fast32_t nr_log2,
+	struct crystal_lz4kd_simd *simd)
 {
 	return encode_any2(ht, in0, in, in + in_max, out, out + out_max,
-			 nr_log2, true); /* check_out */
+			 nr_log2, true, simd); /* check_out */
 }
 
 inline static uint64_t u64_diff(const void *a, const void *b)
@@ -219,6 +222,9 @@ int crystal_lz4kd_encode_delta(
 	unsigned out_limit)
 {
 	const unsigned io_min = in_max < out_max ? in_max : out_max;
+	struct crystal_lz4kd_simd simd = { };
+	int ret;
+
 	if (unlikely(state == NULL))
 		return LZ4K_STATUS_FAILED;
 	if (unlikely(in0 == NULL || in == NULL || out == NULL))
@@ -230,10 +236,16 @@ int crystal_lz4kd_encode_delta(
 	if (!out_limit || out_limit > io_min)
 		out_limit = io_min;
 	*((uint8_t*)out) = 0; /* header */
-	return unlikely(nr_encoded_bytes_max(in_max, NR_8KB_LOG2) > out_max) ?
-		crystal_lz4kd_encode_delta_slow((uint16_t*)state,
-			(const uint8_t*)in0, (const uint8_t*)in,
-			(uint8_t*)out, in_max, out_max, NR_8KB_LOG2) :
-		encode_delta_fast((uint16_t*)state, (const uint8_t*)in0, (const uint8_t*)in,
-			(uint8_t*)out, in_max, out_limit, NR_8KB_LOG2);
+	if (unlikely(nr_encoded_bytes_max(in_max, NR_8KB_LOG2) > out_max))
+		ret = crystal_lz4kd_encode_delta_slow(
+			(uint16_t *)state, (const uint8_t *)in0,
+			(const uint8_t *)in, (uint8_t *)out, in_max, out_max,
+			NR_8KB_LOG2, &simd);
+	else
+		ret = encode_delta_fast(
+			(uint16_t *)state, (const uint8_t *)in0,
+			(const uint8_t *)in, (uint8_t *)out, in_max, out_limit,
+			NR_8KB_LOG2, &simd);
+	crystal_lz4kd_simd_finish(&simd);
+	return ret;
 }

@@ -12,6 +12,14 @@ zram-$(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD) += \
 	sddc/lz4kd/lz4kd_decode.o \
 	sddc/lz4kd/lz4kd_decode_delta.o
 
+ifeq ($(CONFIG_ARM64)$(CONFIG_KERNEL_MODE_NEON),yy)
+zram-$(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD) += \
+	sddc/lz4kd/lz4kd_neon.o
+CFLAGS_REMOVE_sddc/lz4kd/lz4kd_neon.o += -mgeneral-regs-only
+CFLAGS_sddc/lz4kd/lz4kd_neon.o += -ffreestanding \
+	-isystem $(shell $(CC) -print-file-name=include)
+endif
+
 zram-$(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC) += \
 	sddc/crystal_sddc.o
 

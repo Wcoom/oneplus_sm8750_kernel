@@ -138,16 +138,19 @@ clear. Repeated stores for the same slot therefore increment `coalesced`
 instead of allocating another work item; the queue has latest-state semantics,
 not a backlog of stale keys. `queued` counts these unique bit insertions.
 
-The producer that successfully queues a work item transfers one zram reference
-and one SDDC `active_ops` token to that callback. If both embedded items are
-already queued or running, the bit remains set and one of those callbacks owns
-the drain; a failed `queue_work()` attempt does not clear it. The worker drains
-bits in round-robin order, clears a bit and decrements `pending` under
-`state_lock`, then reacquires the slot lock to read the current handle, size,
-flags, and mutation sequence. A store that raced with enqueue is consequently
-observed using its newest representation. Each callback has a bounded slot
-budget and hands remaining bits to the alternate embedded work item, so a
-continuously rewritten device cannot keep freezer or reset waiting indefinitely.
+Only the producer that changes `observe_worker_active` from false to true queues
+a work item and transfers one zram reference and one SDDC `active_ops` token to
+the drain. Producers that find an active drain only set their previously clear
+bit and release their own references. The worker drains bits in round-robin
+order, clears a bit and decrements `pending` under `state_lock`, then reacquires
+the slot lock to read the current handle, size, flags, and mutation sequence. A
+store that raced with enqueue is consequently observed using its newest
+representation. An empty check changes the drain back to inactive under the
+same lock, so a later producer either joins the existing drain or queues exactly
+one successor. Each callback has a bounded slot budget and transfers the drain's
+lifetime references to the alternate embedded work item; if that handoff is
+already busy, the current callback continues draining. Thus a continuously
+rewritten device cannot keep freezer or reset waiting indefinitely.
 There is no fixed 1024-entry allocation; the observation buffers come from the
 single workspace allocated with the manager rather than from each store event.
 Both embedded items run on the same ordered workqueue, so they cannot use that

@@ -92,8 +92,9 @@ struct crystal_sddc_ranked_candidate {
 
 struct crystal_sddc;
 
-/* A second work item lets producers hand off a bit while the first callback
- * is still returning from the workqueue. */
+/* A second work item lets the drain continue while the first callback is
+ * still returning from the workqueue.
+ */
 struct crystal_sddc_observe_work {
 	struct work_struct work;
 	struct crystal_sddc *sddc;
@@ -1522,6 +1523,21 @@ static bool crystal_sddc_observe_mark_locked(struct crystal_sddc *sddc,
 	return true;
 }
 
+static bool crystal_sddc_observe_activate_locked(struct crystal_sddc *sddc)
+{
+	if (sddc->observe_worker_active)
+		return false;
+
+	sddc->observe_worker_active = true;
+	return true;
+}
+
+static void crystal_sddc_observe_deactivate_locked(struct crystal_sddc *sddc, unsigned int work_id)
+{
+	sddc->observe_work_cursor = work_id ^ 1;
+	sddc->observe_worker_active = false;
+}
+
 static unsigned int crystal_sddc_observe_discard_locked(
 		struct crystal_sddc *sddc)
 {
@@ -1539,10 +1555,8 @@ static bool crystal_sddc_observe_take_locked(struct crystal_sddc *sddc,
 {
 	unsigned long next;
 
-	if (!sddc->pending) {
-		sddc->observe_worker_active = false;
+	if (!sddc->pending)
 		return false;
-	}
 
 	next = find_next_bit(sddc->observe_pending, sddc->nr_slots,
 			sddc->observe_cursor);
@@ -1553,7 +1567,6 @@ static bool crystal_sddc_observe_take_locked(struct crystal_sddc *sddc,
 		 * an unexpected find-bit result leaves no consumable slot. */
 		bitmap_zero(sddc->observe_pending, (unsigned int)sddc->nr_slots);
 		sddc->pending = 0;
-		sddc->observe_worker_active = false;
 		return false;
 	}
 
@@ -1642,36 +1655,6 @@ out_unlock:
 	up_read(&zram->init_lock);
 }
 
-/* Close the small hand-off window between the last bitmap check and the
- * worker dropping its lifetime references.  A producer may set a bit while
- * this callback is returning; the second check makes that bit part of this
- * invocation instead of leaving it behind with no callback. */
-static bool crystal_sddc_observe_finish(struct crystal_sddc *sddc)
-{
-	bool done;
-
-	spin_lock(&sddc->state_lock);
-	done = !sddc->pending;
-	if (!done) {
-		sddc->observe_worker_active = true;
-	}
-	spin_unlock(&sddc->state_lock);
-	if (!done)
-		return false;
-
-	/* Recheck after the first empty observation while state_lock is released;
-	 * a producer may have set a new bit in that interval. */
-	spin_lock(&sddc->state_lock);
-	if (sddc->pending) {
-		sddc->observe_worker_active = true;
-		spin_unlock(&sddc->state_lock);
-		return false;
-	}
-	sddc->observe_worker_active = false;
-	spin_unlock(&sddc->state_lock);
-	return true;
-}
-
 static bool crystal_sddc_observe_handoff(
 		struct crystal_sddc_observe_work *observe)
 {
@@ -1684,7 +1667,6 @@ static bool crystal_sddc_observe_handoff(
 	if (!pending)
 		return false;
 
-	cond_resched();
 	/* Transfer this callback's lifetime token to the other embedded item;
 	 * the current callback remains running until its caller returns. */
 	return queue_work(sddc->workqueue,
@@ -1702,25 +1684,23 @@ static void crystal_sddc_observe_workfn(struct work_struct *work)
 	unsigned int budget = CRYSTAL_SDDC_OBSERVE_BUDGET;
 
 	atomic64_inc(&sddc->stats.worker_runs);
-	spin_lock(&sddc->state_lock);
-	sddc->observe_worker_active = true;
-	spin_unlock(&sddc->state_lock);
 	workspace = sddc->observe_workspace;
 	for (;;) {
 		spin_lock(&sddc->state_lock);
 		if (!crystal_sddc_observe_take_locked(sddc, &index)) {
-			sddc->observe_worker_active = false;
+			/* Commit to exiting while admission is serialized.  A later
+			 * producer will queue the alternate item instead of relying on
+			 * this callback while it is returning.
+			 */
+			crystal_sddc_observe_deactivate_locked(sddc, observe->id);
 			spin_unlock(&sddc->state_lock);
-			if (crystal_sddc_observe_finish(sddc))
-				break;
-			continue;
+			break;
 		}
 		spin_unlock(&sddc->state_lock);
 
 		crystal_sddc_observe_index(sddc, index, workspace);
 		cond_resched();
 		if (!--budget) {
-			bool pending;
 			bool stopping;
 
 			/* Bound each callback so a continuously rewritten device cannot
@@ -1730,17 +1710,17 @@ static void crystal_sddc_observe_workfn(struct work_struct *work)
 				return;
 			}
 			spin_lock(&sddc->state_lock);
-			pending = sddc->pending;
 			stopping = READ_ONCE(sddc->stopping);
-			spin_unlock(&sddc->state_lock);
 			if (stopping) {
-				spin_lock(&sddc->state_lock);
 				crystal_sddc_observe_discard_locked(sddc);
-				spin_unlock(&sddc->state_lock);
-				break;
+				crystal_sddc_observe_deactivate_locked(sddc, observe->id);
 			}
-			if (pending)
+			spin_unlock(&sddc->state_lock);
+			if (stopping)
 				break;
+			/* A failed handoff means the alternate item is already busy.
+			 * Retain this drain's lifetime ownership and continue.
+			 */
 			budget = CRYSTAL_SDDC_OBSERVE_BUDGET;
 		}
 	}
@@ -2430,10 +2410,13 @@ void crystal_sddc_queue_observation(struct zram *zram,
 		goto reject_locked;
 	if (!crystal_sddc_observe_mark_locked(sddc, index))
 		goto coalesced_locked;
+	atomic64_inc(&sddc->stats.queued);
+	if (!crystal_sddc_observe_activate_locked(sddc))
+		goto active_locked;
 
-	/* Try both embedded work items.  A callback whose pending bit has already
-	 * been cleared may be queued again while it is running; that invocation
-	 * receives its own lifetime token and will observe the latest bit state. */
+	/* Only the idle-to-active producer wakes the drain.  The worker token is
+	 * separate from this producer's token and follows budget handoffs.
+	 */
 	first_work = sddc->observe_work_cursor++ % CRYSTAL_SDDC_OBSERVE_WORKS;
 	for (i = 0; i < CRYSTAL_SDDC_OBSERVE_WORKS; i++) {
 		unsigned int work_index = (first_work + i) %
@@ -2454,10 +2437,10 @@ void crystal_sddc_queue_observation(struct zram *zram,
 		 * undo the reference reserved for this failed attempt. */
 		crystal_sddc_manager_put(sddc);
 	}
-	/* If both queue attempts report busy, one callback already owns the bit
-	 * and will consume it.  Never clear the bit merely because queue_work()
-	 * returned false: doing so reintroduces the lost-wakeup race. */
-	atomic64_inc(&sddc->stats.queued);
+	/* If both items report busy, a callback from the preceding drain is still
+	 * pending or returning and owns the newly set bit.
+	 */
+active_locked:
 	spin_unlock(&sddc->state_lock);
 
 	/* Release the manager token before the device reference.  Dropping the
@@ -2617,12 +2600,18 @@ static void crystal_sddc_observe_bitmap_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, index, (u32)1);
 	KUNIT_EXPECT_EQ(test, ctx->sddc.pending, 0U);
 	KUNIT_EXPECT_FALSE(test, test_bit(1, ctx->sddc.observe_pending));
-	/* Taking the last bit does not end the callback; the next empty take
-	 * (or the worker hand-off) owns the active-to-idle transition. */
+	/* Taking the last bit does not end the callback.  The worker commits its
+	 * active-to-idle transition after observing the empty queue under lock.
+	 */
 	KUNIT_EXPECT_TRUE(test, ctx->sddc.observe_worker_active);
 	KUNIT_EXPECT_FALSE(test,
 		crystal_sddc_observe_take_locked(&ctx->sddc, &index));
+	KUNIT_EXPECT_TRUE(test, ctx->sddc.observe_worker_active);
+	crystal_sddc_observe_deactivate_locked(&ctx->sddc, 0);
 	KUNIT_EXPECT_FALSE(test, ctx->sddc.observe_worker_active);
+	KUNIT_EXPECT_EQ(test, ctx->sddc.observe_work_cursor, 1U);
+	KUNIT_EXPECT_TRUE(test, crystal_sddc_observe_activate_locked(&ctx->sddc));
+	KUNIT_EXPECT_FALSE(test, crystal_sddc_observe_activate_locked(&ctx->sddc));
 
 	/* The cursor wraps and a second request for a consumed slot is
 	 * represented by a new bit, not by an extra queue object. */

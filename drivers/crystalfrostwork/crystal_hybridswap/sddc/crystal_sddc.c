@@ -7,7 +7,6 @@
 #include <linux/highmem.h>
 #include <linux/idr.h>
 #include <linux/jhash.h>
-#include <linux/mempool.h>
 #include <linux/mm.h>
 #include <linux/refcount.h>
 #include <linux/slab.h>
@@ -41,7 +40,6 @@
 #define CRYSTAL_SDDC_SIMILARITY_MIN	16
 #define CRYSTAL_SDDC_DELTA_MAGIC	0x43444453U
 #define CRYSTAL_SDDC_DELTA_VERSION	1
-#define CRYSTAL_SDDC_WORKSPACE_MIN	2
 #define CRYSTAL_SDDC_OBSERVE_BUDGET	64
 
 enum crystal_sddc_sample_kind {
@@ -154,8 +152,8 @@ struct crystal_sddc {
 	struct workqueue_struct *workqueue;
 	struct workqueue_struct *free_workqueue;
 	struct crystal_sddc_observe_work observe_work[CRYSTAL_SDDC_OBSERVE_WORKS];
+	struct crystal_sddc_workspace *observe_workspace;
 	unsigned long *observe_pending;
-	mempool_t *workspace_pool;
 	unsigned long nr_slots;
 	spinlock_t state_lock;
 	spinlock_t index_lock;
@@ -471,11 +469,11 @@ static void crystal_sddc_atomic64_update_max(atomic64_t *value, s64 candidate)
 	}
 }
 
-static void *crystal_sddc_workspace_alloc(gfp_t gfp_mask, void *pool_data)
+static struct crystal_sddc_workspace *
+crystal_sddc_workspace_alloc(gfp_t gfp_mask)
 {
 	struct crystal_sddc_workspace *workspace;
 
-	(void)pool_data;
 	workspace = kmalloc(sizeof(*workspace), gfp_mask);
 	if (!workspace)
 		return NULL;
@@ -492,11 +490,10 @@ static void *crystal_sddc_workspace_alloc(gfp_t gfp_mask, void *pool_data)
 	return NULL;
 }
 
-static void crystal_sddc_workspace_free(void *element, void *pool_data)
+static void crystal_sddc_workspace_free(struct crystal_sddc_workspace *workspace)
 {
-	struct crystal_sddc_workspace *workspace = element;
-
-	(void)pool_data;
+	if (!workspace)
+		return;
 	kfree(workspace->wire);
 	kfree(workspace->ref_data);
 	kfree(workspace->ordinary);
@@ -871,11 +868,6 @@ static unsigned int crystal_sddc_index_candidates(
 	return count;
 }
 
-static bool crystal_sddc_source_snapshot(struct crystal_sddc *sddc,
-		const struct crystal_sddc_candidate *candidate,
-		const struct crystal_sddc_job_key *target, void *payload,
-		struct crystal_sddc_source *source);
-
 static u32 crystal_sddc_head_match_bytes(const u8 *target, u32 target_size,
 		const u8 *source, u32 source_size)
 {
@@ -936,36 +928,102 @@ static bool crystal_sddc_sample_eligible(u32 size)
 	return size > CRYSTAL_SDDC_INDEX_MIN_SIZE && size <= PAGE_SIZE;
 }
 
-static bool crystal_sddc_rank_candidate(struct crystal_sddc *sddc,
-		const struct crystal_sddc_job_key *target, const void *target_data,
-		const struct crystal_sddc_candidate *candidate,
-		struct crystal_sddc_workspace *workspace,
-		struct crystal_sddc_ranked_candidate *ranked)
+static void
+crystal_sddc_rank_data(const struct crystal_sddc_job_key *target,
+		       const void *target_data,
+		       const struct crystal_sddc_candidate *candidate,
+		       const void *source_data, u32 source_size, u32 ref_count,
+		       struct crystal_sddc_ranked_candidate *ranked)
 {
-	struct crystal_sddc_source source;
 	u32 match_bytes = 0;
 
-	if (!crystal_sddc_source_snapshot(sddc, candidate, target,
-			workspace->ref_data, &source))
-		return false;
-
 	if ((candidate->sample_kind & CRYSTAL_SDDC_SAMPLE_HEAD) &&
-	    source.key.size == target->size &&
-	    !memcmp(workspace->ref_data, target_data, target->size))
+	    source_size == target->size &&
+	    !memcmp(source_data, target_data, target->size))
 		match_bytes = target->size;
-	else if ((source.key.size == PAGE_SIZE) ==
-			(target->size == PAGE_SIZE))
-		match_bytes = crystal_sddc_match_bytes(target_data, target->size,
-				workspace->ref_data, source.key.size,
-				candidate->sample_kind);
+	else if ((source_size == PAGE_SIZE) == (target->size == PAGE_SIZE))
+		match_bytes = crystal_sddc_match_bytes(target_data,
+						       target->size,
+						       source_data, source_size,
+						       candidate->sample_kind);
 
 	ranked->candidate = *candidate;
 	ranked->match_bytes = match_bytes;
-	ranked->ref_count = source.ref ?
-		crystal_sddc_ref_count_without_pin(source.ref) : 0;
-	ranked->source_size = source.key.size;
-	crystal_sddc_ref_put(source.ref);
+	ranked->ref_count = ref_count;
+	ranked->source_size = source_size;
+}
+
+static bool
+crystal_sddc_rank_candidate(struct crystal_sddc *sddc,
+			    const struct crystal_sddc_job_key *target,
+			    const void *target_data,
+			    const struct crystal_sddc_candidate *candidate,
+			    struct crystal_sddc_ranked_candidate *ranked)
+{
+	struct crystal_sddc_slot_state *state;
+	struct crystal_sddc_ref *ref;
+	struct zram *zram = sddc->zram;
+	unsigned long handle;
+	void *state_entry;
+	u32 source_size;
+	u32 source_prio;
+	void *source_data;
+
+	if (candidate->index == target->index ||
+	    candidate->index >= sddc->nr_slots)
+		return false;
+
+	crystal_sddc_slot_lock(zram, candidate->index);
+	state_entry = crystal_sddc_state_load_raw(sddc, candidate->index);
+	if (state_entry == XA_ZERO_ENTRY || xa_is_err(state_entry) ||
+	    crystal_sddc_test_flag(zram, candidate->index, ZRAM_SAME) ||
+	    crystal_sddc_test_flag(zram, candidate->index, ZRAM_WB) ||
+	    crystal_sddc_test_flag(zram, candidate->index, ZRAM_UNDER_WB))
+		goto unlock;
+
+	state = state_entry;
+	if (state && state->kind == CRYSTAL_SDDC_REF) {
+		ref = crystal_sddc_ref_pin(sddc, &state->ref);
+		crystal_sddc_slot_unlock(zram, candidate->index);
+		if (!ref)
+			return false;
+		if (!ref->handle || ref->size < CRYSTAL_SDDC_SAMPLE_SIZE ||
+		    ref->size > PAGE_SIZE || ref->prio >= ZRAM_MAX_COMPS ||
+		    ref->prio != target->prio) {
+			crystal_sddc_ref_put(ref);
+			return false;
+		}
+
+		source_data =
+			zs_map_object(zram->mem_pool, ref->handle, ZS_MM_RO);
+		crystal_sddc_rank_data(target, target_data, candidate,
+				       source_data, ref->size,
+				       crystal_sddc_ref_count_without_pin(ref),
+				       ranked);
+		zs_unmap_object(zram->mem_pool, ref->handle);
+		crystal_sddc_ref_put(ref);
+		return true;
+	}
+	if (state)
+		goto unlock;
+
+	handle = zram->table[candidate->index].handle;
+	source_size = crystal_sddc_obj_size(zram, candidate->index);
+	source_prio = crystal_sddc_priority(zram, candidate->index);
+	if (!handle || source_size < CRYSTAL_SDDC_SAMPLE_SIZE ||
+	    source_size > PAGE_SIZE || source_prio != target->prio)
+		goto unlock;
+
+	source_data = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
+	crystal_sddc_rank_data(target, target_data, candidate, source_data,
+			       source_size, 0, ranked);
+	zs_unmap_object(zram->mem_pool, handle);
+	crystal_sddc_slot_unlock(zram, candidate->index);
 	return true;
+
+unlock:
+	crystal_sddc_slot_unlock(zram, candidate->index);
+	return false;
 }
 
 static int crystal_sddc_ranked_candidate_cmp(const void *left,
@@ -986,7 +1044,6 @@ static int crystal_sddc_ranked_candidate_cmp(const void *left,
 static unsigned int crystal_sddc_rank_candidates(struct crystal_sddc *sddc,
 		const struct crystal_sddc_job_key *target, const void *target_data,
 		struct crystal_sddc_candidate *candidates, unsigned int count,
-		struct crystal_sddc_workspace *workspace,
 		struct crystal_sddc_ranked_candidate *ranked)
 {
 	unsigned int i;
@@ -994,7 +1051,7 @@ static unsigned int crystal_sddc_rank_candidates(struct crystal_sddc *sddc,
 
 	for (i = 0; i < count; i++) {
 		if (crystal_sddc_rank_candidate(sddc, target, target_data,
-				&candidates[i], workspace, &ranked[ranked_count]))
+				&candidates[i], &ranked[ranked_count]))
 			ranked_count++;
 	}
 	sort(ranked, ranked_count, sizeof(*ranked),
@@ -1280,7 +1337,7 @@ static bool crystal_sddc_try_delta(struct crystal_sddc *sddc,
 	unsigned int delta_len;
 	unsigned int out_limit;
 	u32 wire_size;
-	void *delta = workspace->wire;
+	void *delta = (u8 *)workspace->wire + sizeof(header);
 	void *dst;
 	bool committed = false;
 	int ret;
@@ -1356,14 +1413,9 @@ static bool crystal_sddc_try_delta(struct crystal_sddc *sddc,
 	header.ref_generation = cpu_to_le32(ref->cookie.generation);
 	header.ref_size = cpu_to_le32(ref->size);
 	header.target_size = cpu_to_le32(target->size);
-	/* The codec output lives at the start of the observation workspace.
-	 * Move it behind the wire header before publishing the object. */
-	memmove((u8 *)workspace->wire + sizeof(header), workspace->wire,
-		delta_len);
+	memcpy(workspace->wire, &header, sizeof(header));
 	dst = zs_map_object(sddc->zram->mem_pool, handle, ZS_MM_WO);
-	memcpy(dst, &header, sizeof(header));
-	memcpy((u8 *)dst + sizeof(header),
-		(u8 *)workspace->wire + sizeof(header), delta_len);
+	memcpy(dst, workspace->wire, wire_size);
 	zs_unmap_object(sddc->zram->mem_pool, handle);
 
 	if (crystal_sddc_commit_target(sddc, target, ref,
@@ -1408,7 +1460,7 @@ static bool crystal_sddc_try_convert(struct crystal_sddc *sddc,
 				ARRAY_SIZE(candidates));
 	spin_unlock(&sddc->index_lock);
 	count = crystal_sddc_rank_candidates(sddc, target, target_data,
-			candidates, count, workspace, ranked);
+			candidates, count, ranked);
 	for (i = 0; i < count; i++) {
 		atomic64_inc(&sddc->stats.alias_attempts);
 		if (crystal_sddc_try_alias(sddc, target, target_data,
@@ -1433,7 +1485,7 @@ static bool crystal_sddc_try_convert(struct crystal_sddc *sddc,
 				ARRAY_SIZE(candidates));
 	spin_unlock(&sddc->index_lock);
 	count = crystal_sddc_rank_candidates(sddc, target, target_data,
-			candidates, count, workspace, ranked);
+			candidates, count, ranked);
 	for (i = 0; i < count; i++) {
 		if (ranked[i].match_bytes < CRYSTAL_SDDC_SIMILARITY_MIN)
 			break;
@@ -1620,12 +1672,6 @@ static bool crystal_sddc_observe_finish(struct crystal_sddc *sddc)
 	return true;
 }
 
-/*
- * A workspace allocation can transiently fail when the read/flatten paths
- * hold the mempool's reserved elements.  Keep the bitmap intact and hand the
- * same worker lifetime token to another callback instead of silently losing
- * work.
- */
 static bool crystal_sddc_observe_handoff(
 		struct crystal_sddc_observe_work *observe)
 {
@@ -1659,25 +1705,7 @@ static void crystal_sddc_observe_workfn(struct work_struct *work)
 	spin_lock(&sddc->state_lock);
 	sddc->observe_worker_active = true;
 	spin_unlock(&sddc->state_lock);
-	workspace = mempool_alloc(sddc->workspace_pool, GFP_NOIO);
-	if (!workspace) {
-		bool retry;
-
-		spin_lock(&sddc->state_lock);
-		retry = !READ_ONCE(sddc->stopping) && sddc->pending;
-		if (READ_ONCE(sddc->stopping))
-			crystal_sddc_observe_discard_locked(sddc);
-		if (!retry)
-			sddc->observe_worker_active = false;
-		spin_unlock(&sddc->state_lock);
-		if (retry && crystal_sddc_observe_handoff(observe))
-			return;
-		spin_lock(&sddc->state_lock);
-		if (!sddc->pending || READ_ONCE(sddc->stopping))
-			sddc->observe_worker_active = false;
-		spin_unlock(&sddc->state_lock);
-		goto out;
-	}
+	workspace = sddc->observe_workspace;
 	for (;;) {
 		spin_lock(&sddc->state_lock);
 		if (!crystal_sddc_observe_take_locked(sddc, &index)) {
@@ -1699,7 +1727,6 @@ static void crystal_sddc_observe_workfn(struct work_struct *work)
 			 * starve freezer/reset progress.  A successful handoff transfers
 			 * this callback's lifetime token and zram reference. */
 			if (crystal_sddc_observe_handoff(observe)) {
-				mempool_free(workspace, sddc->workspace_pool);
 				return;
 			}
 			spin_lock(&sddc->state_lock);
@@ -1718,8 +1745,6 @@ static void crystal_sddc_observe_workfn(struct work_struct *work)
 		}
 	}
 
-	mempool_free(workspace, sddc->workspace_pool);
-out:
 	/* Drop the manager token before the device reference.  zram removal
 	 * may wake as soon as the latter reaches zero and destroy @sddc; use
 	 * only the saved device pointer after releasing the manager token. */
@@ -1779,10 +1804,8 @@ int crystal_sddc_create(struct zram *zram, unsigned long nr_pages)
 	    !sddc->exact_index || !sddc->sample_index)
 		goto fail;
 
-	sddc->workspace_pool = mempool_create(CRYSTAL_SDDC_WORKSPACE_MIN,
-			crystal_sddc_workspace_alloc, crystal_sddc_workspace_free,
-			NULL);
-	if (!sddc->workspace_pool)
+	sddc->observe_workspace = crystal_sddc_workspace_alloc(GFP_KERNEL);
+	if (!sddc->observe_workspace)
 		goto fail;
 
 	/* Huawei runs SDDC recompression from a reclaim-capable worker.  Keep the
@@ -1812,8 +1835,7 @@ fail:
 		destroy_workqueue(sddc->free_workqueue);
 	if (sddc->workqueue)
 		destroy_workqueue(sddc->workqueue);
-	if (sddc->workspace_pool)
-		mempool_destroy(sddc->workspace_pool);
+	crystal_sddc_workspace_free(sddc->observe_workspace);
 	bitmap_free(sddc->observe_pending);
 	vfree(sddc->sample_index);
 	vfree(sddc->exact_index);
@@ -1903,7 +1925,7 @@ void crystal_sddc_destroy(struct zram *zram)
 	destroy_workqueue(sddc->free_workqueue);
 	crystal_sddc_destroy_metadata(sddc);
 	bitmap_free(sddc->observe_pending);
-	mempool_destroy(sddc->workspace_pool);
+	crystal_sddc_workspace_free(sddc->observe_workspace);
 	vfree(sddc->sample_index);
 	vfree(sddc->exact_index);
 	vfree(sddc->mutation_seq);
@@ -2116,39 +2138,74 @@ static bool crystal_sddc_delta_header_valid(
 		le32_to_cpu(header->ref_generation) == ref->cookie.generation;
 }
 
-static int crystal_sddc_restore_ordinary(struct crystal_sddc *sddc,
-		struct crystal_sddc_ref *ref, enum crystal_sddc_kind kind,
-		const void *wire, u32 wire_size, const void *ref_data, void *dst,
-		size_t *size)
+static int crystal_sddc_restore(struct crystal_sddc *sddc,
+				struct crystal_sddc_ref *ref,
+				enum crystal_sddc_kind kind, const void *wire,
+				u32 wire_size, void *dst, size_t *size,
+				bool full_page)
 {
 	const struct crystal_sddc_delta_header *header = wire;
-	struct zcomp_strm *zstrm;
-	unsigned int restored_size;
-	int ret;
+	struct zcomp *comp = NULL;
+	struct zcomp_strm *zstrm = NULL;
+	unsigned int stream_size;
+	size_t output_size;
+	void *ref_data;
+	bool delta;
+	int ret = 0;
 
-	if (kind == CRYSTAL_SDDC_REF || kind == CRYSTAL_SDDC_ALIAS) {
-		memcpy(dst, ref_data, ref->size);
-		*size = ref->size;
-		return 0;
+	if (!ref->handle)
+		return -EIO;
+	delta = kind == CRYSTAL_SDDC_DELTA;
+	if (!delta && kind != CRYSTAL_SDDC_REF && kind != CRYSTAL_SDDC_ALIAS)
+		return -EIO;
+	if (delta && !crystal_sddc_delta_header_valid(ref, header, wire_size))
+		return -EIO;
+
+	if (delta || (full_page && ref->size != PAGE_SIZE)) {
+		comp = sddc->zram->comps[ref->prio];
+		if (!comp || (delta && !zcomp_supports_delta(comp)))
+			return -EIO;
+		zstrm = zcomp_stream_get(comp);
 	}
-	if (kind != CRYSTAL_SDDC_DELTA ||
-	    !crystal_sddc_delta_header_valid(ref, header, wire_size))
-		return -EIO;
-	if (!sddc->zram->comps[ref->prio] ||
-	    !zcomp_supports_delta(sddc->zram->comps[ref->prio]))
-		return -EIO;
 
-	zstrm = zcomp_stream_get(sddc->zram->comps[ref->prio]);
-	restored_size = PAGE_SIZE;
-	ret = zcomp_decompress_delta(zstrm,
-			(const u8 *)wire + sizeof(*header),
-			wire_size - sizeof(*header), ref_data, ref->size, dst,
-			&restored_size);
-	zcomp_stream_put(sddc->zram->comps[ref->prio]);
-	if (ret || restored_size != le32_to_cpu(header->target_size))
-		return -EIO;
+	ref_data = zs_map_object(sddc->zram->mem_pool, ref->handle, ZS_MM_RO);
+	if (!delta) {
+		if (zstrm)
+			ret = zcomp_decompress(zstrm, ref_data, ref->size, dst);
+		else
+			memcpy(dst, ref_data, ref->size);
+		zs_unmap_object(sddc->zram->mem_pool, ref->handle);
+		output_size = full_page ? PAGE_SIZE : ref->size;
+		goto out;
+	}
 
-	*size = restored_size;
+	stream_size = PAGE_SIZE;
+	ret = zcomp_decompress_delta(zstrm, (const u8 *)wire + sizeof(*header),
+				     wire_size - sizeof(*header), ref_data,
+				     ref->size, zstrm->buffer, &stream_size);
+	zs_unmap_object(sddc->zram->mem_pool, ref->handle);
+	if (ret || stream_size != le32_to_cpu(header->target_size)) {
+		ret = -EIO;
+		goto out;
+	}
+
+	if (!full_page) {
+		memcpy(dst, zstrm->buffer, stream_size);
+		output_size = stream_size;
+	} else if (stream_size == PAGE_SIZE) {
+		memcpy(dst, zstrm->buffer, PAGE_SIZE);
+		output_size = PAGE_SIZE;
+	} else {
+		ret = zcomp_decompress(zstrm, zstrm->buffer, stream_size, dst);
+		output_size = PAGE_SIZE;
+	}
+
+out:
+	if (zstrm)
+		zcomp_stream_put(comp);
+	if (ret)
+		return -EIO;
+	*size = output_size;
 	return 0;
 }
 
@@ -2221,79 +2278,38 @@ int crystal_sddc_read_page(struct zram *zram, struct page *page, u32 index)
 {
 	struct crystal_sddc_ref *ref = NULL;
 	struct crystal_sddc *sddc;
-	struct crystal_sddc_workspace *workspace = NULL;
-	struct zcomp_strm *zstrm;
 	enum crystal_sddc_kind kind;
 	void *dst;
-	size_t ordinary_size;
+	size_t size;
 	u32 wire_size;
 	int ret;
 
 	sddc = crystal_sddc_manager_get(zram);
 	if (!sddc)
 		return -EAGAIN;
-	workspace = mempool_alloc(sddc->workspace_pool, GFP_NOIO);
-	if (!workspace) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	crystal_sddc_slot_lock(zram, index);
-	ret = crystal_sddc_capture_locked(sddc, index, NULL, &kind, &ref,
-			workspace->wire, &wire_size);
-	crystal_sddc_slot_unlock(zram, index);
-	if (ret) {
-		if (ret != -EAGAIN)
-			atomic64_inc(&sddc->stats.decode_failures);
-		goto out;
-	}
-
-	crystal_sddc_copy_ref(ref, workspace->ref_data);
-	ret = crystal_sddc_restore_ordinary(sddc, ref, kind, workspace->wire,
-			wire_size, workspace->ref_data, workspace->ordinary,
-			&ordinary_size);
-	if (ret)
-		goto decode_error;
 
 	dst = kmap_local_page(page);
-	if (ordinary_size == PAGE_SIZE) {
-		memcpy(dst, workspace->ordinary, PAGE_SIZE);
-		ret = 0;
-	} else {
-		if (!zram->comps[ref->prio]) {
-			ret = -EIO;
-			goto unmap;
-		}
-		zstrm = zcomp_stream_get(zram->comps[ref->prio]);
-		ret = zcomp_decompress(zstrm, workspace->ordinary,
-				ordinary_size, dst);
-		zcomp_stream_put(zram->comps[ref->prio]);
-		if (ret)
-			ret = -EIO;
-	}
-unmap:
+	crystal_sddc_slot_lock(zram, index);
+	ret = crystal_sddc_capture_locked(sddc, index, NULL, &kind, &ref, dst,
+					  &wire_size);
+	crystal_sddc_slot_unlock(zram, index);
+	if (!ret)
+		ret = crystal_sddc_restore(sddc, ref, kind, dst, wire_size, dst,
+					   &size, true);
 	kunmap_local(dst);
-	if (ret)
-		goto decode_error;
-	goto out;
-
-decode_error:
-	atomic64_inc(&sddc->stats.decode_failures);
-out:
+	if (ret && ret != -EAGAIN)
+		atomic64_inc(&sddc->stats.decode_failures);
 	crystal_sddc_ref_put(ref);
-	if (workspace)
-		mempool_free(workspace, sddc->workspace_pool);
 	crystal_sddc_manager_put(sddc);
 	return ret;
 }
 
 int crystal_sddc_flatten(struct zram *zram, u32 index,
-		const struct crystal_sddc_snapshot *snapshot, void *dst,
-		size_t *size)
+			 const struct crystal_sddc_snapshot *snapshot,
+			 void *dst, size_t *size)
 {
 	struct crystal_sddc_ref *ref = NULL;
 	struct crystal_sddc *sddc;
-	struct crystal_sddc_workspace *workspace = NULL;
 	enum crystal_sddc_kind kind;
 	u32 wire_size;
 	int ret;
@@ -2303,15 +2319,10 @@ int crystal_sddc_flatten(struct zram *zram, u32 index,
 	sddc = crystal_sddc_manager_get(zram);
 	if (!sddc)
 		return -EAGAIN;
-	workspace = mempool_alloc(sddc->workspace_pool, GFP_NOIO);
-	if (!workspace) {
-		ret = -ENOMEM;
-		goto out;
-	}
 
 	crystal_sddc_slot_lock(zram, index);
 	ret = crystal_sddc_capture_locked(sddc, index, snapshot, &kind, &ref,
-			workspace->wire, &wire_size);
+					  dst, &wire_size);
 	crystal_sddc_slot_unlock(zram, index);
 	if (ret) {
 		if (ret != -EAGAIN)
@@ -2319,9 +2330,8 @@ int crystal_sddc_flatten(struct zram *zram, u32 index,
 		goto out;
 	}
 
-	crystal_sddc_copy_ref(ref, workspace->ref_data);
-	ret = crystal_sddc_restore_ordinary(sddc, ref, kind, workspace->wire,
-			wire_size, workspace->ref_data, dst, size);
+	ret = crystal_sddc_restore(sddc, ref, kind, dst, wire_size, dst, size,
+				   false);
 	if (ret)
 		atomic64_inc(&sddc->stats.decode_failures);
 
@@ -2329,8 +2339,6 @@ out:
 	if (ret && ret != -EAGAIN)
 		atomic64_inc(&sddc->stats.flatten_failures);
 	crystal_sddc_ref_put(ref);
-	if (workspace)
-		mempool_free(workspace, sddc->workspace_pool);
 	crystal_sddc_manager_put(sddc);
 	return ret;
 }
@@ -2560,8 +2568,6 @@ static void crystal_sddc_state_test_exit(struct kunit *test)
 	if (!ctx)
 		return;
 
-	if (ctx->sddc.workspace_pool)
-		mempool_destroy(ctx->sddc.workspace_pool);
 	bitmap_free(ctx->sddc.observe_pending);
 	xa_for_each(&ctx->sddc.slot_states, index, state) {
 		state = xa_erase(&ctx->sddc.slot_states, index);
@@ -3004,10 +3010,6 @@ static void crystal_sddc_flatten_snapshot_test(struct kunit *test)
 	size_t size = 123;
 	int ret;
 
-	ctx->sddc.workspace_pool = mempool_create(1,
-			crystal_sddc_workspace_alloc, crystal_sddc_workspace_free,
-			NULL);
-	KUNIT_ASSERT_NOT_NULL(test, ctx->sddc.workspace_pool);
 	ctx->mutation_seq[0] = 27;
 	state = crystal_sddc_test_install_state(ctx, 0,
 			CRYSTAL_SDDC_ALIAS);

@@ -149,9 +149,9 @@ observed using its newest representation. Each callback has a bounded slot
 budget and hands remaining bits to the alternate embedded work item, so a
 continuously rewritten device cannot keep freezer or reset waiting indefinitely.
 There is no fixed 1024-entry allocation; the observation buffers come from the
-bounded workspace pool rather than from each store event. A transient workspace
-allocation failure leaves the bits intact and requeues through the alternate
-embedded callback; pending work is discarded only once stop has closed
+single workspace allocated with the manager rather than from each store event.
+Both embedded items run on the same ordered workqueue, so they cannot use that
+workspace concurrently. Pending work is discarded only once stop has closed
 admission.
 
 The worker holds `init_lock` for read while it validates the latest job key and
@@ -190,7 +190,9 @@ present in both buckets retains both sample bits and is ranked by its better
 head/tail score. Tail scoring anchors before the terminal 16-byte sample, so a
 score never exceeds the shorter input. The candidate arrays are bounded stack
 storage, so duplicate head/tail index cells cannot multiply codec work for one
-target.
+target. Ranking maps each validated candidate directly while its slot or pinned
+reference protects the handle; only a candidate selected for a conversion
+attempt is copied into the observation workspace.
 
 ## 5. Conversion Transaction
 
@@ -199,10 +201,11 @@ commit stages. Source and target slot locks are never held together.
 
 ### 5.1 Exact alias
 
-For an exact candidate, SDDC snapshots and copies the candidate stream, then
-checks both length and every byte against the target. A hash match alone is
-never sufficient. The source is promoted to or pinned as an immutable
-reference, and the target commits as `ALIAS` with no zsmalloc handle.
+For an exact candidate, SDDC first compares the directly mapped stream, then
+snapshots and copies candidates in ranked order before the transactional check.
+A hash match alone is never sufficient. The source is promoted to or pinned as
+an immutable reference, and the target commits as `ALIAS` with no zsmalloc
+handle.
 
 ### 5.2 Delta
 
@@ -249,18 +252,19 @@ store fail.
 
 ### 6.1 Resident reads
 
-A managed read obtains a manager token and a workspace from a mempool with a
-minimum reserve of two elements. Under the slot lock it validates the current
-kind, pins the reference, and copies any delta wire bytes. It then releases the
-slot lock, copies the immutable reference, and restores the ordinary stream:
+A managed read obtains a manager token and maps its destination page. Under the
+slot lock it validates the current kind, pins the reference, and copies any
+delta wire bytes into that page as temporary staging. It then releases the slot
+lock and restores from the immutable reference:
 
 - `REF` and `ALIAS` copy the reference stream directly;
 - `DELTA` validates its header and invokes LZ4KD delta decode.
 
-If the restored ordinary stream is exactly `PAGE_SIZE`, it is already the raw
-page and is copied to the destination. Otherwise the recorded primary
-compressor stream decompresses it to a page. A pinned reference and copied
-wire make concurrent slot replacement safe after capture.
+Delta restore first writes the ordinary stream into the existing per-CPU zcomp
+buffer, then either copies a raw `PAGE_SIZE` stream or decompresses a shorter
+stream over the staging bytes. `REF` and `ALIAS` map the pinned reference
+directly into the final copy/decompression. A pinned reference and copied wire
+make concurrent slot replacement safe after capture.
 
 `-EAGAIN` denotes a transient identity or lifecycle conflict and lets the zram
 read path retry. Corrupt metadata, a missing reference, or codec failure
@@ -412,13 +416,12 @@ The data path follows these recovery rules:
   it then frees every slot so reference teardown follows normal ownership
   rules. A worker-owned bit is allowed to finish before teardown.
 
-The workspace mempool supplies bounded PAGE_SIZE buffers for observation and
-read/flatten restoration under reclaim pressure. Observation borrows a workspace
-for the target stream and returns it after candidate indexing or conversion;
-queue coalescing means the pool is sized for active workers rather than the
-number of store events. Reference payload release uses a dedicated
-reclaim-capable, unbound, high-priority workqueue so zsmalloc release is not
-performed inside a slot lock.
+One fixed three-page workspace serves observation on the ordered worker.
+Resident reads stage wire bytes in the destination page, while flatten stages
+them in its caller-provided page and uses the existing per-CPU zcomp buffer for
+delta restore. Reference payload release uses a dedicated reclaim-capable,
+unbound, high-priority workqueue so zsmalloc release is not performed inside a
+slot lock.
 
 ## 10. Diagnostics
 

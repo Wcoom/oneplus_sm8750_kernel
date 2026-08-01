@@ -70,8 +70,8 @@ Crystal 因此保留有利于部署和维护的用户可见部分，但重写内
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK`：启用私有 zram 写回数据面。
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MEMORY_TRACKING`：在具备 debugfs 支持时启用更详细的内存跟踪。
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MULTI_COMP`：在平台支持时启用多压缩流或多压缩器能力。
-- `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC`：按设备启用可选的相似性索引、精确 alias 和驻留 delta 表示。
-- `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD`：构建 SDDC 使用的私有 4 KiB LZ4KD 普通/delta 后端，不向全局 Crypto API 注册算法。
+- `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC`：启用按设备的相似性索引、精确 alias 和驻留 delta 表示；Crystal Hybridswap 开启时默认启用，运行时仍采用 best-effort 策略。
+- `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD`：构建 SDDC 使用的私有 4 KiB LZ4KD 普通/delta 后端，不向全局 Crypto API 注册算法；arm64 4 KiB page 构建默认启用。
 - `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST`：构建私有 codec 和 SDDC 状态机 KUnit 测试。
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP`：选择默认压缩算法。
 
@@ -397,7 +397,7 @@ Crystal 专属接口分为：
 - debugfs 面向开发和深度诊断，不应视为稳定生产 ABI。
 - 兼容占位 API 默认关闭，只应在用户态确实需要时启用。
 - 旧 `memory.swapd_memcgs_param` 策略 ABI 默认关闭；只有旧用户态需要该控制面及其 score/`ub_zram2ufs_ratio` 自动 memcg 写回行为时才应启用。
-- SDDC 默认关闭，需要 4 KiB page 和支持 delta 的 primary compressor，其 delta wire format 只在内存中驻留；可通过 `sddc_stat` 确认 manager 是否运行。
+- SDDC 在满足 Kconfig 依赖时默认启用，需要 4 KiB page 和支持 delta 的 primary compressor，其 delta wire format 只在内存中驻留；可通过 `sddc_stat` 确认 manager 是否运行。初始化或运行时资源不足时会回退到普通压缩。
 - 模块不提供 OPPO 官方内部 extent / rmap / fault-out 数据路径。
 - 自动策略依赖运行时压力、quota、memcg 状态和 backing-device 可用性，应视为自适应策略而非确定性事务。
 

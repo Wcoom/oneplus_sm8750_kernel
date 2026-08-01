@@ -70,8 +70,8 @@ Relevant optional symbols include:
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK`: enables the private zram writeback data path.
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MEMORY_TRACKING`: enables more detailed memory tracking when debugfs support is available.
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MULTI_COMP`: enables multi-stream or multi-compressor support where supported by the platform.
-- `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC`: enables the opt-in per-device similarity index, exact aliases, and resident delta representation.
-- `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD`: builds the private 4 KiB LZ4KD ordinary/delta backend used by SDDC without registering a global Crypto API algorithm.
+- `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC`: enables the per-device similarity index, exact aliases, and resident delta representation (default y when Crystal Hybridswap is enabled; the runtime path remains opportunistic).
+- `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD`: builds the private 4 KiB LZ4KD ordinary/delta backend used by SDDC without registering a global Crypto API algorithm (default y on arm64 4 KiB-page builds).
 - `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST`: builds the private codec and SDDC state-machine KUnit coverage.
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP`: selects the default compression algorithm.
 
@@ -407,7 +407,7 @@ The practical result is that Crystal Hybridswap behaves like a zram-compatible s
 - debugfs is intended for development and deep diagnostics, not as a stable production ABI.
 - Compatibility placeholder APIs are disabled by default and should only be enabled when required by user space.
 - The legacy `memory.swapd_memcgs_param` policy ABI is disabled by default; enable it only when old user space needs that control surface and its score/`ub_zram2ufs_ratio` automatic memcg writeback behavior.
-- SDDC is opt-in, requires 4 KiB pages and a delta-capable primary compressor, and keeps its delta wire format resident-only. `sddc_stat` reports whether a manager is active.
+- SDDC is enabled by default when its Kconfig dependencies are met, requires 4 KiB pages and a delta-capable primary compressor, and keeps its delta wire format resident-only. `sddc_stat` reports whether a manager is active; allocation or runtime resource failures fall back to ordinary compression.
 - The module does not provide the OPPO official internal extent/rmap/fault-out data path.
 - Automatic policy decisions depend on runtime pressure, quota, memcg state, and backing-device availability; they should be treated as adaptive rather than deterministic.
 

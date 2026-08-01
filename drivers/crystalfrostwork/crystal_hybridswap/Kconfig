@@ -112,18 +112,18 @@ config CRYSTAL_HYBRIDSWAP_ZRAM_MULTI_COMP
 config CRYSTAL_HYBRIDSWAP_SDDC
 	bool "Huawei-style SDDC support for Crystal Hybridswap"
 	depends on CRYSTAL_HYBRIDSWAP
-	default n
+	default y
 	help
 	  Enable the private integration points used by Crystal Hybridswap's
-	  similarity detection and delta-compression data path.  This option is
-	  intentionally disabled by default while the SDDC representation is
-	  opt-in.
+	  similarity detection and delta-compression data path.  It is enabled by
+	  default when Crystal Hybridswap is enabled; the representation remains
+	  opportunistic and falls back to ordinary compression on resource loss.
 
 config CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD
 	bool "Private LZ4KD delta codec"
 	depends on CRYSTAL_HYBRIDSWAP_SDDC
 	depends on ARM64_4K_PAGES
-	default n
+	default y
 	help
 	  Build a private copy of Huawei's LZ4KD ordinary and delta codec and
 	  expose it to the Crystal zcomp frontend as "lz4kd".  It does not alter

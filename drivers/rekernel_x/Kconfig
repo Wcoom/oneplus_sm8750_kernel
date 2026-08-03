@@ -1,0 +1,7 @@
+config REKERNEL_X
+	bool "ReKernel-X kernel events"
+	depends on NET
+	default y
+	help
+	  ReKernel-X: expose binder/signal/network kernel events to
+	  userspace via Generic Netlink family "rekernel_x2".

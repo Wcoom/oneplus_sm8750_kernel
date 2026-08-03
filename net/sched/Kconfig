@@ -310,6 +310,26 @@ config NET_SCH_FQ
 
 	  If unsure, say N.
 
+config NET_SCH_FQ_GUARD
+	bool "fq queue guard for BBR"
+	depends on NET_SCH_FQ
+	default n
+	help
+	  Periodically ensures that the root qdisc of data interfaces
+	  (e.g. rmnet_data*, wlan*, p2p*) stays fq, so that BBRv3 keeps
+	  fair multi-flow bandwidth sharing even if vendor netd / Qualcomm
+	  data service reconfigures the root qdisc to a proprietary QoS
+	  stack (htb/ppq) on interface up.
+
+	  The guard listens to netdevice up/register events, then forces
+	  the root qdisc back to fq after a delay, and re-arms itself
+	  periodically (see parameters delay_ms / period_ms).
+
+	  Runtime control: /sys/module/fq_guard/parameters/enable
+	  Boot parameter: fq_guard.enable=0
+
+	  If unsure, say N.
+
 config NET_SCH_HHF
 	tristate "Heavy-Hitter Filter (HHF)"
 	help

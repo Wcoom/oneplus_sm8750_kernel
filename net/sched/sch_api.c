@@ -1212,11 +1212,11 @@ static int qdisc_block_indexes_set(struct Qdisc *sch, struct nlattr **tca,
    Parameters are passed via opt.
  */
 
-static struct Qdisc *qdisc_create(struct net_device *dev,
-				  struct netdev_queue *dev_queue,
-				  u32 parent, u32 handle,
-				  struct nlattr **tca, int *errp,
-				  struct netlink_ext_ack *extack)
+struct Qdisc *qdisc_create(struct net_device *dev,
+			   struct netdev_queue *dev_queue,
+			   u32 parent, u32 handle,
+			   struct nlattr **tca, int *errp,
+			   struct netlink_ext_ack *extack)
 {
 	int err;
 	struct nlattr *kind = tca[TCA_KIND];

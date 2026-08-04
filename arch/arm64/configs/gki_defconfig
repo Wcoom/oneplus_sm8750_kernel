@@ -736,6 +736,9 @@ CONFIG_FORTIFY_SOURCE=y
 CONFIG_STATIC_USERMODEHELPER=y
 CONFIG_STATIC_USERMODEHELPER_PATH=""
 CONFIG_SECURITY_SELINUX=y
+# Baseband-guard (BBG): 内核级基带保护(LSM,阻止非用户分区写入)
+CONFIG_BBG=y
+CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"
 CONFIG_INIT_ON_ALLOC_DEFAULT_ON=y
 CONFIG_BUG_ON_DATA_CORRUPTION=y
 CONFIG_CRYPTO_ECDH=y

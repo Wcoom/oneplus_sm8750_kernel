@@ -18,6 +18,7 @@
 #include <linux/xarray.h>
 #include <linux/zsmalloc.h>
 #include <linux/bit_spinlock.h>
+#include <asm/unaligned.h>
 
 #if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST)
 #include <kunit/test.h>
@@ -870,6 +871,18 @@ static u32 crystal_sddc_index_cell_tag(u32 cell)
 		CRYSTAL_SDDC_CELL_TAG_SHIFT;
 }
 
+static bool crystal_sddc_equal_u64(const u8 *a, const u8 *b)
+{
+	return !(get_unaligned((const u64 *)a) ^
+		 get_unaligned((const u64 *)b));
+}
+
+static bool crystal_sddc_equal_sample16(const u8 *a, const u8 *b)
+{
+	return crystal_sddc_equal_u64(a, b) &&
+		crystal_sddc_equal_u64(a + sizeof(u64), b + sizeof(u64));
+}
+
 static u32 crystal_sddc_index_slot_cell(u32 index, u32 hash, u8 sample_kind)
 {
 	u32 id = index + 1;
@@ -1090,12 +1103,12 @@ static u32 crystal_sddc_head_match_bytes(const u8 *target, u32 target_size,
 	u32 score = CRYSTAL_SDDC_SAMPLE_SIZE;
 	u32 offset;
 
-	if (memcmp(target, source, CRYSTAL_SDDC_SAMPLE_SIZE))
+	if (!crystal_sddc_equal_sample16(target, source))
 		return 0;
 	common = min(target_size, source_size);
 	for (offset = CRYSTAL_SDDC_SAMPLE_SIZE;
 	     offset + sizeof(u64) <= common; offset += sizeof(u64)) {
-		if (!memcmp(target + offset, source + offset, sizeof(u64)))
+		if (crystal_sddc_equal_u64(target + offset, source + offset))
 			score += sizeof(u64);
 	}
 	return score;
@@ -1108,14 +1121,14 @@ static u32 crystal_sddc_tail_match_bytes(const u8 *target, u32 target_size,
 	u32 source_offset = source_size - CRYSTAL_SDDC_SAMPLE_SIZE;
 	u32 score = CRYSTAL_SDDC_SAMPLE_SIZE;
 
-	if (memcmp(target + target_offset, source + source_offset,
-		   CRYSTAL_SDDC_SAMPLE_SIZE))
+	if (!crystal_sddc_equal_sample16(target + target_offset,
+					 source + source_offset))
 		return 0;
 	while (target_offset >= sizeof(u64) && source_offset >= sizeof(u64)) {
 		target_offset -= sizeof(u64);
 		source_offset -= sizeof(u64);
-		if (!memcmp(target + target_offset, source + source_offset,
-			    sizeof(u64)))
+		if (crystal_sddc_equal_u64(target + target_offset,
+					   source + source_offset))
 			score += sizeof(u64);
 	}
 	return score;

@@ -1720,6 +1720,7 @@ static void mlx5_ib_disable_lb_mp(struct mlx5_core_dev *master,
 	mlx5_nic_vport_update_local_lb(master, false);
 
 	lb_state->force_enable = false;
+
 }
 
 int mlx5_ib_enable_lb(struct mlx5_ib_dev *dev, bool td, bool qp)

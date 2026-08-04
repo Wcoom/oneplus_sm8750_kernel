@@ -437,6 +437,7 @@ err:
 	return ret;
 }
 
+
 /**
  * dma_buf_account_task - Account a dmabuf to a task
  * @dmabuf:	[in]	pointer to dma_buf
@@ -1188,6 +1189,15 @@ static void dma_buf_show_fdinfo(struct seq_file *m, struct file *file)
 		seq_printf(m, "name:\t%s\n", dmabuf->name);
 	spin_unlock(&dmabuf->name_lock);
 }
+
+static int dma_buf_flush(struct file *file, fl_owner_t id)
+{
+	/* When dmabuf FD is closed we should unaccount it */
+	dma_buf_unaccount_task(file->private_data, current->dmabuf_info);
+	return 0;
+}
+
+
 static const struct file_operations dma_buf_fops = {
 	.release	= dma_buf_file_release,
 	.mmap		= dma_buf_mmap_internal,
@@ -1196,6 +1206,7 @@ static const struct file_operations dma_buf_fops = {
 	.unlocked_ioctl	= dma_buf_ioctl,
 	.compat_ioctl	= compat_ptr_ioctl,
 	.show_fdinfo	= dma_buf_show_fdinfo,
+	.flush		= dma_buf_flush,
 };
 
 /*

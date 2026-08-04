@@ -11864,7 +11864,6 @@ static inline bool update_newidle_cost(struct sched_domain *sd, u64 cost)
 		sd->max_newidle_lb_cost =
 			min(cost, sysctl_sched_migration_cost + 200);
 		sd->last_decay_max_lb_cost = now;
-
 	} else if (time_after(now, next_decay)) {
 		/*
 		 * Decay the newidle max times by ~1% per second to ensure that

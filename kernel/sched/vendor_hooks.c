@@ -82,7 +82,6 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(android_rvh_do_sched_yield);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_rvh_before_do_sched_yield);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_rvh_sched_fork_init);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_rvh_ttwu_cond);
-EXPORT_TRACEPOINT_SYMBOL_GPL(android_rvh_schedule_bug);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_rvh_sched_exec);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_update_topology_flags_workfn);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_rvh_update_thermal_stats);
@@ -123,10 +122,8 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(android_rvh_set_iowait);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_prio_inheritance);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_prio_restore);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_set_task_comm);
-
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_rvh_before_pick_task_fair);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_rvh_balance_fair);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_chk_task);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_put_task);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_rvh_task_fits_cpu);
-

@@ -147,6 +147,9 @@ static void ntrig_report_version(struct hid_device *hdev)
 	if (!hid_is_usb(hdev))
 		return;
 
+	if (!hid_is_usb(hdev))
+		return;
+
 	if (!data)
 		return;
 

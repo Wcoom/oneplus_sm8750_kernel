@@ -142,6 +142,8 @@ struct inv_icm42600_state {
 	struct inv_icm42600_suspended suspended;
 	struct iio_dev *indio_gyro;
 	struct iio_dev *indio_accel;
+	u8 buffer[2] __aligned(IIO_DMA_MINALIGN);
+	struct inv_icm42600_fifo fifo;
 	struct {
 		s64 gyro;
 		s64 accel;

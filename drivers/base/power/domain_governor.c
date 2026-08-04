@@ -404,6 +404,7 @@ static bool cpu_power_down_ok(struct dev_pm_domain *pd)
 		    genpd->states[i].power_off_latency_ns)))
 			break;
 
+
 	} while (--i >= 0);
 
 	if (i < 0)

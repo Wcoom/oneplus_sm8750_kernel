@@ -228,10 +228,6 @@ DECLARE_RESTRICTED_HOOK(android_rvh_ttwu_cond,
 	TP_PROTO(int cpu, bool *cond),
 	TP_ARGS(cpu, cond), 1);
 
-DECLARE_RESTRICTED_HOOK(android_rvh_schedule_bug,
-	TP_PROTO(void *unused),
-	TP_ARGS(unused), 1);
-
 DECLARE_RESTRICTED_HOOK(android_rvh_sched_exec,
 	TP_PROTO(bool *cond),
 	TP_ARGS(cond), 1);
@@ -505,7 +501,6 @@ DECLARE_RESTRICTED_HOOK(android_rvh_task_fits_cpu,
 	TP_PROTO(struct task_struct *tsk, unsigned long util, unsigned long uclamp_min,
 		 unsigned long uclamp_max, int cpu, bool *fits, bool *done),
 	TP_ARGS(tsk, util, uclamp_min, uclamp_max, cpu, fits, done), 1);
-
 #endif /* _TRACE_HOOK_SCHED_H */
 /* This part must be outside protection */
 #include <trace/define_trace.h>

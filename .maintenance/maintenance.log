@@ -1,16 +1,17 @@
-# GKI 三源维护日志
+# ACK 维护日志
 
-## 2026-08-05 首轮执行（三源）
-- ACK：无更新（已至 742616e50d04 / 2026-08-04）
-- LTS：6.6.118 → 6.6.148 合并成功（2472aaf374ee0），64 冲突解决，编译验证通过（6.6.148-4k）
-- QCOM：codelinaro 网络不可达，pending
-- 维护状态提交：df791caa8d883
+## 2026-08-05 ACK 合并（两轮）
+- 第一轮 `8416f24b45be9`：3964 提交，87 冲突（基于滞后镜像，已作废纠正）
+- 第二轮 `9bc406aeb9f2a`：增量 6425 提交 → `742616e50d04`（2026-08-04 官方源），98 冲突
+- 红线校验通过：KABI 槽位 / ghost_task ×12 / NTSYNC ×88 / SUBLEVEL 118 / ZRAM=n
+- 编译成功，已推送 github 并打包
 
-## 2026-08-05 撤销 LTS 合并（用户要求：只保留 ACK 合并）
-- 原因：用户决定只保留 ACK 安全补丁，撤销 LTS 与 QCOM 源码修改
-- 操作：`git reset --hard 450f8996cf343`（whitewhale0612 同步后、LTS 合并前）
-- 备份：分支 `backup/lts-merged-6.6.148`（含 2472aaf374ee0 + df791caa8d883，可随时恢复）
-- 结果：SUBLEVEL 148→118（版本回 6.6.118-4k）；ACK 2026-08 合并（9bc406aeb9f2a）、Droidspaces、BBG、ReKernel-X、fq_guard、hybridswap 同步全部保留
-- 红线复验：KABI 槽位 ✓ / ghost_task ×12 ✓ / NTSYNC ✓ / CONFIG_BBG=y ✓ / 工作区干净 ✓
-- QCOM：自始至终未合并成功（网络不可达），无源码修改可撤销，维持 pending
-- 状态文件：lts last_merged 回退至 924b4a879cbb（6.6.118）
+## 2026-08-05 同步 whitewhale0612 上游
+- `450f8996cf343`：3 个 crystal_hybridswap 提交，零冲突
+- 至此已吸收 origin 全部提交（behind 0）
+
+## 2026-08-05 维护范围收敛为单源
+- 按要求删除 LTS 与 QCOM 维护内容，只保留 ACK 合并 + 本地定制 + github 提交记录
+- LTS 6.6.148 合并已 `git reset --hard 450f8996cf343` 撤销（SUBLEVEL 恢复 118）
+- QCOM 从未合并成功（codelinaro 网络不可达），无源码修改
+- 任务书更名为 `ACK维护任务书.md`（原三源任务书内容已删）

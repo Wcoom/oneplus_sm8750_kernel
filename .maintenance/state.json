@@ -5,19 +5,8 @@
       "remote": "https://android.googlesource.com/kernel/common",
       "branch": "android15-6.6",
       "last_merged": "742616e50d04",
-      "note": "2026-08-04，本地已吸收"
-    },
-    "lts": {
-      "remote": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
-      "branch": "linux-6.6.y",
-      "last_merged": "924b4a879cbb",
-      "note": "6.6.148 合并（aa0e49877a2e6）已于 2026-08-05 应要求撤销，回退至 6.6.118（924b4a879cbb）；备份分支 backup/lts-merged-6.6.148 保留"
-    },
-    "qcom": {
-      "remote": "https://git.codelinaro.org/clo/la/kernel/msm-6.6",
-      "branch": "SM8750 AU Tag",
-      "last_merged": null,
-      "note": "pending：codelinaro 网络持续不可达，未合并"
+      "last_merged_date": "2026-08-04",
+      "note": "第二轮官方源合并，已吸收"
     }
   },
   "last_maintenance": "2026-08-05",

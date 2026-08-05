@@ -19,7 +19,6 @@
 #include <linux/kernel.h>
 #include <linux/limits.h>
 #include <linux/math64.h>
-#include <linux/mm.h>
 #include <linux/cgroup.h>
 #include <linux/memcontrol.h>
 #include <linux/rcupdate.h>
@@ -5555,47 +5554,6 @@ out_unlock:
 	return err;
 }
 
-/*
- * Give a freshly added device an initial disksize of totalram / RATIO so the
- * device is usable as swap without waiting for userspace to write disksize.
- * Userspace can still reset the device and choose a different size.
- *
- * disksize_store() is reused verbatim instead of open-coding the setup: it
- * owns the meta/zcomp/sddc allocation order and its error unwinding, and a
- * second copy of that sequence would drift out of sync.  A failure here is
- * not fatal - the device stays uninitialised, exactly as if this option were
- * disabled, and userspace can still set disksize itself.
- */
-static void zram_set_default_disksize(struct zram *zram)
-{
-	unsigned int ratio = CONFIG_CRYSTAL_HYBRIDSWAP_DEF_DISKSIZE_RATIO;
-	char buf[32];
-	u64 disksize;
-	ssize_t ret;
-
-	if (!ratio)
-		return;
-
-	/* totalram_pages() is already populated by the time zram_add() runs
-	 * (late_initcall / module init, both well after mem_init). */
-	disksize = ((u64)totalram_pages() << PAGE_SHIFT) / ratio;
-	disksize &= ~(u64)(PAGE_SIZE - 1);
-	if (!disksize)
-		return;
-
-	scnprintf(buf, sizeof(buf), "%llu", disksize);
-	ret = disksize_store(disk_to_dev(zram->disk), NULL, buf, strlen(buf));
-	if (ret < 0) {
-		pr_warn("%s: failed to set default disksize %llu MB: %zd\n",
-			zram->disk->disk_name, disksize >> 20, ret);
-		return;
-	}
-
-	pr_info("%s: default disksize %llu MB (1:%u of %lu MB RAM)\n",
-		zram->disk->disk_name, disksize >> 20, ratio,
-		(totalram_pages() << PAGE_SHIFT) >> 20);
-}
-
 static ssize_t reset_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t len)
 {
@@ -5894,7 +5852,6 @@ static int zram_add(void)
 		goto out_del_disk;
 
 	zram_debugfs_register(zram);
-	zram_set_default_disksize(zram);
 	pr_info("Added device: %s\n", zram->disk->disk_name);
 	return device_id;
 

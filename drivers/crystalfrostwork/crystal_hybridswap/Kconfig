@@ -174,20 +174,3 @@ config CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP
 	  configuration, such as lzo, lzo-rle, lz4, lz4kd, or zstd.  The private
 	  LZ4KD backend is selected directly and all other algorithms continue to
 	  use the kernel Crypto API.
-
-config CRYSTAL_HYBRIDSWAP_DEF_DISKSIZE_RATIO
-	int "Default zram disksize as a fraction of RAM (0 to disable)"
-	depends on CRYSTAL_HYBRIDSWAP
-	range 0 8
-	default 2
-	help
-	  Size the private Crystal Hybridswap zram device at boot as
-	  totalram / N, so 2 means a 1:2 ratio (12 GB of zram on a 24 GB
-	  phone).  This only sets an initial disksize; userspace can still
-	  reset the device and pick another size later.  Set to 0 to keep the
-	  historical behaviour of leaving disksize unset until userspace
-	  writes /sys/block/zramX/disksize.
-
-	  Note the ratio is against physical RAM, not a promise of that much
-	  extra memory: zram stores pages compressed, so the backing cost is
-	  roughly disksize divided by the achieved compression ratio.

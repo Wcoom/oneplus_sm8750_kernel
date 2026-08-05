@@ -394,25 +394,6 @@ config SWAPPINESS
 	depends on SET_SWAPPINESS_IN_KERNEL
 	default 200
 
-config SET_WATERMARK_SCALE_FACTOR_IN_KERNEL
-	bool "Set default value for watermark_scale_factor in kernel"
-	help
-	  Set vm.watermark_scale_factor at boot instead of relying on
-	  userspace to write /proc/sys/vm/watermark_scale_factor later.
-	  Raising it makes kswapd start reclaiming earlier and keeps a
-	  larger free margin, which reduces direct reclaim stalls (a common
-	  source of jank) at the cost of a slightly smaller page cache.
-
-config WATERMARK_SCALE_FACTOR
-	int "Value for watermark_scale_factor"
-	depends on SET_WATERMARK_SCALE_FACTOR_IN_KERNEL
-	range 1 3000
-	default 100
-	help
-	  In units of 1/10000 of a zone's size. The kernel default is 10
-	  (0.1%). 100 means kswapd keeps roughly 1% of the zone free, which
-	  suits high-memory phones with an aggressive swap setup.
-
 config SYSVIPC
 	bool "System V IPC"
 	help

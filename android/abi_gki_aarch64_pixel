@@ -597,6 +597,7 @@
   disable_irq_nosync
   disable_percpu_irq
   dma_alloc_attrs
+  dma_alloc_noncontiguous
   dma_alloc_pages
   dma_async_device_register
   dma_async_device_unregister
@@ -648,6 +649,7 @@
   dma_fence_unwrap_next
   dma_fence_wait_timeout
   dma_free_attrs
+  dma_free_noncontiguous
   dma_free_pages
   dma_get_sgtable_attrs
   dma_get_slave_caps
@@ -667,6 +669,7 @@
   dma_map_sgtable
   dmam_free_coherent
   dma_mmap_attrs
+  dma_mmap_noncontiguous
   dmam_pool_create
   dma_pool_alloc
   dma_pool_destroy
@@ -685,6 +688,8 @@
   dma_unmap_page_attrs
   dma_unmap_resource
   dma_unmap_sg_attrs
+  dma_vmap_noncontiguous
+  dma_vunmap_noncontiguous
   do_SAK
   do_send_sig_info
   do_trace_netlink_extack
@@ -859,10 +864,12 @@
   drm_framebuffer_lookup
   drm_gem_create_mmap_offset
   drm_gem_dmabuf_export
+  drm_gem_dmabuf_mmap
   drm_gem_dmabuf_release
   drm_gem_fb_create_handle
   drm_gem_fb_destroy
   drm_gem_handle_create
+  drm_gem_map_dma_buf
   drm_gem_mmap
   drm_gem_object_free
   drm_gem_object_init
@@ -873,6 +880,7 @@
   drm_gem_prime_handle_to_fd
   drm_gem_prime_import_dev
   drm_gem_private_object_init
+  drm_gem_unmap_dma_buf
   drm_gem_vmap_unlocked
   drm_gem_vm_close
   drm_gem_vm_open
@@ -1130,6 +1138,7 @@
   get_user_pages
   get_user_pages_fast
   get_vaddr_frames
+  get_zeroed_page
   glob_match
   gov_attr_set_get
   gov_attr_set_init
@@ -2122,6 +2131,7 @@
   _raw_write_lock_bh
   _raw_write_lock_irq
   _raw_write_lock_irqsave
+  _raw_write_trylock
   _raw_write_unlock
   _raw_write_unlock_bh
   _raw_write_unlock_irq
@@ -2718,6 +2728,7 @@
   __traceiter_android_rvh_post_init_entity_util_avg
   __traceiter_android_rvh_preempt_disable
   __traceiter_android_rvh_preempt_enable
+  __traceiter_android_rvh_read_swap_cache_async_timeout
   __traceiter_android_rvh_reclaim_folio_list
   __traceiter_android_rvh_remove_entity_load_avg
   __traceiter_android_rvh_rtmutex_prepare_setprio
@@ -2759,6 +2770,7 @@
   __traceiter_android_vh_cpu_idle_enter
   __traceiter_android_vh_cpu_idle_exit
   __traceiter_android_vh_do_async_mmap_readahead
+  __traceiter_android_vh_do_sync_mmap_readahead
   __traceiter_android_vh_dump_throttled_rt_tasks
   __traceiter_android_vh_dup_task_struct
   __traceiter_android_vh_early_resume_begin
@@ -2772,6 +2784,7 @@
   __traceiter_android_vh_kvmalloc_node_use_vmalloc
   __traceiter_android_vh_mm_compaction_begin
   __traceiter_android_vh_mm_compaction_end
+  __traceiter_android_vh_mm_customize_longterm_pinnable
   __traceiter_android_vh_mm_kcompactd_cpu_online
   __traceiter_android_vh_post_alloc_hook
   __traceiter_android_vh_prio_inheritance
@@ -2873,6 +2886,7 @@
   __tracepoint_android_rvh_post_init_entity_util_avg
   __tracepoint_android_rvh_preempt_disable
   __tracepoint_android_rvh_preempt_enable
+  __tracepoint_android_rvh_read_swap_cache_async_timeout
   __tracepoint_android_rvh_reclaim_folio_list
   __tracepoint_android_rvh_remove_entity_load_avg
   __tracepoint_android_rvh_rtmutex_prepare_setprio
@@ -2914,6 +2928,7 @@
   __tracepoint_android_vh_cpu_idle_enter
   __tracepoint_android_vh_cpu_idle_exit
   __tracepoint_android_vh_do_async_mmap_readahead
+  __tracepoint_android_vh_do_sync_mmap_readahead
   __tracepoint_android_vh_dump_throttled_rt_tasks
   __tracepoint_android_vh_dup_task_struct
   __tracepoint_android_vh_early_resume_begin
@@ -2927,6 +2942,7 @@
   __tracepoint_android_vh_kvmalloc_node_use_vmalloc
   __tracepoint_android_vh_mm_compaction_begin
   __tracepoint_android_vh_mm_compaction_end
+  __tracepoint_android_vh_mm_customize_longterm_pinnable
   __tracepoint_android_vh_mm_kcompactd_cpu_online
   __tracepoint_android_vh_post_alloc_hook
   __tracepoint_android_vh_prio_inheritance
@@ -3061,6 +3077,7 @@
   ufshcd_hold
   ufshcd_init_pwr_dev_param
   ufshcd_mcq_poll_cqe_lock
+  ufshcd_mcq_poll_n_cqe_lock
   ufshcd_mcq_read_cqis
   ufshcd_mcq_write_cqis
   ufshcd_pltfrm_init
@@ -3238,6 +3255,7 @@
   vmf_insert_pfn
   vmf_insert_pfn_prot
   vm_get_page_prot
+  vm_insert_page
   vm_iomap_memory
   vm_map_ram
   vm_node_stat

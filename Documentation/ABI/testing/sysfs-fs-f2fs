@@ -922,4 +922,3 @@ Description:	It can be used to tune priority of f2fs critical task, e.g. f2fs_ck
 		threads, limitation as below:
 		- it requires user has CAP_SYS_NICE capability.
 		- the range is [100, 139], by default the value is 100.
-

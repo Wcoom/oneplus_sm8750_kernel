@@ -60,7 +60,6 @@ static ssize_t brightness_store(struct device *dev,
 	if (state == LED_OFF)
 		led_trigger_remove(led_cdev);
 	led_set_brightness(led_cdev, state);
-	flush_work(&led_cdev->set_brightness_work);
 
 	ret = size;
 unlock:
@@ -546,17 +545,17 @@ int led_classdev_register_ext(struct device *parent,
 #ifdef CONFIG_LEDS_BRIGHTNESS_HW_CHANGED
 	led_cdev->brightness_hw_changed = -1;
 #endif
-	/* add to the list of leds */
-	down_write(&leds_list_lock);
-	list_add_tail(&led_cdev->node, &leds_list);
-	up_write(&leds_list_lock);
-
 	if (!led_cdev->max_brightness)
 		led_cdev->max_brightness = LED_FULL;
 
 	led_update_brightness(led_cdev);
 
 	led_init_core(led_cdev);
+
+	/* add to the list of leds */
+	down_write(&leds_list_lock);
+	list_add_tail(&led_cdev->node, &leds_list);
+	up_write(&leds_list_lock);
 
 #ifdef CONFIG_LEDS_TRIGGERS
 	led_trigger_set_default(led_cdev);
@@ -674,12 +673,19 @@ EXPORT_SYMBOL_GPL(devm_led_classdev_unregister);
 
 static int __init leds_init(void)
 {
+	leds_wq = alloc_ordered_workqueue("leds", 0);
+	if (!leds_wq) {
+		pr_err("Failed to create LEDs ordered workqueue\n");
+		return -ENOMEM;
+	}
+
 	return class_register(&leds_class);
 }
 
 static void __exit leds_exit(void)
 {
 	class_unregister(&leds_class);
+	destroy_workqueue(leds_wq);
 }
 
 subsys_initcall(leds_init);

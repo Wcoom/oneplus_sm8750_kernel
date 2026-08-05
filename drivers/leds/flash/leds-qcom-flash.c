@@ -147,7 +147,6 @@ static const struct reg_field mvflash_4ch_regs[REG_MAX_COUNT] = {
 	[REG_THERM_THRSH1]	= REG_FIELD(0x7a, 0, 2),
 	[REG_THERM_THRSH2]	= REG_FIELD(0x78, 0, 2),
 	[REG_TORCH_CLAMP]	= REG_FIELD(0xed, 0, 6),
-
 };
 
 struct qcom_flash_data {

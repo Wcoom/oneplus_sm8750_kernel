@@ -293,9 +293,7 @@ EXPORT_SYMBOL_GPL(wakeup_sources_read_unlock);
  */
 struct wakeup_source *wakeup_sources_walk_start(void)
 {
-	struct list_head *ws_head = &wakeup_sources;
-
-	return list_entry_rcu(ws_head->next, struct wakeup_source, entry);
+	return list_first_or_null_rcu(&wakeup_sources, struct wakeup_source, entry);
 }
 EXPORT_SYMBOL_GPL(wakeup_sources_walk_start);
 
@@ -583,13 +581,6 @@ static void wakeup_source_activate(struct wakeup_source *ws)
 
 	/* Increment the counter of events in progress. */
 	cec = atomic_inc_return(&combined_event_count);
-	/*
-	 * wakeup_source_activate() aborts suspend only if events_check_enabled
-	 * is set (see pm_wakeup_pending()). Similarly, abort suspend during
-	 * fs_sync only if events_check_enabled is set.
-	 */
-	if (events_check_enabled)
-		suspend_abort_fs_sync();
 
 	trace_wakeup_source_activate(ws->name, cec);
 }
@@ -1016,10 +1007,8 @@ EXPORT_SYMBOL_GPL(pm_wakeup_pending);
 
 void pm_system_wakeup(void)
 {
-	if (atomic_inc_return_relaxed(&pm_abort_suspend) == 1) {
-		suspend_abort_fs_sync();
+	if (atomic_inc_return_relaxed(&pm_abort_suspend) == 1)
 		s2idle_wake();
-	}
 }
 EXPORT_SYMBOL_GPL(pm_system_wakeup);
 

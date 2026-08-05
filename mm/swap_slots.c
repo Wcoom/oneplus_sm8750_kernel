@@ -273,9 +273,13 @@ static int refill_swap_slots_cache(struct swap_slots_cache *cache)
 void free_swap_slot(swp_entry_t entry)
 {
 	struct swap_slots_cache *cache;
+	bool bypass = false;
 
 	cache = raw_cpu_ptr(&swp_slots);
 	trace_android_vh_alloc_swap_slot_cache(cache);
+	trace_android_rvh_alloc_swap_slot_cache(cache, &entry, &bypass);
+	if (bypass)
+		goto direct_free;
 	if (likely(use_swap_slot_cache && cache->slots_ret)) {
 		spin_lock_irq(&cache->free_lock);
 		/* Swap slots cache may be deactivated before acquiring lock */
@@ -308,11 +312,15 @@ swp_entry_t folio_alloc_swap(struct folio *folio, int *error)
 	unsigned int order = folio_order(folio);
 	long nr_swap_pages = get_nr_swap_pages();
 	int ret;
+	bool bypass = false;
 
 	entry.val = 0;
 	if (error)
 		*error = 0;
 
+	trace_android_vh_folio_alloc_swap_bypass(&entry, folio, &bypass);
+	if (bypass)
+		goto out;
 	if (folio_test_large(folio)) {
 		if (IS_ENABLED(CONFIG_THP_SWAP))
 			get_swap_pages(1, &entry, order);

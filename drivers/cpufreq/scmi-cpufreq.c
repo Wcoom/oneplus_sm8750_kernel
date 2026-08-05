@@ -364,7 +364,6 @@ static bool scmi_dev_used_by_cpus(struct device *scmi_dev)
 	if (of_machine_is_compatible("brcm,brcmstb"))
 		return true;
 
-
 	return false;
 }
 

@@ -3,6 +3,10 @@
   register_tracepoint_module_notifier
   cgroup_add_dfl_cftypes
 
+# required by tran mm
+  __tracepoint_android_vh_isolate_folio_type
+  __traceiter_android_vh_isolate_folio_type
+
 # required by tran block module
   __percpu_counter_init_many
   __percpu_counter_sum
@@ -93,3 +97,12 @@
   transport_remove_device
   transport_setup_device
 
+# required for failure diagnostics
+  __traceiter_android_vh_mmc_blk_reset
+  __traceiter_android_vh_mmc_attach_sd
+  __traceiter_android_vh_sdhci_get_cd
+  __traceiter_android_vh_mmc_gpio_cd_irqt
+  __tracepoint_android_vh_mmc_blk_reset
+  __tracepoint_android_vh_mmc_attach_sd
+  __tracepoint_android_vh_sdhci_get_cd
+  __tracepoint_android_vh_mmc_gpio_cd_irqt

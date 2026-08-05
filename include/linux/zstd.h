@@ -227,7 +227,6 @@ typedef ZSTD_cParameter zstd_cparameter;
  * Return:        Zero or an error, which can be checked using zstd_is_error().
  */
 size_t zstd_cctx_set_param(zstd_cctx *cctx, zstd_cparameter param, int value);
-
 /**
  * zstd_create_cctx_advanced() - Create compression context
  * @custom_mem:   Custom allocator.

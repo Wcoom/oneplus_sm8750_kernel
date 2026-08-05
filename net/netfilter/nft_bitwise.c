@@ -149,7 +149,8 @@ static int nft_bitwise_init_shift(struct nft_bitwise *priv,
 	if (err < 0)
 		return err;
 
-	if (priv->data.data[0] >= BITS_PER_TYPE(u32)) {
+	if (!priv->data.data[0] ||
+	    priv->data.data[0] >= BITS_PER_TYPE(u32)) {
 		nft_data_release(&priv->data, desc.type);
 		return -EINVAL;
 	}
@@ -171,7 +172,7 @@ static int nft_bitwise_init(const struct nft_ctx *ctx,
 
 	priv->len = len;
 
-	err = nft_parse_register_load(tb[NFTA_BITWISE_SREG], &priv->sreg,
+	err = nft_parse_register_load(ctx, tb[NFTA_BITWISE_SREG], &priv->sreg,
 				      priv->len);
 	if (err < 0)
 		return err;
@@ -365,7 +366,7 @@ static int nft_bitwise_fast_init(const struct nft_ctx *ctx,
 	struct nft_bitwise_fast_expr *priv = nft_expr_priv(expr);
 	int err;
 
-	err = nft_parse_register_load(tb[NFTA_BITWISE_SREG], &priv->sreg,
+	err = nft_parse_register_load(ctx, tb[NFTA_BITWISE_SREG], &priv->sreg,
 				      sizeof(u32));
 	if (err < 0)
 		return err;

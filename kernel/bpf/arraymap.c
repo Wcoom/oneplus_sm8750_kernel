@@ -8,6 +8,7 @@
 #include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/filter.h>
+#include <linux/page_size_compat_defs.h>
 #include <linux/perf_event.h>
 #include <uapi/linux/btf.h>
 #include <linux/rcupdate_trace.h>
@@ -121,7 +122,7 @@ static struct bpf_map *array_map_alloc(union bpf_attr *attr)
 		 */
 		if (attr->map_flags & BPF_F_MMAPABLE) {
 			array_size = PAGE_ALIGN(array_size);
-			array_size += PAGE_ALIGN((u64) max_entries * elem_size);
+			array_size += __PAGE_ALIGN((u64) max_entries * elem_size);
 		} else {
 			array_size += (u64) max_entries * elem_size;
 		}
@@ -529,7 +530,7 @@ static int array_map_mmap(struct bpf_map *map, struct vm_area_struct *vma)
 		return -EINVAL;
 
 	if (vma->vm_pgoff * PAGE_SIZE + (vma->vm_end - vma->vm_start) >
-	    PAGE_ALIGN((u64)array->map.max_entries * array->elem_size))
+	    __PAGE_ALIGN((u64)array->map.max_entries * array->elem_size))
 		return -EINVAL;
 
 	return remap_vmalloc_range(vma, array_map_vmalloc_addr(array),
@@ -738,7 +739,7 @@ static u64 array_map_mem_usage(const struct bpf_map *map)
 	} else {
 		if (map->map_flags & BPF_F_MMAPABLE) {
 			usage = PAGE_ALIGN(usage);
-			usage += PAGE_ALIGN(entries * elem_size);
+			usage += __PAGE_ALIGN(entries * elem_size);
 		} else {
 			usage += entries * elem_size;
 		}
@@ -938,8 +939,10 @@ static void bpf_fd_array_map_clear(struct bpf_map *map, bool need_defer)
 	struct bpf_array *array = container_of(map, struct bpf_array, map);
 	int i;
 
-	for (i = 0; i < array->map.max_entries; i++)
+	for (i = 0; i < array->map.max_entries; i++) {
 		__fd_array_map_delete_elem(map, &i, need_defer);
+		cond_resched();
+	}
 }
 
 static void prog_array_map_seq_show_elem(struct bpf_map *map, void *key,

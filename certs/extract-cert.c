@@ -109,7 +109,7 @@ int main(int argc, char **argv)
 	if (verbose_env && strchr(verbose_env, '1'))
 		verbose = true;
 
-        key_pass = getenv("KBUILD_SIGN_PIN");
+	key_pass = getenv("KBUILD_SIGN_PIN");
 
 	if (argc != 3)
 		format();

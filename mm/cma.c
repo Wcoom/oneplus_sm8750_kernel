@@ -46,7 +46,8 @@
 
 struct cma cma_areas[MAX_CMA_AREAS];
 unsigned cma_area_count;
-static DEFINE_MUTEX(cma_mutex);
+DEFINE_MUTEX(cma_mutex);
+EXPORT_SYMBOL_GPL(cma_mutex);
 
 phys_addr_t cma_get_base(const struct cma *cma)
 {
@@ -470,6 +471,8 @@ struct page *__cma_alloc(struct cma *cma, unsigned long count,
 	int ret = -ENOMEM;
 	int num_attempts = 0;
 	int max_retries = 5;
+	bool bypass = false;
+	u64 stime = 0;
 
 	if (WARN_ON_ONCE((gfp_mask & GFP_KERNEL) == 0 ||
 		(gfp_mask & ~(GFP_KERNEL|__GFP_NOWARN|__GFP_NORETRY)) != 0))
@@ -477,6 +480,11 @@ struct page *__cma_alloc(struct cma *cma, unsigned long count,
 
 	if (!cma || !cma->count || !cma->bitmap)
 		goto out;
+
+	trace_android_vh_cma_alloc_bypass(cma, count, align, gfp_mask,
+				&page, &bypass);
+	if (bypass)
+		return page;
 
 	pr_debug("%s(cma %p, name: %s, count %lu, align %d)\n", __func__,
 		(void *)cma, cma->name, count, align);
@@ -496,6 +504,7 @@ struct page *__cma_alloc(struct cma *cma, unsigned long count,
 
 	trace_cma_alloc_start(cma->name, count, align);
 	trace_android_vh_cma_alloc_retry(cma->name, &max_retries);
+	trace_android_vh_cma_alloc_lat_start(&stime);
 	for (;;) {
 		spin_lock_irq(&cma->lock);
 		bitmap_no = bitmap_find_next_zero_area_off(cma->bitmap,
@@ -557,6 +566,7 @@ struct page *__cma_alloc(struct cma *cma, unsigned long count,
 	}
 
 	trace_cma_alloc_finish(cma->name, pfn, page, count, align, ret);
+	trace_android_vh_cma_alloc_end(cma, pfn, page, count, align, ret);
 
 	/*
 	 * CMA can allocate multiple page blocks, which results in different
@@ -576,6 +586,7 @@ struct page *__cma_alloc(struct cma *cma, unsigned long count,
 
 	pr_debug("%s(): returned %p\n", __func__, page);
 out:
+	trace_android_vh_cma_alloc_lat_end(stime, count);
 	if (page) {
 		count_vm_event(CMA_ALLOC_SUCCESS);
 		cma_sysfs_account_success_pages(cma, count);
@@ -640,6 +651,7 @@ bool cma_release(struct cma *cma, const struct page *pages,
 		 unsigned long count)
 {
 	unsigned long pfn;
+	bool bypass = false;
 
 	if (!cma_pages_valid(cma, pages, count))
 		return false;
@@ -649,6 +661,10 @@ bool cma_release(struct cma *cma, const struct page *pages,
 	pfn = page_to_pfn(pages);
 
 	VM_BUG_ON(pfn + count > cma->base_pfn + cma->count);
+
+	trace_android_vh_cma_release_bypass(cma, pages, count, &bypass);
+	if (bypass)
+		return true;
 
 	free_contig_range(pfn, count);
 	cma_clear_bitmap(cma, pfn, count);

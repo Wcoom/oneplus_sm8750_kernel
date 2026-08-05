@@ -310,6 +310,25 @@ void unix_destroy_fpl(struct scm_fp_list *fpl)
 	unix_free_vertices(fpl);
 }
 
+static bool gc_in_progress;
+static seqcount_t unix_peek_seq = SEQCNT_ZERO(unix_peek_seq);
+
+void unix_peek_fpl(struct scm_fp_list *fpl)
+{
+	static DEFINE_SPINLOCK(unix_peek_lock);
+
+	if (!fpl || !fpl->count_unix)
+		return;
+
+	if (!READ_ONCE(gc_in_progress))
+		return;
+
+	/* Invalidate the final refcnt check in unix_vertex_dead(). */
+	spin_lock(&unix_peek_lock);
+	raw_write_seqcount_barrier(&unix_peek_seq);
+	spin_unlock(&unix_peek_lock);
+}
+
 static bool unix_vertex_dead(struct unix_vertex *vertex)
 {
 	struct unix_edge *edge;
@@ -342,6 +361,9 @@ static bool unix_vertex_dead(struct unix_vertex *vertex)
 
 	return true;
 }
+
+static LIST_HEAD(unix_visited_vertices);
+static unsigned long unix_vertex_grouped_index = UNIX_VERTEX_INDEX_MARK2;
 
 static void unix_collect_skb(struct list_head *scc, struct sk_buff_head *hitlist)
 {
@@ -395,9 +417,6 @@ static bool unix_scc_cyclic(struct list_head *scc)
 
 	return false;
 }
-
-static LIST_HEAD(unix_visited_vertices);
-static unsigned long unix_vertex_grouped_index = UNIX_VERTEX_INDEX_MARK2;
 
 static unsigned long __unix_walk_scc(struct unix_vertex *vertex,
 				     unsigned long *last_index,
@@ -568,8 +587,6 @@ static void unix_walk_scc_fast(struct sk_buff_head *hitlist)
 	WRITE_ONCE(unix_graph_state,
 		   cyclic_sccs ? UNIX_GRAPH_CYCLIC : UNIX_GRAPH_NOT_CYCLIC);
 }
-
-static bool gc_in_progress;
 
 static void unix_gc(struct work_struct *work)
 {

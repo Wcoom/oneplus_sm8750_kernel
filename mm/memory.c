@@ -204,6 +204,8 @@ static int __init init_zero_pfn(void)
 }
 early_initcall(init_zero_pfn);
 
+EXPORT_TRACEPOINT_SYMBOL_GPL(rss_stat);
+
 void mm_trace_rss_stat(struct mm_struct *mm, int member)
 {
 	trace_rss_stat(mm, member);
@@ -4238,6 +4240,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	unsigned long page_idx;
 	unsigned long address;
 	pte_t *ptep;
+	bool bypass = false;
 
 	if (!pte_unmap_same(vmf))
 		goto out;
@@ -4324,11 +4327,15 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 					 * Relax a bit to prevent rapid
 					 * repeated page faults.
 					 */
+					trace_android_rvh_do_swap_page_relax(entry, &bypass);
+					if (bypass)
+						goto out_page;
 					add_wait_queue(&swapcache_wq, &wait);
 					schedule_timeout_uninterruptible(1);
 					remove_wait_queue(&swapcache_wq, &wait);
 					goto out_page;
 				}
+				trace_android_rvh_do_swap_page_start(entry);
 				need_clear_cache = true;
 
 				mem_cgroup_swapin_uncharge_swap(entry, nr_pages);
@@ -4640,6 +4647,7 @@ out:
 		swapcache_clear(si, entry, nr_pages);
 		if (waitqueue_active(&swapcache_wq))
 			wake_up(&swapcache_wq);
+		trace_android_vh_do_swap_page_done(entry);
 	}
 	if (si)
 		put_swap_device(si);
@@ -4659,6 +4667,7 @@ out_release:
 		swapcache_clear(si, entry, nr_pages);
 		if (waitqueue_active(&swapcache_wq))
 			wake_up(&swapcache_wq);
+		trace_android_vh_do_swap_page_done(entry);
 	}
 	if (si)
 		put_swap_device(si);
@@ -5246,8 +5255,18 @@ static vm_fault_t do_fault_around(struct vm_fault *vmf)
 	pgoff_t pte_off = pte_index(vmf->address);
 	/* The page offset of vmf->address within the VMA. */
 	pgoff_t vma_off = vmf->pgoff - vmf->vma->vm_pgoff;
+	pgoff_t nr_data_pages = vma_data_pages(vmf->vma);
 	pgoff_t from_pte, to_pte;
 	vm_fault_t ret;
+
+	/*
+	 * Fault occurred in the padding region. There are no file-cache pages
+	 * to map in this region, so skip fault-around.
+	 */
+	if (vma_off >= nr_data_pages)
+		return 0;
+
+	trace_android_vh_do_fault_around(vmf, &nr_pages);
 
 	/* The PTE offset of the start address, clamped to the VMA. */
 	from_pte = max(ALIGN_DOWN(pte_off, nr_pages),
@@ -5255,7 +5274,7 @@ static vm_fault_t do_fault_around(struct vm_fault *vmf)
 
 	/* The PTE offset of the end address, clamped to the VMA and PTE. */
 	to_pte = min3(from_pte + nr_pages, (pgoff_t)PTRS_PER_PTE,
-		      pte_off + vma_data_pages(vmf->vma) - vma_off) - 1;
+		      pte_off + nr_data_pages - vma_off) - 1;
 
 	if (pmd_none(*vmf->pmd)) {
 		vmf->prealloc_pte = pte_alloc_one(vmf->vma->vm_mm);
@@ -6204,6 +6223,95 @@ inval:
 	rcu_read_unlock();
 	count_vm_vma_lock_event(VMA_LOCK_ABORT);
 	return NULL;
+}
+
+static struct vm_area_struct *lock_next_vma_under_mmap_lock(struct mm_struct *mm,
+							    struct vma_iterator *vmi,
+							    unsigned long from_addr)
+{
+	struct vm_area_struct *vma;
+	int ret;
+
+	ret = mmap_read_lock_killable(mm);
+	if (ret)
+		return ERR_PTR(ret);
+
+	/* Lookup the vma at the last position again under mmap_read_lock */
+	vma_iter_set(vmi, from_addr);
+	vma = vma_next(vmi);
+	if (vma)
+		vma_start_read_locked(vma);
+
+	mmap_read_unlock(mm);
+
+	return vma;
+}
+
+struct vm_area_struct *lock_next_vma(struct mm_struct *mm,
+				     struct vma_iterator *vmi,
+				     unsigned long from_addr)
+{
+	struct vm_area_struct *vma;
+	unsigned int mm_wr_seq;
+	bool mmap_unlocked;
+
+	RCU_LOCKDEP_WARN(!rcu_read_lock_held(), "no rcu read lock held");
+retry:
+	/* Start mmap_lock speculation in case we need to verify the vma later */
+	mmap_unlocked = mmap_lock_speculate_try_begin(mm, &mm_wr_seq);
+	vma = vma_next(vmi);
+	if (!vma)
+		return NULL;
+
+	if (!vma_start_read(vma))
+		goto fallback;
+
+	/*
+	 * Verify the vma we locked belongs to the same address space and it's
+	 * not behind of the last search position.
+	 */
+	if (unlikely(vma->vm_mm != mm || from_addr >= vma->vm_end))
+		goto fallback_unlock;
+
+	/*
+	 * Retry immediately if the vma gets detached from under us.
+	 * Infinite loop should not happen because the vma we find will
+	 * have to be constantly knocked out from under us.
+	 */
+	if (vma->detached) {
+		vma_end_read(vma);
+		/* reset to search from the last address */
+		vma_iter_set(vmi, from_addr);
+		goto retry;
+	}
+
+	/*
+	 * vma can be ahead of the last search position but we need to verify
+	 * it was not shrunk after we found it and another vma has not been
+	 * installed ahead of it. Otherwise we might observe a gap that should
+	 * not be there.
+	 */
+	if (from_addr < vma->vm_start) {
+		/* Verify only if the address space might have changed since vma lookup. */
+		if (!mmap_unlocked || mmap_lock_speculate_retry(mm, mm_wr_seq)) {
+			vma_iter_set(vmi, from_addr);
+			if (vma != vma_next(vmi))
+				goto fallback_unlock;
+		}
+	}
+
+	return vma;
+
+fallback_unlock:
+	vma_end_read(vma);
+fallback:
+	rcu_read_unlock();
+	vma = lock_next_vma_under_mmap_lock(mm, vmi, from_addr);
+	rcu_read_lock();
+	/* Reinitialize the iterator after re-entering rcu read section */
+	vma_iter_set(vmi, IS_ERR_OR_NULL(vma) ? from_addr : vma->vm_end);
+
+	return vma;
 }
 #endif /* CONFIG_PER_VMA_LOCK */
 

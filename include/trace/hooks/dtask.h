@@ -119,6 +119,9 @@ DECLARE_HOOK(android_vh_percpu_rwsem_up_write,
 DECLARE_RESTRICTED_HOOK(android_rvh_percpu_rwsem_wait_complete,
 	TP_PROTO(struct percpu_rw_semaphore *sem, long state, bool *complete),
 	TP_ARGS(sem, state, complete), 1);
+DECLARE_HOOK(android_vh_percpu_rwsem_init,
+	TP_PROTO(struct percpu_rw_semaphore *sem),
+	TP_ARGS(sem));
 
 struct mutex_waiter;
 DECLARE_HOOK(android_vh_alter_mutex_list_add,
@@ -166,6 +169,9 @@ DECLARE_HOOK(android_vh_record_rwsem_lock_starttime,
 	TP_PROTO(struct rw_semaphore *sem, unsigned long settime_jiffies),
 	TP_ARGS(sem, settime_jiffies));
 DECLARE_HOOK(android_vh_record_pcpu_rwsem_starttime,
+	TP_PROTO(struct percpu_rw_semaphore *sem, unsigned long settime_jiffies),
+	TP_ARGS(sem, settime_jiffies));
+DECLARE_HOOK(android_vh_record_pcpu_rwsem_rdheld_starttime,
 	TP_PROTO(struct percpu_rw_semaphore *sem, unsigned long settime_jiffies),
 	TP_ARGS(sem, settime_jiffies));
 

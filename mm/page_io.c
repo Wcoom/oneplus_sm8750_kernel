@@ -538,21 +538,26 @@ void __swap_writepage(struct page *page, struct writeback_control *wbc)
 {
 	struct swap_info_struct *sis = page_swap_info(page);
 	unsigned long sis_flags = 0;
+	unsigned long swap_writepage_start;
 
 	VM_BUG_ON_PAGE(!PageSwapCache(page), page);
+	trace_android_vh_swap_writepage_start(&swap_writepage_start);
 	/*
 	 * ->flags can be updated non-atomicially (scan_swap_map_slots),
-	 * but that will never affect SWP_FS_OPS, so the data_race
+	 * but that will never affect __SWP_WRITE_SYNCHRONOUS_IO, so the data_race
 	 * is safe.
 	 */
 	sis_flags = data_race(sis->flags);
 	trace_android_vh_swap_writepage(&sis_flags, page);
 	if (sis_flags & SWP_FS_OPS)
 		swap_writepage_fs(page, wbc);
-	else if (sis_flags & SWP_SYNCHRONOUS_IO)
+	else if (sis_flags & __SWP_WRITE_SYNCHRONOUS_IO)
 		swap_writepage_bdev_sync(page, wbc, sis);
 	else
 		swap_writepage_bdev_async(page, wbc, sis);
+
+	trace_android_vh_swap_writepage_end(page, wbc,
+		swap_writepage_start);
 }
 
 void swap_write_unplug(struct swap_iocb *sio)
@@ -689,10 +694,12 @@ void swap_readpage(struct page *page, bool synchronous, struct swap_iocb **plug)
 	bool workingset = folio_test_workingset(folio);
 	unsigned long pflags;
 	bool in_thrashing;
+	unsigned long swapin_start;
 
 	VM_BUG_ON_FOLIO(!folio_test_swapcache(folio) && !synchronous, folio);
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	VM_BUG_ON_FOLIO(folio_test_uptodate(folio), folio);
+	trace_android_vh_swapin_start(&swapin_start);
 
 	/*
 	 * Count submission time as memory stall and delay. When the device
@@ -721,6 +728,7 @@ void swap_readpage(struct page *page, bool synchronous, struct swap_iocb **plug)
 		psi_memstall_leave(&pflags);
 	}
 	delayacct_swapin_end();
+	trace_android_vh_swapin_end(folio, swapin_start);
 }
 
 void __swap_read_unplug(struct swap_iocb *sio)

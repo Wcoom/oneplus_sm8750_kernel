@@ -361,7 +361,11 @@ unsigned long nr_free_highatomic[MAX_NR_ZONES] = {0};
 int min_free_kbytes = 1024;
 int user_min_free_kbytes = -1;
 static int watermark_boost_factor __read_mostly;
+#ifdef CONFIG_SET_WATERMARK_SCALE_FACTOR_IN_KERNEL
+static int watermark_scale_factor = CONFIG_WATERMARK_SCALE_FACTOR;
+#else
 static int watermark_scale_factor = 10;
+#endif
 
 /* virt_zone is the "real" zone pages in virtual zones are taken from */
 int virt_zone;

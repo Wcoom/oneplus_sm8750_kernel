@@ -20,8 +20,20 @@
  *     且当前 root qdisc 不是 fq(root 为 mq 时若所有子队列均为 fq 则视为
  *     已满足要求而跳过),则新建 fq qdisc 并按内核标准流程(与 sch_api.c
  *     qdisc_graft() 的 root 分支一致)替换;
- *  4) work 结束后若 enable && period_ms > 0 则自循环重排,周期守护以
- *     对抗 netd 的反复重配。
+ *  4) 低功耗策略:默认**不做无限周期轮询**。仅在"检测到被覆盖并成功改回"
+ *     后启动有限次数的复查(retry_burst),用于对抗 netd 在接口 up 后短时间
+ *     内的反复重配;连续复查发现已是 fq 即停止,回到纯事件驱动的零开销
+ *     状态。netd 之后若再次覆盖,会伴随 NETDEV_CHANGE 事件重新触发。
+ *
+ * 低功耗/低 CPU 设计要点:
+ *  - 无常驻线程、无定时器常开:空闲时 workqueue 无 work 排队,零唤醒;
+ *  - 用 system_power_efficient_wq 替代自建 workqueue,允许调度器把 work
+ *    放到非 idle 的 CPU 上执行(WQ_POWER_EFFICIENT),减少无谓唤醒小核;
+ *  - 快速路径(已是 fq)在 rtnl_lock 内只做字符串比较,不做任何分配;
+ *  - notifier 中过滤顺序按代价递增:enable -> 事件类型 -> 黑名单 ->
+ *    白名单,尽早 return,避免对无关接口(如 lo/dummy)做无用功;
+ *  - 同一接口重复事件做去抖:已有 pending work 时不重排,避免事件风暴
+ *    (NETDEV_CHANGE 在链路抖动时可能高频触发)导致 work 频繁执行。
  *
  * 6.6 API 核对结论(全部对照本树源码):
  *  - qdisc_create(): net/sched/sch_api.c:1215 为 static。本补丁对
@@ -51,7 +63,9 @@
  *
  * 参数(built-in 下):
  *  - 内核启动 cmdline:fq_guard.enable=0
- *  - 运行时:/sys/module/fq_guard/parameters/{enable,delay_ms,period_ms,blacklist}
+ *  - 运行时:/sys/module/fq_guard/parameters/
+ *      {enable,delay_ms,recheck_ms,retry_burst,blacklist}
+ *    recheck_ms=0 或 retry_burst=0 即完全关闭复查,退化为纯事件驱动。
  */
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -86,9 +100,16 @@ static int delay_ms = 3000;
 module_param(delay_ms, int, 0644);
 MODULE_PARM_DESC(delay_ms, "delay before forcing fq after iface event (ms, default 3000)");
 
-static int period_ms = 15000;
-module_param(period_ms, int, 0644);
-MODULE_PARM_DESC(period_ms, "periodic guard interval (ms, default 15000, 0 to disable)");
+/* 复查间隔:仅在刚刚强制改回 fq 后使用,不是常开轮询。 */
+static int recheck_ms = 5000;
+module_param(recheck_ms, int, 0644);
+MODULE_PARM_DESC(recheck_ms, "recheck interval after a forced change (ms, default 5000, 0 to disable)");
+
+/* 复查次数上限:连续 retry_burst 次复查都发现已是 fq 就彻底停下,
+ * 回到纯事件驱动。防止无限轮询带来的周期性唤醒与 CPU 占用。 */
+static int retry_burst = 3;
+module_param(retry_burst, int, 0644);
+MODULE_PARM_DESC(retry_burst, "max rechecks after a forced change (default 3)");
 
 static char *blacklist = "rmnet_ims,";
 module_param(blacklist, charp, 0644);
@@ -107,10 +128,10 @@ static const char * const whitelist[] = {
 struct fqg_ctx {
 	struct net *net;		/* dev_net() 快照(已 get_net) */
 	char ifname[IFNAMSIZ];
+	int rechecks_left;		/* 剩余复查次数,0 表示不再自排 */
 	struct delayed_work dwork;
 };
 
-static struct workqueue_struct *fqg_wq;
 static struct fqg_ctx fqg_ctxs[FQG_MAX_CTX];
 static struct notifier_block fqg_notifier;
 
@@ -149,7 +170,8 @@ static bool fqg_whitelist_match(const char *name)
 }
 
 /* 查找已存在的 ctx,否则分配一个(静态数组,无内存管理)。
- * notifier 与 work 均在 rtnl_lock() 内执行,天然互斥,无需额外锁。 */
+ * notifier 与 work 均在 rtnl_lock() 内执行,天然互斥,无需额外锁。
+ * 返回的新 ctx 其 ifname 为空,由调用方负责 get_net + strscpy 填充。 */
 static struct fqg_ctx *fqg_ctx_find_or_alloc(struct net_device *dev)
 {
 	struct fqg_ctx *ctx;
@@ -164,8 +186,8 @@ static struct fqg_ctx *fqg_ctx_find_or_alloc(struct net_device *dev)
 	for (i = 0; i < FQG_MAX_CTX; i++) {
 		ctx = &fqg_ctxs[i];
 		if (!ctx->ifname[0]) {
-			memset(ctx, 0, sizeof(*ctx));
-			INIT_DELAYED_WORK(&ctx->dwork, fqg_work);
+			ctx->net = NULL;
+			ctx->rechecks_left = 0;
 			return ctx;
 		}
 	}
@@ -195,8 +217,10 @@ static int fqg_device_event(struct notifier_block *nb, unsigned long event,
 			ctx = &fqg_ctxs[i];
 			if (ctx->ifname[0] && !strcmp(ctx->ifname, dev->name)) {
 				ctx->ifname[0] = '\0';
+				ctx->rechecks_left = 0;
 				cancel_delayed_work(&ctx->dwork);
 				put_net(ctx->net);
+				ctx->net = NULL;
 				break;
 			}
 		}
@@ -216,10 +240,23 @@ static int fqg_device_event(struct notifier_block *nb, unsigned long event,
 	if (!ctx)
 		return NOTIFY_DONE;
 
-	ctx->net = get_net(dev_net(dev));
-	strscpy(ctx->ifname, dev->name, IFNAMSIZ);
+	/* net 引用只在首次分配时获取一次。复用已有 ctx 时不能再 get_net(),
+	 * 否则每来一个事件泄漏一个 net 引用(NETDEV_CHANGE 在链路抖动时高频
+	 * 触发,泄漏会累积到 net namespace 无法销毁)。 */
+	if (!ctx->ifname[0]) {
+		ctx->net = get_net(dev_net(dev));
+		strscpy(ctx->ifname, dev->name, IFNAMSIZ);
+	}
 
-	queue_delayed_work(fqg_wq, &ctx->dwork,
+	/* 事件去抖:已有 pending work 时不重排,避免事件风暴导致 work 频繁
+	 * 执行(每次执行都要拿 rtnl_lock,是全局锁,代价不低)。 */
+	if (delayed_work_pending(&ctx->dwork))
+		return NOTIFY_DONE;
+
+	/* 新一轮事件重置复查预算 */
+	ctx->rechecks_left = retry_burst;
+
+	queue_delayed_work(system_power_efficient_wq, &ctx->dwork,
 			   msecs_to_jiffies(delay_ms));
 	return NOTIFY_DONE;
 }
@@ -231,6 +268,7 @@ static void fqg_work(struct work_struct *work)
 	struct net_device *dev;
 	struct Qdisc *root, *old;
 	unsigned int i;
+	bool changed = false;
 	int err;
 
 	rtnl_lock();
@@ -244,10 +282,11 @@ static void fqg_work(struct work_struct *work)
 	if (!netif_running(dev))
 		goto out_put;
 
-	/* 1) root qdisc 已是 fq:跳过 */
+	/* 1) root qdisc 已是 fq:跳过(快速路径,只做字符串比较) */
 	root = rtnl_dereference(dev->qdisc);
 	if (root && !strcmp(root->ops->id, "fq"))
 		goto out_put;
+
 
 	/* 2) root 为 mq 时:子队列全为 fq 即视为已满足(保留 mq 多队列) */
 	if (root && !strcmp(root->ops->id, "mq")) {
@@ -321,6 +360,7 @@ static void fqg_work(struct work_struct *work)
 
 		dev_activate(dev);
 
+		changed = true;
 		netdev_info(dev, "fq_guard: root qdisc forced to fq (%u tx queues)\n",
 			    dev->num_tx_queues);
 	}
@@ -330,22 +370,38 @@ out_put:
 out_unlock:
 	rtnl_unlock();
 
-	/* 5) 周期自循环守护(防 netd 反复重配) */
-	if (enable && period_ms > 0)
-		queue_delayed_work(fqg_wq, &ctx->dwork,
-				   msecs_to_jiffies(period_ms));
+	/* 5) 有限复查(低功耗):只有刚刚强制改回 fq 才值得复查——说明 netd
+	 *    正在争抢,短期内可能再次覆盖。若本次发现已是 fq(changed==false)
+	 *    则递减预算,连续几次都没被改动就彻底停下,不再排任何 work。
+	 *    此后回到纯事件驱动:netd 若再覆盖,会伴随 NETDEV_CHANGE 重新触发。 */
+	if (!enable || recheck_ms <= 0)
+		return;
+
+	if (changed)
+		ctx->rechecks_left = retry_burst;	/* 被覆盖过,重置预算 */
+	else if (ctx->rechecks_left > 0)
+		ctx->rechecks_left--;
+
+	if (ctx->rechecks_left > 0 && ctx->ifname[0])
+		queue_delayed_work(system_power_efficient_wq, &ctx->dwork,
+				   msecs_to_jiffies(recheck_ms));
 }
 
 static int __init fqg_init(void)
 {
-	fqg_wq = create_singlethread_workqueue("fq_guard");
-	if (!fqg_wq)
-		return -ENOMEM;
+	unsigned int i;
 
+	/* delayed_work 一次性初始化:槽位在 UNREGISTER 后会被复用,
+	 * 若每次复用都重新 INIT 会破坏 timer/work 的内部状态。 */
+	for (i = 0; i < FQG_MAX_CTX; i++)
+		INIT_DELAYED_WORK(&fqg_ctxs[i].dwork, fqg_work);
+
+	/* 不自建 workqueue:复用 system_power_efficient_wq。该队列带
+	 * WQ_POWER_EFFICIENT 标记,在 workqueue.power_efficient=y 时允许调度器
+	 * 把 work 派发到已唤醒的 CPU,避免为一次轻量检查唤醒空闲小核。
+	 * 同时省下一个常驻 kworker 线程。 */
 	fqg_notifier.notifier_call = fqg_device_event;
-	register_netdevice_notifier(&fqg_notifier);
-
-	return 0;
+	return register_netdevice_notifier(&fqg_notifier);
 }
 
 static void __exit fqg_exit(void)
@@ -360,13 +416,12 @@ static void __exit fqg_exit(void)
 
 		if (!ctx->ifname[0])
 			continue;
+		ctx->ifname[0] = '\0';
+		ctx->rechecks_left = 0;
 		cancel_delayed_work_sync(&ctx->dwork);
 		put_net(ctx->net);
-		ctx->ifname[0] = '\0';
+		ctx->net = NULL;
 	}
-
-	flush_workqueue(fqg_wq);
-	destroy_workqueue(fqg_wq);
 }
 
 module_init(fqg_init);

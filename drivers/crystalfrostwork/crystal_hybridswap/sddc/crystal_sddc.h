@@ -18,6 +18,16 @@ enum crystal_sddc_kind {
 	CRYSTAL_SDDC_DELTA,
 };
 
+enum crystal_sddc_release_reason {
+	CRYSTAL_SDDC_RELEASE_OTHER,
+	CRYSTAL_SDDC_RELEASE_WRITEBACK,
+	CRYSTAL_SDDC_RELEASE_REWRITE,
+	CRYSTAL_SDDC_RELEASE_RECOMPRESS,
+	CRYSTAL_SDDC_RELEASE_DISCARD,
+	CRYSTAL_SDDC_RELEASE_NOTIFY_FREE,
+	CRYSTAL_SDDC_RELEASE_RESET,
+};
+
 struct crystal_sddc_cookie {
 	u32 id;
 	u32 generation;
@@ -47,6 +57,21 @@ struct crystal_sddc_wb_capture {
 	u8 kind;
 };
 
+/*
+ * A native ZMS writeback read pins the resident reference while zram drops
+ * the slot lock for backend IO.  The fields stay opaque to zram except for
+ * zero-initialisation and hand-off back into crystal_sddc.
+ */
+struct crystal_sddc_wb_ref {
+	void *private;
+	void *manager;
+	struct crystal_sddc_cookie ref;
+	u32 ref_size;
+	u32 target_size;
+	u32 wire_size;
+	u8 kind;
+};
+
 struct crystal_sddc_job_key {
 	u64 mutation_seq;
 	unsigned long handle;
@@ -69,6 +94,8 @@ struct crystal_sddc_stats_snapshot {
 	u64 ref_bytes;
 	u64 wb_deltas;
 	u64 wb_delta_bytes;
+	u64 wb_aliases;
+	u64 wb_alias_bytes;
 	u64 aliases;
 	u64 deltas;
 	u64 delta_bytes;
@@ -82,6 +109,16 @@ struct crystal_sddc_stats_snapshot {
 	u64 delta_match_bytes_max;
 	u64 saved_bytes;
 	u64 saved_bytes_total;
+	u64 released_aliases;
+	u64 released_deltas;
+	u64 released_saved_bytes;
+	u64 released_writeback_saved_bytes;
+	u64 released_rewrite_saved_bytes;
+	u64 released_recompress_saved_bytes;
+	u64 released_discard_saved_bytes;
+	u64 released_notify_free_saved_bytes;
+	u64 released_reset_saved_bytes;
+	u64 released_other_saved_bytes;
 	u64 conversion_failures;
 	u64 decode_failures;
 	u64 flatten_failures;
@@ -97,7 +134,7 @@ void crystal_sddc_stop(struct zram *zram);
 void crystal_sddc_destroy(struct zram *zram);
 
 enum crystal_sddc_kind crystal_sddc_slot_free_locked(struct zram *zram,
-		u32 index);
+		u32 index, enum crystal_sddc_release_reason reason);
 void crystal_sddc_slot_stored_locked(struct zram *zram, u32 index);
 void crystal_sddc_job_key_locked(struct zram *zram, u32 index,
 		struct crystal_sddc_job_key *key);
@@ -117,6 +154,7 @@ int crystal_sddc_flatten(struct zram *zram, u32 index,
 		const struct crystal_sddc_snapshot *snapshot, void *dst,
 		size_t *size);
 bool crystal_sddc_native_wb_enabled(void);
+bool crystal_sddc_native_wb_kind(u8 kind);
 int crystal_sddc_native_wb_capture(struct zram *zram, u32 index,
 		const struct crystal_sddc_snapshot *snapshot, void *dst,
 		size_t *size, struct crystal_sddc_wb_capture *capture);
@@ -128,8 +166,16 @@ void crystal_sddc_native_wb_abort(struct zram *zram,
 		struct crystal_sddc_wb_capture *capture);
 void crystal_sddc_native_wb_finish(struct crystal_sddc_wb_capture *capture);
 void crystal_sddc_native_wb_free_locked(struct zram *zram, u32 index);
+bool crystal_sddc_native_wb_pin_locked(struct zram *zram, u32 index,
+		const struct crystal_sddc_snapshot *snapshot,
+		struct crystal_sddc_wb_ref *wb_ref);
+void crystal_sddc_native_wb_put_ref(struct crystal_sddc_wb_ref *wb_ref);
 int crystal_sddc_native_wb_restore_page(struct zram *zram,
 		struct page *page, const struct crystal_sddc_snapshot *snapshot,
+		const void *wire, size_t wire_size);
+int crystal_sddc_native_wb_restore_pinned(struct zram *zram,
+		struct page *page, const struct crystal_sddc_snapshot *snapshot,
+		struct crystal_sddc_wb_ref *wb_ref,
 		const void *wire, size_t wire_size);
 void crystal_sddc_zram_account_sub_locked(struct zram *zram, u32 index);
 void crystal_sddc_zram_account_add_locked(struct zram *zram, u32 index);
@@ -148,7 +194,8 @@ static inline int crystal_sddc_create(struct zram *zram,
 static inline void crystal_sddc_stop(struct zram *zram) { }
 static inline void crystal_sddc_destroy(struct zram *zram) { }
 static inline enum crystal_sddc_kind
-crystal_sddc_slot_free_locked(struct zram *zram, u32 index)
+crystal_sddc_slot_free_locked(struct zram *zram, u32 index,
+		enum crystal_sddc_release_reason reason)
 {
 	return CRYSTAL_SDDC_NONE;
 }
@@ -208,6 +255,11 @@ static inline bool crystal_sddc_native_wb_enabled(void)
 	return false;
 }
 
+static inline bool crystal_sddc_native_wb_kind(u8 kind)
+{
+	return false;
+}
+
 static inline int crystal_sddc_native_wb_capture(struct zram *zram, u32 index,
 		const struct crystal_sddc_snapshot *snapshot, void *dst,
 		size_t *size, struct crystal_sddc_wb_capture *capture)
@@ -238,8 +290,32 @@ static inline void crystal_sddc_native_wb_finish(
 static inline void crystal_sddc_native_wb_free_locked(struct zram *zram,
 		u32 index) { }
 
+static inline bool crystal_sddc_native_wb_pin_locked(struct zram *zram,
+		u32 index, const struct crystal_sddc_snapshot *snapshot,
+		struct crystal_sddc_wb_ref *wb_ref)
+{
+	if (wb_ref)
+		memset(wb_ref, 0, sizeof(*wb_ref));
+	return false;
+}
+
+static inline void crystal_sddc_native_wb_put_ref(
+		struct crystal_sddc_wb_ref *wb_ref)
+{
+	if (wb_ref)
+		memset(wb_ref, 0, sizeof(*wb_ref));
+}
+
 static inline int crystal_sddc_native_wb_restore_page(struct zram *zram,
 		struct page *page, const struct crystal_sddc_snapshot *snapshot,
+		const void *wire, size_t wire_size)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int crystal_sddc_native_wb_restore_pinned(struct zram *zram,
+		struct page *page, const struct crystal_sddc_snapshot *snapshot,
+		struct crystal_sddc_wb_ref *wb_ref,
 		const void *wire, size_t wire_size)
 {
 	return -EOPNOTSUPP;

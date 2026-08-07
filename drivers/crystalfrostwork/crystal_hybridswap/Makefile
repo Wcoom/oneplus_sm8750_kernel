@@ -19,5 +19,8 @@ CFLAGS_sddc/lz4kd/lz4kd_neon.o += -ffreestanding \
 	-isystem $(shell $(CC) -print-file-name=include)
 endif
 
+zram-$(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC) += \
+	sddc/crystal_sddc.o
+
 zram-$(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST) += \
 	sddc/crystal_sddc_codec_test.o

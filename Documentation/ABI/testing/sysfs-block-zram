@@ -82,6 +82,90 @@ Description:
 		statistics (orig_data_size, compr_data_size, etc.) in a format
 		similar to block layer statistics file format.
 
+What:		/sys/block/zram<id>/sddc_stat
+Date:		August 2026
+Contact:	whitewhale0612 <2136512929@qq.com>
+Description:
+		The sddc_stat file is read-only and reports the per-device
+		Crystal SDDC similarity-deduplication and delta-compression
+		state. It emits one unsigned decimal "name: value" pair per
+		line:
+
+		enabled: <bool>
+		queued: <count>
+		coalesced: <count>
+		dropped: <count>
+		ineligible: <count>
+		shutdown_discarded: <count>
+		worker_runs: <count>
+		pending: <count>
+		pending_max: <count>
+		observed: <count>
+		stale: <count>
+		indexed: <count>
+		refs: <count>
+		ref_bytes: <bytes>
+		aliases: <count>
+		deltas: <count>
+		delta_bytes: <bytes>
+		alias_attempts: <count>
+		alias_hits: <count>
+		delta_attempts: <count>
+		delta_hits: <count>
+		saved_bytes: <bytes>
+		saved_bytes_total: <bytes>
+		conversion_failures: <count>
+		decode_failures: <count>
+		flatten_failures: <count>
+		limit_rejects: <count>
+
+		enabled is one when a running SDDC manager supplied the
+		snapshot. The observation queue has one pending bit per zram slot and
+		two embedded work items. The workqueue is ordered, so only one callback
+		drains the bitmap at a time. queued counts requests that set a previously
+		clear bit; coalesced counts repeated requests for a slot whose bit was
+		already set. A coalesced request does not add another work item: the
+		worker reads the slot's current identity when it consumes the bit, so
+		the queue has latest-state semantics. dropped counts observable requests
+		rejected after an active manager was found (for example, an invalid slot
+		index or a stop race). Requests that cannot acquire a zram reference or
+		manager are rejected too, but are not attributed to a manager that may
+		already be gone. ineligible counts bits consumed after the
+		slot stopped being a valid observation target. shutdown_discarded
+		counts bits cleared during stop/reset without being consumed.
+
+		pending is the number of set bits not yet taken by the worker;
+		pending_max is its high-water mark. worker_runs counts executions of
+		either embedded work item, not individual slots. observed counts completed
+		candidate processing, stale counts final target identities that changed
+		before index publication, and indexed counts
+		observations retained as future candidates.
+
+		refs and ref_bytes are current immutable reference objects and
+		their payload bytes. aliases and deltas are current managed slots;
+		delta_bytes includes the complete resident delta wire objects.
+		The attempts and hits fields are cumulative exact-alias and
+		similar-delta candidate results.
+
+		saved_bytes is the current sum of ordinary target bytes avoided
+		by live aliases and deltas. saved_bytes_total is the cumulative
+		sum at successful commits. These byte counters use exact object
+		lengths and do not include zsmalloc class rounding, fragmentation,
+		or SDDC metadata.
+
+		conversion_failures reports conversion resource, allocation,
+		promotion, limit, or stale-commit failures after an actionable
+		candidate result. Codec no-gain and same-zsmalloc-class misses are
+		not failures. decode_failures reports resident restoration errors;
+		flatten_failures reports non-transient restoration errors while
+		preparing ordinary streams for writeback. limit_rejects is the
+		subset of delta allocations rejected by the zram memory limit.
+
+		Current gauges decrease when slots and references are freed.
+		Cumulative fields reset with the zram device. If SDDC is not built,
+		cannot run with the selected compressor, or is quiescing, every
+		field is zero, including enabled.
+
 What:		/sys/block/zram<id>/debug_stat
 Date:		July 2016
 Contact:	Sergey Senozhatsky <sergey.senozhatsky@gmail.com>

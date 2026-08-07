@@ -17,6 +17,7 @@
 
 #include <linux/completion.h>
 #include <linux/hashtable.h>
+#include <linux/mutex.h>
 #include <linux/refcount.h>
 #include <linux/rwsem.h>
 #include <linux/spinlock.h>
@@ -26,6 +27,8 @@
 
 #include "zcomp.h"
 #include "zms.h"
+
+struct crystal_sddc;
 
 /*
  * Private zram has its own Kconfig symbols.  Some lightweight M= builds
@@ -222,8 +225,13 @@ struct zram_memcg_stats_entry {
 struct zram {
 	struct zram_table_entry *table;
 	struct zs_pool *mem_pool;
+	struct crystal_sddc *sddc;
 	struct zcomp *comps[ZRAM_MAX_COMPS];
 	struct gendisk *disk;
+	/* Serialize SDDC creation, quiescing, and teardown. */
+	struct mutex sddc_lifecycle_lock;
+	/* Protect SDDC pointer publication and operation admission. */
+	spinlock_t sddc_lock;
 	/* Prevent concurrent execution of device init */
 	struct rw_semaphore init_lock;
 	/* Protect private zram lifetime independently from struct device refs. */

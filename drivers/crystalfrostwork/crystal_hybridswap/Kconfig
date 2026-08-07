@@ -131,6 +131,18 @@ config CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD
 
 	  The codec format and its 8 KiB delta window require 4 KiB pages.
 
+config CRYSTAL_HYBRIDSWAP_SDDC_ZMS_NATIVE
+	bool "Native SDDC writeback to ZMS"
+	depends on CRYSTAL_HYBRIDSWAP_SDDC
+	depends on CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
+	default y
+	help
+	  Keep resident SDDC DELTA and ALIAS wire data intact when it is written
+	  to Crystal ZMS.  The immutable reference remains resident in SDDC and
+	  is protected by a sparse writeback state until the ZMS object is
+	  released.  Ordinary and unsupported SDDC representations continue to
+	  use the flatten-to-ordinary-stream writeback path.
+
 config CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST
 	bool "KUnit tests for private SDDC and LZ4KD"
 	depends on KUNIT=y

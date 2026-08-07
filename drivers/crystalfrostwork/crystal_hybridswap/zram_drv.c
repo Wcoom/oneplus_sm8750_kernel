@@ -68,7 +68,8 @@ static size_t huge_class_size;
 
 static const struct block_device_operations zram_devops;
 
-static void zram_free_page(struct zram *zram, size_t index);
+static void zram_free_page(struct zram *zram, size_t index,
+			   enum crystal_sddc_release_reason reason);
 static int zram_read_page(struct zram *zram, struct page *page, u32 index,
 			  struct bio *parent);
 static int zram_read_compressed_page(struct zram *zram, u32 index,
@@ -98,7 +99,9 @@ static void zram_clear_flag(struct zram *zram, u32 index,
 			    enum zram_pageflags flag);
 struct zram_wb_snapshot;
 static bool zram_writeback_snapshot_matches(struct zram *zram, u32 index,
-					    const struct zram_wb_snapshot *snapshot);
+						    const struct zram_wb_snapshot *snapshot);
+static bool zram_wb_snapshot_matches(struct zram *zram, u32 index,
+						 const struct zram_wb_snapshot *snapshot);
 static void zram_zms_start_gc(struct zram *zram);
 static void zram_zms_stop_gc(struct zram *zram);
 static void zram_zms_maybe_prefetch(struct zram *zram, u32 index,
@@ -1323,6 +1326,8 @@ struct zram_wb_item {
 	size_t size;
 	unsigned long handle;
 	struct zram_wb_snapshot snapshot;
+	struct crystal_sddc_wb_capture native;
+	bool native_sddc;
 };
 
 static int zram_wb_item_class_cmp(const void *lhs, const void *rhs)
@@ -1660,6 +1665,23 @@ static void zram_writeback_free_buffers(struct zram_wb_item *items,
 	}
 }
 
+static void zram_writeback_abort_native(struct zram *zram,
+		struct zram_wb_item *item)
+{
+	if (!item || !item->native_sddc)
+		return;
+	crystal_sddc_native_wb_abort(zram, &item->native);
+	item->native_sddc = false;
+}
+
+static void zram_writeback_finish_native(struct zram_wb_item *item)
+{
+	if (!item || !item->native_sddc)
+		return;
+	crystal_sddc_native_wb_finish(&item->native);
+	item->native_sddc = false;
+}
+
 static unsigned int zram_writeback_batch_limit(struct zram *zram,
 					       unsigned long max_pages,
 					       unsigned long written)
@@ -1983,19 +2005,54 @@ static int zram_writeback_pages(struct zram *zram, int mode,
 			zram_set_flag(zram, cur_index, ZRAM_IDLE);
 			zram_take_wb_snapshot(zram, cur_index,
 				&items[batch_count].snapshot);
-			if (crystal_sddc_slot_managed_locked(zram, cur_index)) {
+			items[batch_count].size = 0;
+			if (crystal_sddc_slot_allocated_locked(zram, cur_index)) {
 				zram_slot_unlock(zram, cur_index);
-				err = crystal_sddc_flatten(zram, cur_index,
-					&items[batch_count].snapshot.sddc,
-					items[batch_count].data,
-					&items[batch_count].size);
+				if (crystal_sddc_native_wb_kind(
+					    items[batch_count].snapshot.sddc.kind)) {
+					err = crystal_sddc_native_wb_capture(zram,
+						cur_index,
+						&items[batch_count].snapshot.sddc,
+						items[batch_count].data,
+						&items[batch_count].size,
+						&items[batch_count].native);
+					if (!err)
+						items[batch_count].native_sddc = true;
+					else
+						/*
+						 * A native admission miss is opportunistic; retain
+						 * the established flatten fallback.
+						 */
+						err = crystal_sddc_flatten(zram, cur_index,
+							&items[batch_count].snapshot.sddc,
+							items[batch_count].data,
+							&items[batch_count].size);
+				} else {
+					err = crystal_sddc_flatten(zram, cur_index,
+						&items[batch_count].snapshot.sddc,
+						items[batch_count].data,
+						&items[batch_count].size);
+				}
 			} else {
 				err = zram_read_compressed_page(zram, cur_index,
 					items[batch_count].data,
 					&items[batch_count].size);
 				zram_slot_unlock(zram, cur_index);
 			}
+			if (!err && (!items[batch_count].size ||
+				     items[batch_count].size > PAGE_SIZE)) {
+				chs_log_ratelimited(CHS_LOG_ERR,
+						    "writeback capture invalid size mode=0x%x index=%u size=%zu sddc_kind=%u native=%u\n",
+					    mode, cur_index, items[batch_count].size,
+					    items[batch_count].snapshot.sddc.kind,
+					    items[batch_count].native_sddc);
+				err = -EIO;
+				if (!ret)
+					ret = err;
+			}
 			if (err) {
+				zram_writeback_abort_native(zram,
+					&items[batch_count]);
 				zram_writeback_clear_under_wb(zram, cur_index);
 				continue;
 			}
@@ -2043,6 +2100,7 @@ scan_next:
 					zram_slot_unlock(zram, cur_index);
 					crystal_sddc_requeue_observation(zram,
 						cur_index);
+					zram_writeback_abort_native(zram, item);
 					item->handle = 0;
 					continue;
 				}
@@ -2052,7 +2110,7 @@ scan_next:
 				store_items[store_count].handle = item->handle;
 				store_items[store_count].src = item->data;
 				store_items[store_count].size = item->size;
-				store_items[store_count].ret = 0;
+				store_items[store_count].ret = -EIO;
 				store_count++;
 			}
 
@@ -2078,6 +2136,7 @@ scan_next:
 				if (store_items[j].ret) {
 					if (!ret)
 						ret = store_items[j].ret;
+					zram_writeback_abort_native(zram, item);
 					zram_writeback_clear_under_wb(zram, cur_index);
 					item->handle = 0;
 					chs_log_ratelimited(CHS_LOG_ERR,
@@ -2099,6 +2158,7 @@ scan_next:
 					crystal_sddc_requeue_observation(zram,
 						cur_index);
 					zms_free(zram->zms, item->handle);
+					zram_writeback_abort_native(zram, item);
 					item->handle = 0;
 					continue;
 				}
@@ -2110,8 +2170,25 @@ scan_next:
 					 item->size == PAGE_SIZE);
 				incompressible = zram_test_flag(zram, cur_index,
 								ZRAM_INCOMPRESSIBLE);
+				if (item->native_sddc &&
+				    !crystal_sddc_native_wb_install_locked(zram,
+						cur_index, &item->snapshot.sddc,
+						&item->native)) {
+					zram_slot_unlock(zram, cur_index);
+					zms_free(zram->zms, item->handle);
+					zram_writeback_abort_native(zram, item);
+					zram_writeback_clear_under_wb(zram, cur_index);
+					item->handle = 0;
+					if (!ret)
+						ret = -EAGAIN;
+					continue;
+				}
 				zram_reclaim_prefetched_locked(zram, cur_index);
-				zram_free_page(zram, cur_index);
+				zram_free_page(zram, cur_index,
+					       CRYSTAL_SDDC_RELEASE_WRITEBACK);
+				if (item->native_sddc)
+					crystal_sddc_native_wb_finalize_locked(zram,
+						cur_index);
 				zram_clear_flag_wake(zram, cur_index, ZRAM_UNDER_WB);
 				zram_set_flag(zram, cur_index, ZRAM_WB);
 				if (huge) {
@@ -2133,6 +2210,7 @@ scan_next:
 				atomic64_add(item->size,
 					     &zram->stats.bd_compr_data_size);
 				zram_memcg_stats_add_current(zram, cur_index);
+				zram_writeback_finish_native(item);
 				spin_lock(&zram->wb_limit_lock);
 				if (zram->wb_limit_enable && zram->bd_wb_limit > 0)
 					zram->bd_wb_limit -=
@@ -2151,6 +2229,7 @@ scan_next:
 		}
 
 		for (i = 0; i < batch_count; i++) {
+			zram_writeback_abort_native(zram, &items[i]);
 			if (items[i].handle)
 				zram_writeback_clear_under_wb(zram,
 							      items[i].index);
@@ -2622,6 +2701,9 @@ struct zram_work {
 	u64 memcg_id;
 	u32 index;
 	u32 prio;
+	struct crystal_sddc_snapshot sddc_snapshot;
+	struct crystal_sddc_wb_ref *sddc_wb_ref;
+	bool native_sddc;
 	struct page *page;
 	int error;
 };
@@ -2658,14 +2740,29 @@ static int zram_finish_zms_ref_read(struct zram *zram, struct page *page,
 				    struct zms_load_ref *ref,
 				    const struct zms_io *io,
 				    size_t size, u32 prio,
-				    u32 index, u64 memcg_id)
+				    u32 index, u64 memcg_id,
+				    const struct crystal_sddc_snapshot *sddc_snapshot,
+				    struct crystal_sddc_wb_ref *sddc_wb_ref)
 {
 	int ret;
 
 	zram_record_zms_io(zram, index, io);
-	ret = zram_decode_zms_payload(zram, page, ref->data, ref->size,
+	if (ref->size != size)
+		ret = -EIO;
+	else if (sddc_snapshot &&
+		 crystal_sddc_native_wb_kind(sddc_snapshot->kind)) {
+		if (sddc_wb_ref)
+			ret = crystal_sddc_native_wb_restore_pinned(zram, page,
+					sddc_snapshot, sddc_wb_ref,
+					ref->data, ref->size);
+		else
+			ret = crystal_sddc_native_wb_restore_page(zram, page,
+					sddc_snapshot, ref->data, ref->size);
+	} else
+		ret = zram_decode_zms_payload(zram, page, ref->data, ref->size,
 				      size, prio);
-	if (!ret)
+	if (!ret && (!sddc_snapshot ||
+			!crystal_sddc_native_wb_kind(sddc_snapshot->kind)))
 		zram_zms_maybe_prefetch(zram, index, ref, memcg_id, io);
 	zms_put_ref(zram->zms, ref);
 
@@ -2678,7 +2775,9 @@ static int zram_finish_zms_ref_read(struct zram *zram, struct page *page,
 
 static int zram_read_from_zms(struct zram *zram, struct page *page,
 				      unsigned long handle, size_t size, u32 prio,
-				      u32 index, u64 memcg_id)
+				      u32 index, u64 memcg_id,
+				      const struct crystal_sddc_snapshot *sddc_snapshot,
+				      struct crystal_sddc_wb_ref *sddc_wb_ref)
 {
 	struct zms_load_ref ref;
 	struct zms_io io;
@@ -2694,7 +2793,8 @@ static int zram_read_from_zms(struct zram *zram, struct page *page,
 	}
 
 	return zram_finish_zms_ref_read(zram, page, &ref, &io, size,
-				       prio, index, memcg_id);
+				       prio, index, memcg_id, sddc_snapshot,
+				       sddc_wb_ref);
 }
 
 static void zram_zms_sync_read(struct work_struct *work)
@@ -2703,7 +2803,9 @@ static void zram_zms_sync_read(struct work_struct *work)
 
 	zw->error = zram_read_from_zms(zw->zram, zw->page, zw->handle,
 				       zw->size, zw->prio, zw->index,
-				       zw->memcg_id);
+				       zw->memcg_id,
+				       zw->native_sddc ? &zw->sddc_snapshot : NULL,
+				       zw->sddc_wb_ref);
 }
 
 /*
@@ -2712,7 +2814,9 @@ static void zram_zms_sync_read(struct work_struct *work)
  */
 static int read_from_zms_sync(struct zram *zram, struct page *page,
 			      unsigned long handle, size_t size, u32 prio,
-			      u32 index, u64 memcg_id)
+			      u32 index, u64 memcg_id,
+			      const struct crystal_sddc_snapshot *sddc_snapshot,
+			      struct crystal_sddc_wb_ref *sddc_wb_ref)
 {
 	struct zram_work work;
 
@@ -2723,6 +2827,11 @@ static int read_from_zms_sync(struct zram *zram, struct page *page,
 	work.prio = prio;
 	work.index = index;
 	work.memcg_id = memcg_id;
+	work.native_sddc = sddc_snapshot &&
+		crystal_sddc_native_wb_kind(sddc_snapshot->kind);
+	if (work.native_sddc)
+		work.sddc_snapshot = *sddc_snapshot;
+	work.sddc_wb_ref = sddc_wb_ref;
 
 	INIT_WORK_ONSTACK(&work.work, zram_zms_sync_read);
 	queue_work(zram_read_wq, &work.work);
@@ -2735,8 +2844,12 @@ static int read_from_zms_sync(struct zram *zram, struct page *page,
 static inline void reset_bdev(struct zram *zram) {};
 static int read_from_zms_sync(struct zram *zram, struct page *page,
 			      unsigned long handle, size_t size, u32 prio,
-			      u32 index, u64 memcg_id)
+			      u32 index, u64 memcg_id,
+			      const struct crystal_sddc_snapshot *sddc_snapshot,
+			      struct crystal_sddc_wb_ref *sddc_wb_ref)
 {
+	(void)sddc_snapshot;
+	(void)sddc_wb_ref;
 	return -EIO;
 }
 #endif
@@ -3143,6 +3256,10 @@ static ssize_t sddc_stat_show(struct device *dev,
 		"indexed: %llu\n"
 		"refs: %llu\n"
 		"ref_bytes: %llu\n"
+		"wb_deltas: %llu\n"
+		"wb_delta_bytes: %llu\n"
+		"wb_aliases: %llu\n"
+		"wb_alias_bytes: %llu\n"
 		"aliases: %llu\n"
 		"deltas: %llu\n"
 		"delta_bytes: %llu\n"
@@ -3156,6 +3273,16 @@ static ssize_t sddc_stat_show(struct device *dev,
 		"delta_match_bytes_max: %llu\n"
 		"saved_bytes: %llu\n"
 		"saved_bytes_total: %llu\n"
+		"released_aliases: %llu\n"
+		"released_deltas: %llu\n"
+		"released_saved_bytes: %llu\n"
+		"released_writeback_saved_bytes: %llu\n"
+		"released_rewrite_saved_bytes: %llu\n"
+		"released_recompress_saved_bytes: %llu\n"
+		"released_discard_saved_bytes: %llu\n"
+		"released_notify_free_saved_bytes: %llu\n"
+		"released_reset_saved_bytes: %llu\n"
+		"released_other_saved_bytes: %llu\n"
 		"conversion_failures: %llu\n"
 		"decode_failures: %llu\n"
 		"flatten_failures: %llu\n"
@@ -3164,12 +3291,22 @@ static ssize_t sddc_stat_show(struct device *dev,
 		stats.ineligible, stats.shutdown_discarded, stats.worker_runs,
 		stats.pending, stats.pending_max, stats.observed, stats.stale,
 		stats.indexed,
-		stats.refs, stats.ref_bytes, stats.aliases, stats.deltas,
+		stats.refs, stats.ref_bytes, stats.wb_deltas,
+		stats.wb_delta_bytes, stats.wb_aliases,
+		stats.wb_alias_bytes, stats.aliases, stats.deltas,
 		stats.delta_bytes, stats.alias_attempts, stats.alias_hits,
 		stats.delta_attempts, stats.delta_hits, stats.delta_matches,
 		stats.delta_small_rejects, stats.delta_no_gain,
 		stats.delta_match_bytes_max, stats.saved_bytes,
-		stats.saved_bytes_total, stats.conversion_failures,
+		stats.saved_bytes_total, stats.released_aliases,
+		stats.released_deltas, stats.released_saved_bytes,
+		stats.released_writeback_saved_bytes,
+		stats.released_rewrite_saved_bytes,
+		stats.released_recompress_saved_bytes,
+		stats.released_discard_saved_bytes,
+		stats.released_notify_free_saved_bytes,
+		stats.released_reset_saved_bytes,
+		stats.released_other_saved_bytes, stats.conversion_failures,
 		stats.decode_failures, stats.flatten_failures,
 		stats.limit_rejects);
 }
@@ -3425,7 +3562,7 @@ static void zram_meta_free(struct zram *zram, u64 disksize)
 
 	/* Free all pages that are still in this zram device */
 	for (index = 0; index < num_pages; index++)
-		zram_free_page(zram, index);
+		zram_free_page(zram, index, CRYSTAL_SDDC_RELEASE_RESET);
 	crystal_sddc_destroy(zram);
 	zram_memcg_stats_clear_all(zram);
 
@@ -3460,14 +3597,17 @@ static bool zram_meta_alloc(struct zram *zram, u64 disksize)
  * caller should hold this table index entry's bit_spinlock to
  * indicate this index entry is accessing.
  */
-static void zram_free_page(struct zram *zram, size_t index)
+static void zram_free_page(struct zram *zram, size_t index,
+			   enum crystal_sddc_release_reason reason)
 {
 	enum crystal_sddc_kind sddc_kind;
 	unsigned long handle;
 	size_t size;
 
 	zram_memcg_stats_sub_current(zram, index);
-	sddc_kind = crystal_sddc_slot_free_locked(zram, index);
+	if (zram_test_flag(zram, index, ZRAM_WB))
+		crystal_sddc_native_wb_free_locked(zram, index);
+	sddc_kind = crystal_sddc_slot_free_locked(zram, index, reason);
 	zram->table[index].memcg_id = 0;
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_TRACK_ENTRY_ACTIME
 	zram->table[index].ac_time = 0;
@@ -3614,12 +3754,19 @@ static int zram_read_page(struct zram *zram, struct page *page, u32 index,
 	unsigned long handle;
 	struct zms_load_ref ref;
 	struct zms_io io;
+	struct zram_wb_snapshot wb_snapshot;
+	struct crystal_sddc_wb_ref wb_ref;
 	size_t size;
 	u64 memcg_id;
 	u32 prio;
+	bool native_sddc;
+	bool native_sddc_pinned;
+	bool retry_read;
 	int ret;
 
 retry:
+	memset(&wb_ref, 0, sizeof(wb_ref));
+	native_sddc_pinned = false;
 	zram_slot_lock(zram, index);
 	if (zram_test_flag(zram, index, ZRAM_UNDER_WB)) {
 		zram_slot_unlock(zram, index);
@@ -3630,7 +3777,7 @@ retry:
 
 	if (!zram_test_flag(zram, index, ZRAM_WB)) {
 		zram_consume_prefetched(zram, index);
-		if (crystal_sddc_slot_managed_locked(zram, index)) {
+		if (crystal_sddc_slot_allocated_locked(zram, index)) {
 			zram_slot_unlock(zram, index);
 			ret = crystal_sddc_read_page(zram, page, index);
 			if (ret == -EAGAIN)
@@ -3646,36 +3793,63 @@ retry:
 		 * device. Snapshot the ZMS handle while locked so a concurrent
 		 * slot rewrite cannot redirect this read to a different object.
 		 */
+		retry_read = false;
+		zram_set_flag(zram, index, ZRAM_UNDER_WB);
 		handle = zram_get_element(zram, index);
 		size = zram_get_obj_size(zram, index);
 		prio = zram_get_priority(zram, index);
 		memcg_id = zram->table[index].memcg_id;
-		zram_set_flag(zram, index, ZRAM_UNDER_WB);
+		zram_take_wb_snapshot(zram, index, &wb_snapshot);
+		native_sddc = crystal_sddc_native_wb_kind(
+				wb_snapshot.sddc.kind);
+		if (native_sddc)
+			native_sddc_pinned = crystal_sddc_native_wb_pin_locked(
+					zram, index, &wb_snapshot.sddc, &wb_ref);
 		zram_slot_unlock(zram, index);
 
-		if (zram->zms && handle && size && size <= PAGE_SIZE)
+		if (native_sddc && !native_sddc_pinned)
+			ret = -EAGAIN;
+		else if (zram->zms && handle && size && size <= PAGE_SIZE)
 			ret = zms_load_cached_ref(zram->zms, handle, &ref, &io);
 		else
 			ret = -EAGAIN;
 		if (!ret) {
 			ret = zram_finish_zms_ref_read(zram, page, &ref, &io,
 					       size, prio, index,
-					       memcg_id);
+					       memcg_id,
+					       native_sddc ?
+					       &wb_snapshot.sddc : NULL,
+					       native_sddc_pinned ?
+					       &wb_ref : NULL);
 		} else if (ret == -EAGAIN) {
-			ret = read_from_zms_sync(zram, page, handle, size, prio,
-						 index, memcg_id);
+			if (native_sddc && !native_sddc_pinned)
+				ret = -EAGAIN;
+			else
+				ret = read_from_zms_sync(zram, page, handle,
+							 size, prio, index,
+							 memcg_id,
+							 native_sddc ?
+							 &wb_snapshot.sddc : NULL,
+							 native_sddc_pinned ?
+							 &wb_ref : NULL);
 		}
 
 		zram_slot_lock(zram, index);
+		if (native_sddc &&
+		    !zram_wb_snapshot_matches(zram, index, &wb_snapshot))
+			retry_read = true;
 		if (zram_test_flag(zram, index, ZRAM_UNDER_WB))
 			zram_clear_flag_wake(zram, index, ZRAM_UNDER_WB);
 		zram_slot_unlock(zram, index);
+		crystal_sddc_native_wb_put_ref(&wb_ref);
 		crystal_sddc_requeue_observation(zram, index);
+		if (retry_read)
+			goto retry;
 	}
 
-	/* Should NEVER happen. Return bio error if it does. */
-	if (WARN_ON(ret < 0))
-		pr_err("Decompression failed! err=%d, page=%u\n", ret, index);
+	/* Return the bio error without flooding the log with warning stacks. */
+	if (unlikely(ret < 0))
+		pr_err_ratelimited("read failed err=%d, page=%u\n", ret, index);
 
 	return ret;
 }
@@ -3719,9 +3893,11 @@ struct zram_prepared_page {
 struct zram_batchin_item {
 	struct zram_wb_snapshot snapshot;
 	struct zram_prepared_page prep;
+	struct crystal_sddc_wb_ref native_ref;
 	unsigned long index;
 	u64 memcg_id;
 	u32 prio;
+	bool native_sddc;
 };
 
 struct zram_prefetch_item {
@@ -3741,6 +3917,14 @@ struct zram_zms_prefetch_work {
 	unsigned int count;
 	struct zram_prefetch_item items[ZRAM_ZMS_PREFETCH_MAX];
 };
+
+static void zram_batchin_put_native(struct zram_batchin_item *item)
+{
+	if (!item || !item->native_sddc)
+		return;
+	crystal_sddc_native_wb_put_ref(&item->native_ref);
+	item->native_sddc = false;
+}
 
 static void zram_cleanup_prepared_page(struct zram *zram,
 					      struct zram_prepared_page *prep)
@@ -3908,7 +4092,7 @@ static void zram_commit_prepared_page(struct zram *zram, u32 index,
 	 * Free memory associated with this sector
 	 * before overwriting unused sectors.
 	 */
-	zram_free_page(zram, index);
+	zram_free_page(zram, index, CRYSTAL_SDDC_RELEASE_REWRITE);
 
 	if (prep->comp_len == PAGE_SIZE) {
 		zram_set_flag(zram, index, ZRAM_HUGE);
@@ -3952,7 +4136,14 @@ static int zram_write_page_with_memcg(struct zram *zram, struct page *page,
 	if (ret)
 		return ret;
 
+retry_lock:
 	zram_slot_lock(zram, index);
+	if (zram_test_flag(zram, index, ZRAM_UNDER_WB)) {
+		zram_slot_unlock(zram, index);
+		wait_on_bit_io(&zram->table[index].flags, ZRAM_UNDER_WB,
+			       TASK_UNINTERRUPTIBLE);
+		goto retry_lock;
+	}
 	zram_commit_prepared_page(zram, index, &prep, memcg_id);
 	crystal_sddc_job_key_locked(zram, index, &sddc_key);
 	zram_slot_unlock(zram, index);
@@ -4037,19 +4228,51 @@ static int zram_batchin_flush_items(struct zram *zram,
 
 	for (i = 0; i < count; i++) {
 		struct crystal_sddc_job_key sddc_key;
+		bool snapshot_changed;
 		int err = loads[i].ret;
 
-		if (!err)
-			err = zram_decode_zms_payload(zram, page,
+		if (!err) {
+			if (crystal_sddc_native_wb_kind(
+				    items[i].snapshot.sddc.kind)) {
+				if (items[i].native_sddc)
+					err = crystal_sddc_native_wb_restore_pinned(
+						zram, page,
+						&items[i].snapshot.sddc,
+						&items[i].native_ref,
+						loads[i].dst,
+						loads[i].loaded_size);
+				else
+					err = crystal_sddc_native_wb_restore_page(
+						zram, page,
+						&items[i].snapshot.sddc,
+						loads[i].dst,
+						loads[i].loaded_size);
+			} else
+				err = zram_decode_zms_payload(zram, page,
 						      loads[i].dst,
 						      loads[i].loaded_size,
 						      loads[i].expected_size,
 						      items[i].prio);
+		}
+		zram_batchin_put_native(&items[i]);
 		if (err) {
+			zram_slot_lock(zram, items[i].index);
+			snapshot_changed = !zram_wb_snapshot_matches(zram,
+					items[i].index, &items[i].snapshot);
+			if (zram_test_flag(zram, items[i].index,
+					   ZRAM_UNDER_WB))
+				zram_clear_flag_wake(zram, items[i].index,
+						     ZRAM_UNDER_WB);
+			zram_slot_unlock(zram, items[i].index);
+			crystal_sddc_requeue_observation(zram, items[i].index);
+			if (snapshot_changed) {
+				(*snapshot_mismatch)++;
+				(*skipped)++;
+				continue;
+			}
 			if (!first_err)
 				first_err = err;
 			(*read_errors)++;
-			zram_clear_under_wb(zram, items[i].index);
 			chs_log_ratelimited(CHS_LOG_ERR,
 				"batchin read error dev=%s index=%lu handle=%lu target_cgroup_id=%llu ret=%d\n",
 				zram->disk ? zram->disk->disk_name : "unknown",
@@ -4107,8 +4330,10 @@ static int zram_batchin_flush_items(struct zram *zram,
 	return first_err;
 
 clear_remaining:
-	for (; i < count; i++)
+	for (; i < count; i++) {
+		zram_batchin_put_native(&items[i]);
 		zram_clear_under_wb(zram, items[i].index);
+	}
 
 	return first_err;
 }
@@ -4312,6 +4537,8 @@ static bool zram_zms_prefetch_prepare_item(struct zram *zram,
 	item->prio = zram_get_priority(zram, index);
 	item->cookie = *cookie;
 	zram_take_wb_snapshot(zram, index, &item->snapshot);
+	if (crystal_sddc_native_wb_kind(item->snapshot.sddc.kind))
+		goto out;
 	ok = true;
 
 out:
@@ -4524,6 +4751,19 @@ int zram_batchin_device(struct device *dev, unsigned long max_pages,
 		zram_set_flag(zram, index, ZRAM_UNDER_WB);
 		zram_take_wb_snapshot(zram, index,
 				      &items[batch_count].snapshot);
+		if (crystal_sddc_native_wb_kind(
+			    items[batch_count].snapshot.sddc.kind)) {
+			if (!crystal_sddc_native_wb_pin_locked(zram, index,
+					&items[batch_count].snapshot.sddc,
+					&items[batch_count].native_ref)) {
+				zram_clear_flag_wake(zram, index, ZRAM_UNDER_WB);
+				zram_slot_unlock(zram, index);
+				skipped++;
+				cond_resched();
+				continue;
+			}
+			items[batch_count].native_sddc = true;
+		}
 		zram_slot_unlock(zram, index);
 		loads[batch_count].handle = items[batch_count].snapshot.element;
 		loads[batch_count].dst = (char *)payloads +
@@ -4711,7 +4951,7 @@ static int zram_recompress(struct zram *zram, u32 index, struct page *page,
 	void *src, *dst;
 	int ret;
 
-	if (crystal_sddc_slot_managed_locked(zram, index))
+	if (crystal_sddc_slot_allocated_locked(zram, index))
 		return 0;
 
 	handle_old = zram_get_handle(zram, index);
@@ -4829,7 +5069,7 @@ static int zram_recompress(struct zram *zram, u32 index, struct page *page,
 	zs_unmap_object(zram->mem_pool, handle_new);
 
 	memcg_id = zram->table[index].memcg_id;
-	zram_free_page(zram, index);
+	zram_free_page(zram, index, CRYSTAL_SDDC_RELEASE_RECOMPRESS);
 	zram_set_handle(zram, index, handle_new);
 	zram_set_obj_size(zram, index, comp_len_new);
 	zram_set_priority(zram, index, prio);
@@ -4999,7 +5239,13 @@ static void zram_bio_discard(struct zram *zram, struct bio *bio)
 
 	while (n >= PAGE_SIZE) {
 		zram_slot_lock(zram, index);
-		zram_free_page(zram, index);
+		if (zram_test_flag(zram, index, ZRAM_UNDER_WB)) {
+			zram_slot_unlock(zram, index);
+			wait_on_bit_io(&zram->table[index].flags, ZRAM_UNDER_WB,
+				       TASK_UNINTERRUPTIBLE);
+			continue;
+		}
+		zram_free_page(zram, index, CRYSTAL_SDDC_RELEASE_DISCARD);
 		zram_slot_unlock(zram, index);
 		atomic64_inc(&zram->stats.notify_free);
 		index++;
@@ -5174,7 +5420,13 @@ static void zram_slot_free_notify(struct block_device *bdev,
 		return;
 	}
 
-	zram_free_page(zram, index);
+	if (zram_test_flag(zram, index, ZRAM_UNDER_WB)) {
+		atomic64_inc(&zram->stats.miss_free);
+		zram_slot_unlock(zram, index);
+		return;
+	}
+
+	zram_free_page(zram, index, CRYSTAL_SDDC_RELEASE_NOTIFY_FREE);
 	zram_slot_unlock(zram, index);
 }
 

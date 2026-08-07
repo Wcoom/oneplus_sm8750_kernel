@@ -72,6 +72,7 @@ Relevant optional symbols include:
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MULTI_COMP`: enables multi-stream or multi-compressor support where supported by the platform.
 - `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC`: enables the per-device similarity index, exact aliases, and resident delta representation (default y when Crystal Hybridswap is enabled; the runtime path remains opportunistic).
 - `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD`: builds the private 4 KiB LZ4KD ordinary/delta backend used by SDDC without registering a global Crypto API algorithm (default y on arm64 4 KiB-page builds).
+- `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_ZMS_NATIVE`: keeps validated SDDC DELTA and ALIAS wire objects intact in ZMS and pins their immutable resident references. It is enabled by default; unsupported objects retain the flatten fallback.
 - `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST`: builds the private codec and SDDC state-machine KUnit coverage.
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP`: selects the default compression algorithm.
 

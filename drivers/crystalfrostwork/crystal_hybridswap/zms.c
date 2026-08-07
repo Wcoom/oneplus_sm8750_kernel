@@ -2528,14 +2528,28 @@ int zms_store_batch(struct zms *zms, struct zms_store_item *items,
 	int ret;
 
 	zms_io_clear(io);
-	if (!zms || !items || !nr)
+	if (!items || !nr)
 		return -EINVAL;
+	/*
+	 * The caller commits each object according to its per-item status, even
+	 * when this function returns a batch-level error.  Start pessimistic so
+	 * every early exit has an unambiguous per-item result.
+	 */
+	for (i = 0; i < nr; i++)
+		items[i].ret = -EIO;
+	if (!zms) {
+		for (i = 0; i < nr; i++)
+			items[i].ret = -EINVAL;
+		return -EINVAL;
+	}
 
 	class = zms_class_for_size(zms, items[0].size);
-	if (!class)
+	if (!class) {
+		for (i = 0; i < nr; i++)
+			items[i].ret = -EINVAL;
 		return -EINVAL;
+	}
 	for (i = 0; i < nr; i++) {
-		items[i].ret = 0;
 		if (!items[i].src || !items[i].size ||
 		    items[i].size > PAGE_SIZE || !items[i].handle ||
 		    items[i].handle > zms->nr_handles ||
@@ -2543,6 +2557,7 @@ int zms_store_batch(struct zms *zms, struct zms_store_item *items,
 			first_err = -EINVAL;
 			break;
 		}
+		items[i].ret = 0;
 	}
 	if (first_err) {
 		for (i = 0; i < nr; i++)

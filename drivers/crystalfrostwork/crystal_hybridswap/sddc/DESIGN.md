@@ -112,10 +112,13 @@ page. Decode rejects an unknown magic or version, a changed header size, a
 cookie or reference-size mismatch, an invalid target size, a codec error, or
 a restored length different from `target_size`.
 
-This format is an internal resident representation, not an on-disk or
-user-space ABI. Before ZMS writeback, the slot is flattened back to its
-ordinary compressed stream or raw page. The reference cookie and delta header
-are therefore never required to survive reset or backing-device persistence.
+This is an internal kernel format, not a stable on-disk or user-space ABI.
+Without native SDDC writeback, the slot is flattened back to its ordinary
+compressed stream or raw page before entering ZMS. With native writeback, a
+validated `DELTA` wire object is stored unchanged, while `ALIAS` is represented
+by a compact 16-byte header. The matching sparse writeback state pins the same
+resident reference for the lifetime of either native object. The reference
+graph is not persisted across device reset or reinitialization.
 
 ## 4. Candidate Discovery
 
@@ -281,31 +284,45 @@ make concurrent slot replacement safe after capture.
 read path retry. Corrupt metadata, a missing reference, or codec failure
 returns an I/O error and increments decode diagnostics.
 
-### 6.2 ZMS writeback flattening
+### 6.2 ZMS writeback
 
 Writeback snapshots both normal zram identity and SDDC identity
-`{mutation_seq, kind, ref cookie}` while claiming `ZRAM_UNDER_WB`. A managed
-slot is flattened outside the slot lock to its ordinary stream; writeback does
-not decompress that stream to the original page.
+`{mutation_seq, kind, ref cookie}` while claiming `ZRAM_UNDER_WB`. When native
+writeback is unavailable, a managed slot is flattened outside the slot lock
+to its ordinary stream; writeback does not decompress that stream to the
+original page.  When
+`CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_ZMS_NATIVE` is enabled, a `DELTA` or `ALIAS`
+slot instead copies its validated wire object to ZMS unchanged.  The immutable
+reference stays in the resident SDDC reference table and a separate sparse
+`wb_states` entry owns the temporary reference pin until the ZMS handle is
+freed.
 
 Before replacing the resident slot with a ZMS handle, writeback rechecks the
 normal handle, size, flags, memcg ID, and the complete SDDC snapshot. A
 mismatch discards the stale ZMS object and leaves the current slot intact. On
-success, normal slot free drops the SDDC owner and the ZMS entry records the
-flattened ordinary size and compressor priority. A `PAGE_SIZE` flattened
-stream restores the normal `ZRAM_HUGE` state.
+success, normal slot free drops the resident SDDC owner.  Native commit then
+records the post-transition mutation and reference cookie in `wb_states`; the
+ZMS entry's size is the native wire size.  Flattened entries record the
+ordinary size and compressor priority.  A `PAGE_SIZE` ordinary stream restores
+the normal `ZRAM_HUGE` state.
 
 Writeback allocation, store, flatten, and snapshot failures clear
 `ZRAM_UNDER_WB` and ask the still-resident slot to be observed again when it
-is eligible. No resident reference graph is written to ZMS.
+is eligible. Native ZMS objects are still opaque bytes: only their resident
+reference dependency is tracked by SDDC, so ZMS GC and compaction need no
+SDDC-specific object graph.
 
 ### 6.3 Batch-in, prefetch, rewrite, and recompress
 
-ZMS batch-in and prefetch decode the flattened ordinary stream to a page and
-then use the normal zram compressor to create a new resident object. The
-restored slot receives a new mutation identity and observation job. Readback
-failure or snapshot mismatch clears `ZRAM_UNDER_WB` and re-observes any
-eligible resident object.
+ZMS batch-in decodes flattened ordinary streams as before.  Native `DELTA`
+objects first restore through the resident reference and then decode the
+resulting ordinary stream to a page; native `ALIAS` objects restore the
+reference stream directly.  The normal zram compressor creates the new
+resident object.  Native SDDC neighbors are excluded from the current prefetch
+promotion path until a wire-aware prefetch buffer is available.  The restored
+slot receives a new mutation identity and observation job. Readback failure or
+snapshot mismatch clears `ZRAM_UNDER_WB` and re-observes any eligible resident
+object.
 
 A normal write first frees the old SDDC representation and its reference
 owner, then commits an ordinary object and queues a new observation. Ordinary
@@ -342,6 +359,7 @@ The individual locks have narrow ownership:
 | `init_lock` | zram table, compressors, and initialized-device lifetime | Observation work holds read; reset takes write only after admission drains. |
 | slot bit lock | zram entry and matching per-slot SDDC record | Required for identity capture, validation, representation commit, and free. |
 | slot-state XArray lock | Sparse managed-state publication and removal | Taken briefly below the matching slot lock; never used to acquire a slot lock. |
+| wb-state XArray lock | Sparse native-ZMS state reservation, publication, and removal | Reservation is installed before capture; publication consumes only that reservation and is performed below the slot lock. |
 | reference XArray lock | Cookie lookup, publication, pin, erase, and refcount-to-zero | May be taken below a slot lock; no path takes a slot lock while holding it. |
 | `memcg_stats_lock` | Per-memcg cached accounting | May be taken below a slot lock during representation accounting. |
 | `index_lock` | Exact/sample bucket cells | Candidate lookup releases it before blocking on a slot; final index publication may take it below the validated target slot lock. Replacement scoring uses only a non-blocking slot trylock. |
@@ -350,13 +368,16 @@ The individual locks have narrow ownership:
 
 Every operation that can retain a manager pointer beyond the caller's
 `init_lock`/slot critical section obtains an `active_ops` token through
-`sddc_lock`. The short slot-locked integration helpers instead rely on that
-caller-owned device lifetime protection. Setting `stopping` prevents new
-tokens. Observation submission keeps separate producer and worker tokens so
-completion of one cannot expose manager or statistics memory to use-after-free
-by the other. The final `active_ops` put performs its wakeup while holding
-`active_lock`; teardown takes that lock after the wait condition becomes true,
-which closes the last-put versus manager-free window.
+`sddc_lock`. A native writeback capture keeps that token, its reservation, and
+one reference pin until ZMS store commit or abort; publication transfers the
+reservation and the pin to `wb_states`, while `finish` releases the manager
+token after the slot transition is complete. The short slot-locked integration
+helpers instead rely on that caller-owned device lifetime protection. Setting
+`stopping` prevents new tokens. Observation submission keeps separate producer
+and worker tokens so completion of one cannot expose manager or statistics
+memory to use-after-free by the other. The final `active_ops` put performs its
+wakeup while holding `active_lock`; teardown takes that lock after the wait
+condition becomes true, which closes the last-put versus manager-free window.
 
 Slot `mutation_seq`, full job-key validation, writeback SDDC snapshots, and
 reference generations address different ABA domains and must all remain in
@@ -455,6 +476,8 @@ slot lock.
 | `indexed` | count | Observations inserted as future candidates after no conversion committed. |
 | `refs` | count | Current immutable reference objects. |
 | `ref_bytes` | bytes | Current immutable reference payload bytes. |
+| `wb_deltas` | count | Native DELTA objects currently owned by ZMS-backed slots. |
+| `wb_delta_bytes` | bytes | Native DELTA wire bytes currently owned by those slots. |
 | `aliases` | count | Current `ALIAS` slots. |
 | `deltas` | count | Current `DELTA` slots. |
 | `delta_bytes` | bytes | Current complete delta-wire bytes. |

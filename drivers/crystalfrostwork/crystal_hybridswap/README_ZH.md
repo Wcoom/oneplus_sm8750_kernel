@@ -72,6 +72,7 @@ Crystal 因此保留有利于部署和维护的用户可见部分，但重写内
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MULTI_COMP`：在平台支持时启用多压缩流或多压缩器能力。
 - `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC`：启用按设备的相似性索引、精确 alias 和驻留 delta 表示；Crystal Hybridswap 开启时默认启用，运行时仍采用 best-effort 策略。
 - `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD`：构建 SDDC 使用的私有 4 KiB LZ4KD 普通/delta 后端，不向全局 Crypto API 注册算法；arm64 4 KiB page 构建默认启用。
+- `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_ZMS_NATIVE`：将经过校验的 SDDC DELTA 与 ALIAS wire 对象原样写入 ZMS，并 pin 驻留的不可变 reference；该选项默认开启，不支持的对象继续走 flatten 回退。
 - `CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST`：构建私有 codec 和 SDDC 状态机 KUnit 测试。
 - `CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP`：选择默认压缩算法。
 

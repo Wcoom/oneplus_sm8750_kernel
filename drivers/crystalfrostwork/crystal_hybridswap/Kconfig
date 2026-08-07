@@ -109,9 +109,43 @@ config CRYSTAL_HYBRIDSWAP_ZRAM_MULTI_COMP
 	  extra compressors are configured, without changing the userspace ABI
 	  away from zram.
 
+config CRYSTAL_HYBRIDSWAP_SDDC
+	bool "Huawei-style SDDC support for Crystal Hybridswap"
+	depends on CRYSTAL_HYBRIDSWAP
+	default n
+	help
+	  Enable the private integration points used by Crystal Hybridswap's
+	  similarity detection and delta-compression data path.  This option is
+	  intentionally disabled by default while the SDDC representation is
+	  opt-in.
+
+config CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD
+	bool "Private LZ4KD delta codec"
+	depends on CRYSTAL_HYBRIDSWAP_SDDC
+	depends on ARM64_4K_PAGES
+	default n
+	help
+	  Build a private copy of Huawei's LZ4KD ordinary and delta codec and
+	  expose it to the Crystal zcomp frontend as "lz4kd".  It does not alter
+	  the kernel Crypto API or register a global compression algorithm.
+
+	  The codec format and its 8 KiB delta window require 4 KiB pages.
+
+config CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST
+	bool "KUnit tests for the private LZ4KD delta codec"
+	depends on KUNIT=y
+	depends on CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD
+	default n
+	help
+	  Test ordinary and delta round trips, raw 4 KiB payloads, malformed
+	  streams, and the full 8 KiB reference/current boundary.  These tests
+	  exercise only the private codec contract; the higher-level SDDC index,
+	  lifetime, and writeback tests are provided with those later phases.
+
 config CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP
 	string "Default Crystal Hybridswap zram compressor"
 	depends on CRYSTAL_HYBRIDSWAP
+	default "lz4kd" if CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD
 	default "lz4kd" if CRYPTO_LZ4KD
 	default "lz4" if CRYPTO_LZ4
 	default "lzo" if CRYPTO_LZO
@@ -123,7 +157,7 @@ config CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP
 	help
 	  Select the primary compressor used by the private Crystal Hybridswap
 	  zram device before userspace changes /sys/block/zramX/comp_algorithm.
-	  The value is passed to the kernel crypto compression API, so it must
-	  name an algorithm supported by the current kernel/zcomp configuration,
-	  such as lzo, lzo-rle, lz4, lz4kd, or zstd when those backends are
-	  enabled.
+	  The value must name an algorithm supported by the current zcomp
+	  configuration, such as lzo, lzo-rle, lz4, lz4kd, or zstd.  The private
+	  LZ4KD backend is selected directly and all other algorithms continue to
+	  use the kernel Crypto API.

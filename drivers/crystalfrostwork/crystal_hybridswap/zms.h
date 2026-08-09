@@ -85,10 +85,6 @@ struct zms_stats {
 	unsigned long load_resident_hits;
 	unsigned long load_disk_misses;
 	unsigned long load_resident_hit_pct;
-	unsigned long clean_cache_pages;
-	unsigned long clean_cache_evictions;
-	unsigned long clean_cache_fullness_drops;
-	unsigned long clean_cache_demand_hits;
 	unsigned long store_batch_calls;
 	unsigned long store_batch_items;
 	unsigned long store_batch_resident_reuses;

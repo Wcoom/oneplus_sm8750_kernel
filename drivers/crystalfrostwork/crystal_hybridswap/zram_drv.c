@@ -3406,10 +3406,6 @@ static ssize_t zms_stat_show(struct device *dev,
 		"load_resident_hits: %lu\n"
 		"load_disk_misses: %lu\n"
 		"load_resident_hit_pct: %lu\n"
-		"clean_cache_pages: %lu\n"
-		"clean_cache_evictions: %lu\n"
-		"clean_cache_fullness_drops: %lu\n"
-		"clean_cache_demand_hits: %lu\n"
 		"store_batch_calls: %lu\n"
 		"store_batch_items: %lu\n"
 		"store_batch_resident_reuses: %lu\n"
@@ -3460,10 +3456,6 @@ static ssize_t zms_stat_show(struct device *dev,
 		stats.load_resident_hits,
 		stats.load_disk_misses,
 		stats.load_resident_hit_pct,
-		stats.clean_cache_pages,
-		stats.clean_cache_evictions,
-		stats.clean_cache_fullness_drops,
-		stats.clean_cache_demand_hits,
 		stats.store_batch_calls,
 		stats.store_batch_items,
 		stats.store_batch_resident_reuses,
@@ -4346,11 +4338,14 @@ static int zram_prefetch_selected_items(struct zram *zram,
 					unsigned long *prepare_errors,
 					unsigned long *snapshot_mismatch)
 {
+	struct zms_load_item loads[ZRAM_ZMS_PREFETCH_MAX] = { };
 	struct zms_load_ref refs[ZRAM_ZMS_PREFETCH_MAX] = { };
 	bool ref_valid[ZRAM_ZMS_PREFETCH_MAX] = { };
+	unsigned int load_map[ZRAM_ZMS_PREFETCH_MAX] = { };
 	size_t payload_bytes = 0;
 	void *payload_buf;
 	unsigned int i;
+	unsigned int load_count = 0;
 	int first_err = 0;
 
 	if (!count)
@@ -4385,6 +4380,14 @@ static int zram_prefetch_selected_items(struct zram *zram,
 		if (ret) {
 			if (ret == -EAGAIN) {
 				atomic64_inc(&zram->stats.prefetch_cached_misses);
+				load_map[load_count] = i;
+				loads[load_count].handle = items[i].cookie.handle;
+				loads[load_count].dst =
+					(char *)payload_buf + items[i].payload_offset;
+				loads[load_count].expected_size =
+					items[i].snapshot.size;
+				load_count++;
+				continue;
 			} else if (ret == -ESTALE || ret == -ENOENT) {
 				atomic64_inc(&zram->stats.prefetch_cookie_mismatch);
 			} else {
@@ -4403,6 +4406,36 @@ static int zram_prefetch_selected_items(struct zram *zram,
 			continue;
 		}
 		ref_valid[i] = true;
+	}
+
+	if (load_count) {
+		struct zms_io io;
+		unsigned int j;
+		int ret;
+
+		ret = zms_load_batch(zram->zms, loads, load_count, GFP_NOIO, &io);
+		zram_record_zms_io(zram, items[0].index, &io);
+		if (ret && !first_err)
+			first_err = ret;
+
+		for (j = 0; j < load_count; j++) {
+			i = load_map[j];
+			if (loads[j].ret) {
+				if (!first_err)
+					first_err = loads[j].ret;
+				(*read_errors)++;
+				(*skipped)++;
+				continue;
+			}
+			if (loads[j].loaded_size != items[i].snapshot.size) {
+				if (!first_err)
+					first_err = -EIO;
+				(*read_errors)++;
+				(*skipped)++;
+				continue;
+			}
+			items[i].payload_valid = true;
+		}
 	}
 
 	for (i = 0; i < count; i++) {

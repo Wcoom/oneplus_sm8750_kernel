@@ -2412,11 +2412,22 @@ int crystal_hybridswap_zram_pressure_snapshot(struct device *dev,
 	u64 writeback = 0;
 	u64 resident;
 	u64 total;
+	u64 mem_used_pages = 0;
+	struct crystal_sddc_stats_snapshot sddc_stats;
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
+	struct zms_stats zms_stats;
+#endif
+	bool sddc_valid;
+	bool zms_valid = false;
 
 	if (!dev || !snapshot)
 		return -EINVAL;
 
 	memset(snapshot, 0, sizeof(*snapshot));
+	memset(&sddc_stats, 0, sizeof(sddc_stats));
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
+	memset(&zms_stats, 0, sizeof(zms_stats));
+#endif
 	zram = dev_to_zram(dev);
 
 	down_read(&zram->init_lock);
@@ -2427,9 +2438,12 @@ int crystal_hybridswap_zram_pressure_snapshot(struct device *dev,
 
 	stored = atomic64_read(&zram->stats.pages_stored);
 	same = atomic64_read(&zram->stats.same_pages);
+	mem_used_pages = zs_get_total_pages(zram->mem_pool);
 #ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
 	writeback = atomic64_read(&zram->stats.bd_count);
 	snapshot->backing_dev = zram->backing_dev != NULL;
+	if (zram->zms && !zms_get_stats(zram->zms, &zms_stats))
+		zms_valid = true;
 	spin_lock(&zram->wb_limit_lock);
 	snapshot->wb_limit_enabled = zram->wb_limit_enable;
 	snapshot->wb_limit_pages = zram->bd_wb_limit;
@@ -2458,6 +2472,25 @@ int crystal_hybridswap_zram_pressure_snapshot(struct device *dev,
 	snapshot->total_pages = total;
 	snapshot->resident_ratio = crystal_hybridswap_u64_percent(resident, total);
 	snapshot->valid = total > 0;
+
+	sddc_valid = crystal_sddc_debug_snapshot(zram, &sddc_stats);
+	chs_log_ratelimited(CHS_LOG_INFO,
+		"sddc_native_debug event=pressure dev=%llu valid=%u stored=%llu same=%llu writeback=%llu resident=%llu total=%llu ratio=%u mem_used_pages=%llu sddc_enabled=%u refs=%llu ref_bytes=%llu wb_ref_pins=%llu wb_ref_pin_bytes=%llu wb_deltas=%llu wb_aliases=%llu wb_delta_bytes=%llu wb_alias_bytes=%llu zms_valid=%u zms_dirty_pages=%lu zms_used_blocks=%lu zms_objects=%lu\n",
+		snapshot->device_id, snapshot->valid, stored, same, writeback,
+		resident, total, snapshot->resident_ratio, mem_used_pages,
+		sddc_valid, sddc_stats.refs, sddc_stats.ref_bytes,
+		sddc_stats.wb_ref_pins, sddc_stats.wb_ref_pin_bytes,
+		sddc_stats.wb_deltas, sddc_stats.wb_aliases,
+		sddc_stats.wb_delta_bytes, sddc_stats.wb_alias_bytes,
+		zms_valid,
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK
+		zms_valid ? zms_stats.dirty_pages : 0,
+		zms_valid ? zms_stats.used_blocks : 0,
+		zms_valid ? zms_stats.objects : 0
+#else
+		0UL, 0UL, 0UL
+#endif
+		);
 
 	return snapshot->valid ? 0 : -ENODATA;
 }
@@ -2753,11 +2786,12 @@ static int zram_finish_zms_ref_read(struct zram *zram, struct page *page,
 		 crystal_sddc_native_wb_kind(sddc_snapshot->kind)) {
 		if (sddc_wb_ref)
 			ret = crystal_sddc_native_wb_restore_pinned(zram, page,
-					sddc_snapshot, sddc_wb_ref,
+					index, sddc_snapshot, sddc_wb_ref,
 					ref->data, ref->size);
 		else
 			ret = crystal_sddc_native_wb_restore_page(zram, page,
-					sddc_snapshot, ref->data, ref->size);
+					index, sddc_snapshot, ref->data,
+					ref->size);
 	} else
 		ret = zram_decode_zms_payload(zram, page, ref->data, ref->size,
 				      size, prio);
@@ -3256,6 +3290,12 @@ static ssize_t sddc_stat_show(struct device *dev,
 		"indexed: %llu\n"
 		"refs: %llu\n"
 		"ref_bytes: %llu\n"
+		"wb_ref_pins: %llu\n"
+		"wb_ref_pin_bytes: %llu\n"
+		"wb_ref_pin_max: %llu\n"
+		"wb_ref_pin_bytes_max: %llu\n"
+		"wb_ref_pin_events: %llu\n"
+		"wb_ref_unpin_events: %llu\n"
 		"wb_deltas: %llu\n"
 		"wb_delta_bytes: %llu\n"
 		"wb_aliases: %llu\n"
@@ -3286,12 +3326,19 @@ static ssize_t sddc_stat_show(struct device *dev,
 		"conversion_failures: %llu\n"
 		"decode_failures: %llu\n"
 		"flatten_failures: %llu\n"
+		"integrity_checks: %llu\n"
+		"integrity_failures: %llu\n"
+		"integrity_skipped: %llu\n"
+		"integrity_hash_failures: %llu\n"
 		"limit_rejects: %llu\n",
 		stats.enabled, stats.queued, stats.coalesced, stats.dropped,
 		stats.ineligible, stats.shutdown_discarded, stats.worker_runs,
 		stats.pending, stats.pending_max, stats.observed, stats.stale,
 		stats.indexed,
-		stats.refs, stats.ref_bytes, stats.wb_deltas,
+		stats.refs, stats.ref_bytes, stats.wb_ref_pins,
+		stats.wb_ref_pin_bytes, stats.wb_ref_pin_max,
+		stats.wb_ref_pin_bytes_max, stats.wb_ref_pin_events,
+		stats.wb_ref_unpin_events, stats.wb_deltas,
 		stats.wb_delta_bytes, stats.wb_aliases,
 		stats.wb_alias_bytes, stats.aliases, stats.deltas,
 		stats.delta_bytes, stats.alias_attempts, stats.alias_hits,
@@ -3308,6 +3355,8 @@ static ssize_t sddc_stat_show(struct device *dev,
 		stats.released_reset_saved_bytes,
 		stats.released_other_saved_bytes, stats.conversion_failures,
 		stats.decode_failures, stats.flatten_failures,
+		stats.integrity_checks, stats.integrity_failures,
+		stats.integrity_skipped, stats.integrity_hash_failures,
 		stats.limit_rejects);
 }
 
@@ -4227,14 +4276,14 @@ static int zram_batchin_flush_items(struct zram *zram,
 				    items[i].snapshot.sddc.kind)) {
 				if (items[i].native_sddc)
 					err = crystal_sddc_native_wb_restore_pinned(
-						zram, page,
+						zram, page, items[i].index,
 						&items[i].snapshot.sddc,
 						&items[i].native_ref,
 						loads[i].dst,
 						loads[i].loaded_size);
 				else
 					err = crystal_sddc_native_wb_restore_page(
-						zram, page,
+						zram, page, items[i].index,
 						&items[i].snapshot.sddc,
 						loads[i].dst,
 						loads[i].loaded_size);

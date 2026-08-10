@@ -38,6 +38,7 @@ struct crystal_sddc_snapshot {
 	struct crystal_sddc_cookie ref;
 	u32 ref_size;
 	u32 target_size;
+	u32 page_hash;
 	u8 kind;
 };
 
@@ -54,6 +55,7 @@ struct crystal_sddc_wb_capture {
 	u32 ref_size;
 	u32 target_size;
 	u32 wire_size;
+	u32 page_hash;
 	u8 kind;
 };
 
@@ -69,6 +71,7 @@ struct crystal_sddc_wb_ref {
 	u32 ref_size;
 	u32 target_size;
 	u32 wire_size;
+	u32 page_hash;
 	u8 kind;
 };
 
@@ -92,6 +95,12 @@ struct crystal_sddc_stats_snapshot {
 	u64 indexed;
 	u64 refs;
 	u64 ref_bytes;
+	u64 wb_ref_pins;
+	u64 wb_ref_pin_bytes;
+	u64 wb_ref_pin_max;
+	u64 wb_ref_pin_bytes_max;
+	u64 wb_ref_pin_events;
+	u64 wb_ref_unpin_events;
 	u64 wb_deltas;
 	u64 wb_delta_bytes;
 	u64 wb_aliases;
@@ -122,6 +131,10 @@ struct crystal_sddc_stats_snapshot {
 	u64 conversion_failures;
 	u64 decode_failures;
 	u64 flatten_failures;
+	u64 integrity_checks;
+	u64 integrity_failures;
+	u64 integrity_skipped;
+	u64 integrity_hash_failures;
 	u64 limit_rejects;
 	u64 pending_max;
 	u32 pending;
@@ -171,11 +184,11 @@ bool crystal_sddc_native_wb_pin_locked(struct zram *zram, u32 index,
 		const struct crystal_sddc_snapshot *snapshot,
 		struct crystal_sddc_wb_ref *wb_ref);
 void crystal_sddc_native_wb_put_ref(struct crystal_sddc_wb_ref *wb_ref);
-int crystal_sddc_native_wb_restore_page(struct zram *zram,
-		struct page *page, const struct crystal_sddc_snapshot *snapshot,
+int crystal_sddc_native_wb_restore_page(struct zram *zram, struct page *page,
+		u32 index, const struct crystal_sddc_snapshot *snapshot,
 		const void *wire, size_t wire_size);
-int crystal_sddc_native_wb_restore_pinned(struct zram *zram,
-		struct page *page, const struct crystal_sddc_snapshot *snapshot,
+int crystal_sddc_native_wb_restore_pinned(struct zram *zram, struct page *page,
+		u32 index, const struct crystal_sddc_snapshot *snapshot,
 		struct crystal_sddc_wb_ref *wb_ref,
 		const void *wire, size_t wire_size);
 void crystal_sddc_zram_account_sub_locked(struct zram *zram, u32 index);
@@ -184,6 +197,8 @@ void crystal_sddc_zram_ref_account(struct zram *zram, u64 memcg_id,
 		size_t size, bool add);
 bool crystal_sddc_zram_memory_limit_ok(struct zram *zram);
 void crystal_sddc_get_stats(struct zram *zram,
+		struct crystal_sddc_stats_snapshot *stats);
+bool crystal_sddc_debug_snapshot(struct zram *zram,
 		struct crystal_sddc_stats_snapshot *stats);
 #else
 static inline int crystal_sddc_create(struct zram *zram,
@@ -303,14 +318,16 @@ static inline void crystal_sddc_native_wb_put_ref(
 }
 
 static inline int crystal_sddc_native_wb_restore_page(struct zram *zram,
-		struct page *page, const struct crystal_sddc_snapshot *snapshot,
+		struct page *page, u32 index,
+		const struct crystal_sddc_snapshot *snapshot,
 		const void *wire, size_t wire_size)
 {
 	return -EOPNOTSUPP;
 }
 
 static inline int crystal_sddc_native_wb_restore_pinned(struct zram *zram,
-		struct page *page, const struct crystal_sddc_snapshot *snapshot,
+		struct page *page, u32 index,
+		const struct crystal_sddc_snapshot *snapshot,
 		struct crystal_sddc_wb_ref *wb_ref,
 		const void *wire, size_t wire_size)
 {
@@ -321,6 +338,13 @@ static inline void crystal_sddc_get_stats(struct zram *zram,
 		struct crystal_sddc_stats_snapshot *stats)
 {
 	memset(stats, 0, sizeof(*stats));
+}
+
+static inline bool crystal_sddc_debug_snapshot(struct zram *zram,
+		struct crystal_sddc_stats_snapshot *stats)
+{
+	memset(stats, 0, sizeof(*stats));
+	return false;
 }
 #endif
 

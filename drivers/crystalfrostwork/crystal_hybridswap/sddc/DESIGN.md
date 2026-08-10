@@ -112,10 +112,13 @@ page. Decode rejects an unknown magic or version, a changed header size, a
 cookie or reference-size mismatch, an invalid target size, a codec error, or
 a restored length different from `target_size`.
 
-This format is an internal resident representation, not an on-disk or
-user-space ABI. Before ZMS writeback, the slot is flattened back to its
-ordinary compressed stream or raw page. The reference cookie and delta header
-are therefore never required to survive reset or backing-device persistence.
+This is an internal kernel format, not a stable on-disk or user-space ABI.
+Without native SDDC writeback, the slot is flattened back to its ordinary
+compressed stream or raw page before entering ZMS. With native writeback, a
+validated `DELTA` wire object is stored unchanged, while `ALIAS` is represented
+by a compact 16-byte header. The matching sparse writeback state pins the same
+resident reference for the lifetime of either native object. The reference
+graph is not persisted across device reset or reinitialization.
 
 ## 4. Candidate Discovery
 
@@ -284,22 +287,24 @@ returns an I/O error and increments decode diagnostics.
 ### 6.2 ZMS writeback
 
 Writeback snapshots both normal zram identity and SDDC identity
-`{mutation_seq, kind, ref cookie}` while claiming `ZRAM_UNDER_WB`. By default,
-a managed slot is flattened outside the slot lock to its ordinary
-stream; writeback does not decompress that stream to the original page.  When
-`CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_ZMS_NATIVE` is enabled, a `DELTA` slot instead
-copies its validated wire object to ZMS unchanged.  The immutable reference
-stays in the resident SDDC reference table and a separate sparse `wb_states`
-entry owns the temporary reference pin until the ZMS handle is freed.
+`{mutation_seq, kind, ref cookie}` while claiming `ZRAM_UNDER_WB`. When native
+writeback is unavailable, a managed slot is flattened outside the slot lock
+to its ordinary stream; writeback does not decompress that stream to the
+original page.  When
+`CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_ZMS_NATIVE` is enabled, a `DELTA` or `ALIAS`
+slot instead copies its validated wire object to ZMS unchanged.  The immutable
+reference stays in the resident SDDC reference table and a separate sparse
+`wb_states` entry owns the temporary reference pin until the ZMS handle is
+freed.
 
 Before replacing the resident slot with a ZMS handle, writeback rechecks the
 normal handle, size, flags, memcg ID, and the complete SDDC snapshot. A
 mismatch discards the stale ZMS object and leaves the current slot intact. On
 success, normal slot free drops the resident SDDC owner.  Native commit then
 records the post-transition mutation and reference cookie in `wb_states`; the
-ZMS entry's size is the DELTA wire size.  Flattened entries record the ordinary
-size and compressor priority.  A `PAGE_SIZE` ordinary stream restores the
-normal `ZRAM_HUGE` state.
+ZMS entry's size is the native wire size.  Flattened entries record the
+ordinary size and compressor priority.  A `PAGE_SIZE` ordinary stream restores
+the normal `ZRAM_HUGE` state.
 
 Writeback allocation, store, flatten, and snapshot failures clear
 `ZRAM_UNDER_WB` and ask the still-resident slot to be observed again when it
@@ -309,14 +314,15 @@ SDDC-specific object graph.
 
 ### 6.3 Batch-in, prefetch, rewrite, and recompress
 
-ZMS batch-in decodes flattened ordinary streams as before.  Native DELTA
+ZMS batch-in decodes flattened ordinary streams as before.  Native `DELTA`
 objects first restore through the resident reference and then decode the
-resulting ordinary stream to a page; the normal zram compressor creates the
-new resident object.  Native DELTA neighbors are excluded from the current
-prefetch promotion path until a wire-aware prefetch buffer is available.  The
-restored slot receives a new mutation identity and observation job. Readback
-failure or snapshot mismatch clears `ZRAM_UNDER_WB` and re-observes any
-eligible resident object.
+resulting ordinary stream to a page; native `ALIAS` objects restore the
+reference stream directly.  The normal zram compressor creates the new
+resident object.  Native SDDC neighbors are excluded from the current prefetch
+promotion path until a wire-aware prefetch buffer is available.  The restored
+slot receives a new mutation identity and observation job. Readback failure or
+snapshot mismatch clears `ZRAM_UNDER_WB` and re-observes any eligible resident
+object.
 
 A normal write first frees the old SDDC representation and its reference
 owner, then commits an ordinary object and queues a new observation. Ordinary

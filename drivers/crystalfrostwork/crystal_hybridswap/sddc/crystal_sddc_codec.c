@@ -122,28 +122,53 @@ int crystal_sddc_codec_compress_delta(struct crystal_sddc_codec *codec,
 	return 0;
 }
 
-int crystal_sddc_codec_decompress_delta(struct crystal_sddc_codec *codec,
+int
+crystal_sddc_codec_decompress_delta_borrowed(struct crystal_sddc_codec *codec,
 		const void *src, unsigned int src_len, const void *ref,
-		unsigned int ref_len, void *dst, unsigned int *dst_len)
+		unsigned int ref_len, const void **restored,
+		unsigned int *restored_len)
 {
 	u8 *current_data;
 	int ret;
 
+	if (!restored || !restored_len)
+		return -EINVAL;
+	*restored = NULL;
 	if (!codec || !src || !src_len ||
-	    src_len > CRYSTAL_SDDC_BLOCK_SIZE || !ref || !ref_len || !dst ||
-	    !dst_len || !*dst_len || ref_len > CRYSTAL_SDDC_BLOCK_SIZE ||
-	    *dst_len != CRYSTAL_SDDC_BLOCK_SIZE ||
-	    ref_len + *dst_len > CRYSTAL_SDDC_WINDOW_SIZE)
+	    src_len > CRYSTAL_SDDC_BLOCK_SIZE || !ref || !ref_len ||
+	    !*restored_len ||
+	    ref_len > CRYSTAL_SDDC_BLOCK_SIZE ||
+	    *restored_len != CRYSTAL_SDDC_BLOCK_SIZE ||
+	    ref_len + *restored_len > CRYSTAL_SDDC_WINDOW_SIZE)
 		return -EINVAL;
 
 	memcpy(codec->delta_window, ref, ref_len);
 	current_data = codec->delta_window + ref_len;
 	ret = crystal_lz4kd_decode_delta(src, codec->delta_window, current_data,
-					 src_len, *dst_len);
-	if (ret <= 0 || ret > *dst_len)
+					 src_len, *restored_len);
+	if (ret <= 0 || ret > *restored_len)
 		return -EINVAL;
 
-	memcpy(dst, current_data, ret);
-	*dst_len = ret;
+	*restored = current_data;
+	*restored_len = ret;
+	return 0;
+}
+
+int crystal_sddc_codec_decompress_delta(struct crystal_sddc_codec *codec,
+		const void *src, unsigned int src_len, const void *ref,
+		unsigned int ref_len, void *dst, unsigned int *dst_len)
+{
+	const void *restored;
+	int ret;
+
+	if (!dst || !dst_len)
+		return -EINVAL;
+
+	ret = crystal_sddc_codec_decompress_delta_borrowed(codec, src, src_len,
+			ref, ref_len, &restored, dst_len);
+	if (ret)
+		return ret;
+
+	memcpy(dst, restored, *dst_len);
 	return 0;
 }

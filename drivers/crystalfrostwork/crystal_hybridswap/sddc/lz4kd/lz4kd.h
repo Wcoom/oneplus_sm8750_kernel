@@ -21,8 +21,9 @@
 
   The LZ compressors accept any data as input and compress it
   without loss to a smaller size if possible.
-  Compressed data produced by LZ compressor API lz4kd_encode*(),
-  can be decompressed only by lz4kd_decode() API documented below.\n
+  Compressed data produced by lz4kd_encode() is decoded by lz4kd_decode();
+  delta data produced by lz4kd_encode_delta() requires the reference-aware
+  lz4kd_decode_delta() API documented below.\n
   */
 
 /*
@@ -34,11 +35,6 @@ typedef enum {
 	LZ4K_STATUS_READ_ERROR =     -2, /* !< Return when data reading failed */
 	LZ4K_STATUS_WRITE_ERROR =    -3  /* !< Return when data writing failed */
 } lz4kd_status;
-
-/*
-  lz4kd_Version() returns static unmutable string with algorithm version
- */
-const char *crystal_lz4kd_version(void);
 
 /*
   lz4kd_encode_state_bytes_min() returns number of bytes for state parameter,
@@ -99,78 +95,6 @@ unsigned crystal_lz4kd_encode_state_bytes_min(void);
     out_limit is ignored if it is equal to 0.
  */
 int crystal_lz4kd_encode(
-	void *const state,
-	const void *const in,
-	void *out,
-	unsigned in_max,
-	unsigned out_max,
-	unsigned out_limit);
-
-int crystal_lz4kd_encode2(
-	void *const state,
-	const void *const in,
-	void *out,
-	unsigned in_max,
-	unsigned out_max,
-	unsigned out_limit);
-
-int crystal_lz4kd_encode_pattern(
-	void *const state,
-	const void *const in,
-	void *out,
-	unsigned in_max,
-	unsigned out_max,
-	unsigned out_limit);
-
-/*
-  lz4kd_encode_max_cr() encodes/compresses one input buffer at *in, places
-  result of encoding into one output buffer at *out if encoded data
-  size fits specified value of out_max.
-  It returs size of encoded data in case of success or value<=0 otherwise.
-  The result of successful encoding is in proprietary format, that
-  is the encoded data can be decoded only by lz4kd_decode().
-
-  \return
-    \li positive value\n
-      if encoding was successful. The value returned is the size of encoded
-      (compressed) data always <=out_max.
-    \li non-positive value\n
-      if in==0||in_max==0||out==0||out_max==0 or
-      if out_max is less than needed for encoded (compressed) data.
-
-  \param[in] state
-    !=0, pointer to state buffer used internally by the function.  Size of
-    state in bytes should be at least lz4kd_encode_state_bytes_min().  The content
-    of state buffer will be changed during encoding.
-
-  \param[in] in
-    !=0, pointer to the input buffer to encode (compress).  The content of
-    the input buffer does not change during encoding.
-
-  \param[in] out
-    !=0, pointer to the output buffer where to place result of encoding
-    (compression).
-    If encoding is unsuccessful, e.g. out_max is less than
-    needed for encoded data then content of out buffer may be arbitrary.
-
-  \param[in] in_max
-    !=0, size in bytes of the input buffer at *in
-
-  \param[in] out_max
-    !=0, size in bytes of the output buffer at *out
-
-  \param[in] out_limit
-    encoded data size soft limit in bytes. Due to performance reasons it is
-    not guaranteed that
-    lz4kd_encode will always detect that resulting encoded data size is
-    bigger than out_limit.
-    Hovewer, when reaching out_limit is detected, lz4kd_encode() returns
-    earlier and spares CPU cycles.  Caller code should recheck result
-    returned by lz4kd_encode() (value greater than 0) if it is really
-    less or equal than out_limit.
-    out_limit is ignored if it is equal to 0.
- */
-int crystal_lz4kd_encode_max_cr(
 	void *const state,
 	const void *const in,
 	void *out,
@@ -239,8 +163,7 @@ int crystal_lz4kd_encode_delta(
 /*
   lz4kd_decode() decodes (decompresses) data from one input buffer and places
   the result of decompression into one output buffer.  The encoded data in input
-  buffer should be in proprietary format, produced by lz4kd_encode()
-  or by lz4kd_encode_delta().
+  buffer should be in proprietary format produced by lz4kd_encode().
 
   \return
     \li positive value\n

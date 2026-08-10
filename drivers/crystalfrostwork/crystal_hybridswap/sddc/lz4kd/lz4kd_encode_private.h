@@ -9,10 +9,6 @@
 
 #include "lz4kd_private.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 enum {
 	GAIN_BYTES_LOG2 = 6,
 	GAIN_BYTES_MAX = 1 << GAIN_BYTES_LOG2,
@@ -52,13 +48,6 @@ inline static uint_fast32_t nr_encoded_bytes_max(
 	return nr_max < mask(nr_log2) ? r : r + size_bytes_count(nr_max - mask(nr_log2));
 }
 
-/* maximum encoded size for repeat and non-repeat data if "fast" encoder is used */
-uint_fast32_t crystal_lz4kd_encoded_bytes_max(
-	uint_fast32_t nr_max,
-	uint_fast32_t r_max,
-	uint_fast32_t nr_log2,
-	uint_fast32_t off_log2);
-
 inline static const uint8_t *hashed(
 	const uint8_t *const in0,
 	uint16_t *const ht,
@@ -96,8 +85,7 @@ int crystal_lz4kd_out_tail(
 	const uint8_t *const nr0,
 	const uint8_t *const in_end,
 	const uint_fast32_t nr_log2,
-	const uint_fast32_t off_log2,
-	bool check_out);
+	const uint_fast32_t off_log2);
 
 uint8_t *crystal_lz4kd_out_tuple(
 	uint8_t *out_at,
@@ -110,15 +98,6 @@ uint8_t *crystal_lz4kd_out_tuple(
 	const uint_fast32_t off_log2,
 	bool check_out);
 
-uint8_t *crystal_lz4kd_out_repeat(
-	uint8_t *out_at,
-	uint8_t *const out_end,
-	uint_fast32_t utag,
-	uint_fast32_t r_bytes_max,
-	const uint_fast32_t nr_log2,
-	const uint_fast32_t off_log2,
-	const bool check_out);
-
 const uint8_t *crystal_lz4kd_repeat_end(
 	const uint8_t *q,
 	const uint8_t *r,
@@ -127,16 +106,5 @@ const uint8_t *crystal_lz4kd_repeat_end(
 	struct crystal_lz4kd_simd *simd);
 
 void crystal_lz4kd_simd_finish(struct crystal_lz4kd_simd *simd);
-
-int crystal_lz4kd_encode_fast(
-	void *const state,
-	const uint8_t *const in,
-	uint8_t *const out,
-	const uint_fast32_t in_max,
-	const uint_fast32_t out_max);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* _LZ4KD_ENCODE_PRIVATE_H */

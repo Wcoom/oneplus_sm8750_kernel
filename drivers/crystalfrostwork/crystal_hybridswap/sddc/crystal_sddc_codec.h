@@ -24,5 +24,15 @@ int crystal_sddc_codec_compress_delta(struct crystal_sddc_codec *codec,
 int crystal_sddc_codec_decompress_delta(struct crystal_sddc_codec *codec,
 		const void *src, unsigned int src_len, const void *ref,
 		unsigned int ref_len, void *dst, unsigned int *dst_len);
+/*
+ * Restore an ordinary stream into the codec's private delta window. The
+ * returned pointer remains valid while the owning zcomp stream is locked and
+ * until another delta operation uses the same codec.
+ */
+int
+crystal_sddc_codec_decompress_delta_borrowed(struct crystal_sddc_codec *codec,
+		const void *src, unsigned int src_len, const void *ref,
+		unsigned int ref_len, const void **restored,
+		unsigned int *restored_len);
 
 #endif /* _CRYSTAL_SDDC_CODEC_H_ */

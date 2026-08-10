@@ -20,15 +20,6 @@ enum {
 	STEP_LOG2 = 5 /* ==3 #2 avg drop in CR */
 };
 
-static unsigned encode_state_bytes_min(void)
-{
-	enum {
-		BYTES_LOG2 = HT_LOG2 + 1
-	};
-	const unsigned bytes_total = (1U << BYTES_LOG2);
-	return bytes_total;
-}
-
 unsigned crystal_lz4kd_encode_state_bytes_min(void)
 {
 	/* The delta encoder needs a 13-bit hash and offset table. */
@@ -121,8 +112,7 @@ int crystal_lz4kd_out_tail(
 	const uint8_t *const nr0,
 	const uint8_t *const in_end,
 	const uint_fast32_t nr_log2,
-	const uint_fast32_t off_log2,
-	bool check_out)
+	const uint_fast32_t off_log2)
 {
 	return out_tail(out_at, out_end, out, nr0, in_end,
 			nr_log2, off_log2);
@@ -130,12 +120,12 @@ int crystal_lz4kd_out_tail(
 
 static uint8_t *out_non_repeat(
 	uint8_t *out_at,
-	uint8_t *const out_end,
 	uint_fast32_t utag,
 	const uint8_t *const nr0,
 	const uint8_t *const r,
 	const uint_fast32_t nr_log2,
-	const uint_fast32_t off_log2)
+	const uint_fast32_t off_log2,
+	bool exact_copy)
 {
 	const uint_fast32_t nr_bytes_max = u_32(r - nr0);
 	const uint_fast32_t nr_mask = mask(nr_log2),
@@ -149,7 +139,10 @@ static uint8_t *out_non_repeat(
 		utag |= (nr_mask << (off_log2 + r_log2));
 		out_at = out_utag_then_bytes_left(out_at, utag, bytes_left);
 	} /* if (nr_bytes_max<nr_mask) */
-	copy_x_while_total(out_at, nr0, nr_bytes_max, NR_COPY_MIN);
+	if (exact_copy)
+		m_copy(out_at, nr0, nr_bytes_max);
+	else
+		copy_x_while_total(out_at, nr0, nr_bytes_max, NR_COPY_MIN);
 	out_at += nr_bytes_max;
 	return out_at;
 }
@@ -185,30 +178,19 @@ static uint8_t *out_repeat(
 	return out_at; /* SUCCESS: continue compression */
 }
 
-uint8_t *crystal_lz4kd_out_repeat(
-	uint8_t *out_at,
-	uint8_t *const out_end,
-	uint_fast32_t utag,
-	uint_fast32_t r_bytes_max,
-	const uint_fast32_t nr_log2,
-	const uint_fast32_t off_log2,
-	const bool check_out)
-{
-	return out_repeat(out_at, utag, r_bytes_max, nr_log2, off_log2);
-}
-
 inline static uint8_t *out_tuple(
 	uint8_t *out_at,
-	uint8_t *const out_end,
 	uint_fast32_t utag,
 	const uint8_t *const nr0,
 	const uint8_t *const r,
 	uint_fast32_t r_bytes_max,
 	const uint_fast32_t nr_log2,
-	const uint_fast32_t off_log2)
+	const uint_fast32_t off_log2,
+	bool exact_copy)
 {
 	update_utag(r_bytes_max, &utag, nr_log2, off_log2);
-	out_at = out_non_repeat(out_at, out_end, utag, nr0, r, nr_log2, off_log2);
+	out_at = out_non_repeat(out_at, utag, nr0, r, nr_log2,
+			off_log2, exact_copy);
 	return out_r_bytes_left(out_at, r_bytes_max, nr_log2, off_log2);
 }
 
@@ -223,8 +205,25 @@ uint8_t *crystal_lz4kd_out_tuple(
 	const uint_fast32_t off_log2,
 	bool check_out)
 {
-	return out_tuple(out_at, out_end, utag, nr0, r, r_bytes_max,
-				nr_log2, off_log2);
+	if (check_out) {
+		const uint_fast32_t nr_bytes_max = u_32(r - nr0);
+		const uint_fast32_t nr_mask = mask(nr_log2);
+		const uint_fast32_t r_mask =
+			mask(TAG_BITS_MAX - (off_log2 + nr_log2));
+		uint_fast32_t encoded_size = TAG_BYTES_MAX + nr_bytes_max;
+
+		if (nr_bytes_max >= nr_mask)
+			encoded_size +=
+				(nr_bytes_max - nr_mask) / BYTE_MAX + 1;
+		if (r_bytes_max - REPEAT_MIN >= r_mask)
+			encoded_size += (r_bytes_max - REPEAT_MIN - r_mask) /
+				BYTE_MAX + 1;
+		if (encoded_size > u_32(out_end - out_at))
+			return NULL;
+	}
+
+	return out_tuple(out_at, utag, nr0, r, r_bytes_max,
+			nr_log2, off_log2, check_out);
 }
 
 #if defined(CONFIG_ARM64) && defined(CONFIG_KERNEL_MODE_NEON)
@@ -372,8 +371,8 @@ static int encode_any(
 			out_at = out_repeat(out_at, utag, r_bytes_max,
 					    NR_LOG2, OFF_LOG2);
 		else
-			out_at = out_tuple(out_at, out_end, utag, nr0, r, r_bytes_max,
-					    NR_LOG2, OFF_LOG2);
+			out_at = out_tuple(out_at, utag, nr0, r,
+					r_bytes_max, NR_LOG2, OFF_LOG2, false);
 		if (unlikely((r += r_bytes_max) > in_end_safe))
 			return out_tail2(out_at, out_end, out, r, in_end,
 					 NR_LOG2, OFF_LOG2);
@@ -381,8 +380,7 @@ static int encode_any(
 	}
 }
 
-/* not static for inlining optimization */
-int crystal_lz4kd_encode_fast(
+static int crystal_lz4kd_encode_fast(
 	void *const state,
 	const uint8_t *const in,
 	uint8_t *const out,
@@ -408,56 +406,26 @@ int crystal_lz4kd_encode(
 {
 	const uint64_t io_min = min_u64(in_max, out_max);
 	const uint64_t gain_max = max_u64(GAIN_BYTES_MAX, (io_min >> GAIN_BYTES_LOG2));
-	/* ++use volatile pointers to prevent compiler optimizations */
-	const uint8_t *volatile in_end = (const uint8_t*)in + in_max;
-	const uint8_t *volatile out_end = (uint8_t*)out + out_max;
-	const void *volatile state_end =
-		(uint8_t*)state + encode_state_bytes_min();
+	uintptr_t state_end;
+
 	if (unlikely(state == NULL))
 		return LZ4K_STATUS_FAILED;
-	if (unlikely(in == NULL || out == NULL))
+	if (unlikely(check_add_overflow((uintptr_t)state,
+			1U << (HT_LOG2 + 1), &state_end)))
+		return LZ4K_STATUS_FAILED;
+	if (unlikely(!crystal_lz4kd_valid_range(in, in_max, out, out_max,
+			NR_COPY_MIN, 1U << BLOCK_4KB_LOG2,
+			~0U)))
 		return LZ4K_STATUS_FAILED;
 	if (unlikely(out_max <= gain_max))
 		return LZ4K_STATUS_FAILED;
-	if (unlikely((const uint8_t*)in >= in_end || (uint8_t*)out >= out_end))
-		return LZ4K_STATUS_FAILED;
-	if (unlikely(state >= state_end))
-		return LZ4K_STATUS_FAILED; /* pointer overflow */
-	if (in_max > (1 << BLOCK_4KB_LOG2))
-		return LZ4K_STATUS_FAILED;
 	if (unlikely(!out_limit || out_limit > io_min))
 		out_limit = (unsigned)io_min;
-	m_set(state, 0, encode_state_bytes_min());
+	m_set(state, 0, 1U << (HT_LOG2 + 1));
 	*((uint8_t*)out) = 0; /* lz4kd header */
 	if (unlikely(nr_encoded_bytes_max(in_max, NR_4KB_LOG2) > out_max))
 		return 0;
 	return crystal_lz4kd_encode_fast(state, (const uint8_t*)in,
 			(uint8_t*)out,
 			in_max, out_limit);
-}
-
-/* maximum encoded size for repeat and non-repeat data if "fast" encoder is used */
-uint_fast32_t crystal_lz4kd_encoded_bytes_max(
-	uint_fast32_t nr_max,
-	uint_fast32_t r_max,
-	uint_fast32_t nr_log2,
-	uint_fast32_t off_log2)
-{
-	uint_fast32_t r = 1 + TAG_BYTES_MAX +
-		(uint32_t)round_up_to_log2(nr_max, NR_COPY_LOG2);
-	uint_fast32_t r_log2 = TAG_BITS_MAX - (off_log2 + nr_log2);
-	if (nr_max >= mask(nr_log2))
-		r += size_bytes_count(nr_max - mask(nr_log2));
-	if (r_max >= mask(r_log2)) {
-		r_max -= mask(r_log2);
-		r += (uint_fast32_t)max_u64(size_bytes_count(r_max),
-					r_max - r_max / REPEAT_MIN); /* worst case: one tag for each REPEAT_MIN */
-	}
-	return r;
-}
-
-const char *crystal_lz4kd_version(void)
-{
-	static const char *version = "2022.03.20";
-	return version;
 }

@@ -138,6 +138,16 @@ static int lz4kd_backend_decompress_delta(struct zcomp_strm *zstrm,
 			src_len, ref, ref_len, dst, dst_len);
 }
 
+static int
+lz4kd_backend_decompress_delta_borrowed(struct zcomp_strm *zstrm,
+		const void *src, unsigned int src_len, const void *ref,
+		unsigned int ref_len, const void **restored,
+		unsigned int *restored_len)
+{
+	return crystal_sddc_codec_decompress_delta_borrowed(zstrm->backend_data,
+			src, src_len, ref, ref_len, restored, restored_len);
+}
+
 static const struct zcomp_backend_ops lz4kd_backend_ops = {
 	.create = lz4kd_backend_create,
 	.destroy = lz4kd_backend_destroy,
@@ -145,6 +155,8 @@ static const struct zcomp_backend_ops lz4kd_backend_ops = {
 	.decompress = lz4kd_backend_decompress,
 	.compress_delta = lz4kd_backend_compress_delta,
 	.decompress_delta = lz4kd_backend_decompress_delta,
+	.decompress_delta_borrowed =
+		lz4kd_backend_decompress_delta_borrowed,
 };
 #endif
 
@@ -314,6 +326,27 @@ int zcomp_decompress_delta(struct zcomp_strm *zstrm, const void *src,
 	*dst_len = PAGE_SIZE;
 	return zstrm->ops->decompress_delta(zstrm, src, src_len, ref,
 			ref_len, dst, dst_len);
+}
+
+int zcomp_decompress_delta_borrowed(struct zcomp_strm *zstrm, const void *src,
+		unsigned int src_len, const void *ref, unsigned int ref_len,
+		const void **restored, unsigned int *restored_len)
+{
+	int ret;
+
+	if (!restored || !restored_len)
+		return -EINVAL;
+	*restored = NULL;
+	*restored_len = PAGE_SIZE;
+	if (zstrm->ops->decompress_delta_borrowed)
+		return zstrm->ops->decompress_delta_borrowed(zstrm, src,
+				src_len, ref, ref_len, restored, restored_len);
+
+	ret = zcomp_decompress_delta(zstrm, src, src_len, ref, ref_len,
+			zstrm->buffer, restored_len);
+	if (!ret)
+		*restored = zstrm->buffer;
+	return ret;
 }
 
 int zcomp_cpu_up_prepare(unsigned int cpu, struct hlist_node *node)

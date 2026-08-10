@@ -6,6 +6,7 @@
 #include <linux/string.h>
 
 #include "crystal_sddc_codec.h"
+#include "lz4kd/lz4kd.h"
 
 struct crystal_sddc_codec_test_ctx {
 	struct crystal_sddc_codec *codec;
@@ -114,10 +115,10 @@ static void crystal_sddc_codec_delta_chain_test(struct kunit *test)
 	unsigned int delta_len = 2 * PAGE_SIZE;
 	unsigned int restored_encoded_len = PAGE_SIZE;
 	unsigned int restored_page_len = PAGE_SIZE;
+	const void *restored_encoded;
 	u8 *ref_encoded = kunit_kmalloc(test, 2 * PAGE_SIZE, GFP_KERNEL);
 	u8 *cur_encoded = kunit_kmalloc(test, 2 * PAGE_SIZE, GFP_KERNEL);
 	u8 *delta = kunit_kmalloc(test, 2 * PAGE_SIZE, GFP_KERNEL);
-	u8 *restored_encoded = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
 	u8 *restored_page = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
 	u8 *ref_page = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
 	u8 *cur_page = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
@@ -126,7 +127,6 @@ static void crystal_sddc_codec_delta_chain_test(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, ref_encoded);
 	KUNIT_ASSERT_NOT_NULL(test, cur_encoded);
 	KUNIT_ASSERT_NOT_NULL(test, delta);
-	KUNIT_ASSERT_NOT_NULL(test, restored_encoded);
 	KUNIT_ASSERT_NOT_NULL(test, restored_page);
 	KUNIT_ASSERT_NOT_NULL(test, ref_page);
 	KUNIT_ASSERT_NOT_NULL(test, cur_page);
@@ -152,10 +152,11 @@ static void crystal_sddc_codec_delta_chain_test(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	KUNIT_ASSERT_LT(test, delta_len, cur_encoded_len);
 
-	ret = crystal_sddc_codec_decompress_delta(ctx->codec, delta, delta_len,
-			ref_encoded, ref_encoded_len, restored_encoded,
+	ret = crystal_sddc_codec_decompress_delta_borrowed(ctx->codec, delta,
+			delta_len, ref_encoded, ref_encoded_len, &restored_encoded,
 			&restored_encoded_len);
 	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_NOT_NULL(test, restored_encoded);
 	KUNIT_ASSERT_EQ(test, restored_encoded_len, cur_encoded_len);
 	KUNIT_EXPECT_MEMEQ(test, restored_encoded, cur_encoded, cur_encoded_len);
 
@@ -203,6 +204,8 @@ static void crystal_sddc_codec_malformed_test(struct kunit *test)
 	struct crystal_sddc_codec_test_ctx *ctx = test->priv;
 	unsigned int encoded_len = 2 * PAGE_SIZE;
 	unsigned int decoded_len = PAGE_SIZE;
+	unsigned int restored_len = PAGE_SIZE;
+	const void *restored = (const void *)1;
 	u8 malformed[4] = { 0 };
 	u8 *encoded = kunit_kmalloc(test, 2 * PAGE_SIZE, GFP_KERNEL);
 	u8 *decoded = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
@@ -225,6 +228,38 @@ static void crystal_sddc_codec_malformed_test(struct kunit *test)
 	ret = crystal_sddc_codec_decompress(ctx->codec, malformed,
 			sizeof(malformed), decoded, &decoded_len);
 	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+
+	ret = crystal_sddc_codec_decompress_delta_borrowed(ctx->codec,
+			malformed, sizeof(malformed), page, PAGE_SIZE, &restored,
+			&restored_len);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	KUNIT_EXPECT_NULL(test, restored);
+}
+
+static void crystal_sddc_codec_delta_output_bounds_test(struct kunit *test)
+{
+	u8 *state = kunit_kmalloc(test,
+			crystal_lz4kd_encode_state_bytes_min(), GFP_KERNEL);
+	u8 *window = kunit_kmalloc(test, 2 * PAGE_SIZE, GFP_KERNEL);
+	u8 output[16];
+	unsigned int out_size;
+	int ret;
+
+	KUNIT_ASSERT_NOT_NULL(test, state);
+	KUNIT_ASSERT_NOT_NULL(test, window);
+	memset(window, 0x5a, 2 * PAGE_SIZE);
+
+	for (out_size = 0; out_size < ARRAY_SIZE(output); out_size++) {
+		unsigned int i;
+
+		memset(output, 0xa5, sizeof(output));
+		ret = crystal_lz4kd_encode_delta(state, window,
+				window + PAGE_SIZE, output, PAGE_SIZE, out_size,
+				out_size);
+		KUNIT_EXPECT_LE(test, ret, 0);
+		for (i = out_size; i < ARRAY_SIZE(output); i++)
+			KUNIT_EXPECT_EQ(test, output[i], (u8)0xa5);
+	}
 }
 
 static struct kunit_case crystal_sddc_codec_test_cases[] = {
@@ -233,6 +268,7 @@ static struct kunit_case crystal_sddc_codec_test_cases[] = {
 	KUNIT_CASE(crystal_sddc_codec_delta_chain_test),
 	KUNIT_CASE(crystal_sddc_codec_full_window_test),
 	KUNIT_CASE(crystal_sddc_codec_malformed_test),
+	KUNIT_CASE(crystal_sddc_codec_delta_output_bounds_test),
 	{}
 };
 

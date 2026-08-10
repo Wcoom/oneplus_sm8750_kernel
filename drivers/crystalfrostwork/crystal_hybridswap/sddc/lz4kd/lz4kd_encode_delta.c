@@ -26,7 +26,7 @@ inline static uint_fast32_t hashv(const uint64_t v, uint32_t shift)
 
 inline static uint_fast32_t hash(const uint8_t *r, uint32_t shift)
 {
-	return hashv(*((const uint64_t*)r), shift);
+	return hashv(read8_at(r), shift);
 }
 
 static void fill_ht_offsets_s(
@@ -139,7 +139,7 @@ static int encode_any2(
 				break; /* repeat found */
 			if (unlikely((s += (++step >> STEP_LOG2)) > in_end_safe))
 				return crystal_lz4kd_out_tail(out_at, out_end, out, nr0,
-					 in_end, nr_log2, OFF_LOG2, check_out);
+					 in_end, nr_log2, OFF_LOG2);
 		} /* for */
 		utag = (uint_fast32_t)(s - q);
 		r_end = crystal_lz4kd_repeat_end(q, s, in_end_safe, in_end, simd);
@@ -173,43 +173,10 @@ REPEAT_DONE:
 			return r == in_end ? (int)(out_at - out) :
 				crystal_lz4kd_out_tail(out_at, out_end, out, r,
 					in_end,
-					nr_log2, OFF_LOG2, check_out);
+					nr_log2, OFF_LOG2);
 		hash_repeat_tail(ht, past_offset, in0, r);
 		nr0 = r;
 	} /* for */
-}
-
-static int encode_delta_fast(
-	uint16_t *const ht,
-	const uint8_t *const in0,
-	const uint8_t *const in,
-	uint8_t *const out,
-	const uint_fast32_t in_max,
-	const uint_fast32_t out_max,
-	const uint_fast32_t nr_log2,
-	struct crystal_lz4kd_simd *simd)
-{
-	return encode_any2(ht, in0, in, in + in_max, out, out + out_max,
-			 nr_log2, false, simd); /* !check_out */
-}
-
-static int crystal_lz4kd_encode_delta_slow(
-	uint16_t *const ht,
-	const uint8_t *const in0,
-	const uint8_t *const in,
-	uint8_t *const out,
-	const uint_fast32_t in_max,
-	const uint_fast32_t out_max,
-	const uint_fast32_t nr_log2,
-	struct crystal_lz4kd_simd *simd)
-{
-	return encode_any2(ht, in0, in, in + in_max, out, out + out_max,
-			 nr_log2, true, simd); /* check_out */
-}
-
-inline static uint64_t u64_diff(const void *a, const void *b)
-{
-	return (uint64_t)((const uint8_t*)a - (const uint8_t*)b);
 }
 
 int crystal_lz4kd_encode_delta(
@@ -223,29 +190,34 @@ int crystal_lz4kd_encode_delta(
 {
 	const unsigned io_min = in_max < out_max ? in_max : out_max;
 	struct crystal_lz4kd_simd simd = { };
+	uintptr_t in0_addr = (uintptr_t)in0;
+	uintptr_t in_addr = (uintptr_t)in;
+	uintptr_t state_end;
 	int ret;
 
 	if (unlikely(state == NULL))
 		return LZ4K_STATUS_FAILED;
-	if (unlikely(in0 == NULL || in == NULL || out == NULL))
+	if (unlikely(check_add_overflow((uintptr_t)state,
+			crystal_lz4kd_encode_state_bytes_min(), &state_end)))
 		return LZ4K_STATUS_FAILED;
-	if (unlikely(in0 >= in))
+	if (unlikely(!crystal_lz4kd_valid_range(in, in_max, out, out_max,
+			NR_COPY_MIN, 1U << BLOCK_4KB_LOG2,
+			~0U)))
 		return LZ4K_STATUS_FAILED;
-	if (unlikely(u64_diff(in, in0) + in_max > (1U << BLOCK_8KB_LOG2)))
+	if (unlikely(!in0 || in0_addr >= in_addr))
+		return LZ4K_STATUS_FAILED;
+	if (unlikely(in_addr - in0_addr >
+		     (1U << BLOCK_8KB_LOG2) - in_max))
 		return LZ4K_STATUS_FAILED;
 	if (!out_limit || out_limit > io_min)
 		out_limit = io_min;
 	*((uint8_t*)out) = 0; /* header */
 	if (unlikely(nr_encoded_bytes_max(in_max, NR_8KB_LOG2) > out_max))
-		ret = crystal_lz4kd_encode_delta_slow(
-			(uint16_t *)state, (const uint8_t *)in0,
-			(const uint8_t *)in, (uint8_t *)out, in_max, out_max,
-			NR_8KB_LOG2, &simd);
+		ret = encode_any2(state, in0, in, (const u8 *)in + in_max,
+			out, (u8 *)out + out_max, NR_8KB_LOG2, true, &simd);
 	else
-		ret = encode_delta_fast(
-			(uint16_t *)state, (const uint8_t *)in0,
-			(const uint8_t *)in, (uint8_t *)out, in_max, out_limit,
-			NR_8KB_LOG2, &simd);
+		ret = encode_any2(state, in0, in, (const u8 *)in + in_max,
+			out, (u8 *)out + out_limit, NR_8KB_LOG2, false, &simd);
 	crystal_lz4kd_simd_finish(&simd);
 	return ret;
 }

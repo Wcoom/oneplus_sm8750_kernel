@@ -2855,6 +2855,8 @@ bad_fork_cleanup_mm:
 		mmput(p->mm);
 	}
 bad_fork_cleanup_signal:
+	if (!(clone_flags & CLONE_THREAD))
+		free_signal_struct(p->signal);
 bad_fork_cleanup_sighand:
 	__cleanup_sighand(p->sighand);
 bad_fork_cleanup_fs:
@@ -2887,7 +2889,7 @@ bad_fork_free:
 	WRITE_ONCE(p->__state, TASK_DEAD);
 	exit_task_stack_account(p);
 	put_task_stack(p);
-	put_task_struct(p);
+	delayed_free_task(p);
 fork_out:
 	spin_lock_irq(&current->sighand->siglock);
 	hlist_del_init(&delayed.node);

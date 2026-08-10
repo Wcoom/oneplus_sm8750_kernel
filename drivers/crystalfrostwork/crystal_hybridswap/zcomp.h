@@ -29,6 +29,15 @@ struct zcomp_backend_ops {
 				unsigned int src_len, const void *ref,
 				unsigned int ref_len, void *dst,
 				unsigned int *dst_len);
+	/*
+	 * @restored borrows backend storage until this stream is unlocked or
+	 * another delta operation is issued on it.
+	 */
+	int (*decompress_delta_borrowed)(struct zcomp_strm *zstrm,
+				const void *src, unsigned int src_len,
+				const void *ref, unsigned int ref_len,
+				const void **restored,
+				unsigned int *restored_len);
 };
 
 struct zcomp_strm {
@@ -73,6 +82,9 @@ int zcomp_compress_delta(struct zcomp_strm *zstrm, const void *ref,
 int zcomp_decompress_delta(struct zcomp_strm *zstrm, const void *src,
 		unsigned int src_len, const void *ref, unsigned int ref_len,
 		void *dst, unsigned int *dst_len);
+int zcomp_decompress_delta_borrowed(struct zcomp_strm *zstrm, const void *src,
+		unsigned int src_len, const void *ref, unsigned int ref_len,
+		const void **restored, unsigned int *restored_len);
 
 bool zcomp_set_max_streams(struct zcomp *comp, int num_strm);
 #endif /* _ZCOMP_H_ */

@@ -15,3 +15,13 @@
 - LTS 6.6.148 合并已 `git reset --hard 450f8996cf343` 撤销（SUBLEVEL 恢复 118）
 - QCOM 从未合并成功（codelinaro 网络不可达），无源码修改
 - 任务书更名为 `ACK维护任务书.md`（原三源任务书内容已删）
+
+## 2026-08-11 月度维护（origin 同步 + ACK 合并）
+- origin(whitewhale0612)同步：上游重写 6.6.118-13T 历史（forced update），旧同步点 767dfa1d765be 被移除；共同祖先 11c4627b685c5，引入 8 个新提交（→ cdb8a029f30b8）crystal_hybridswap SDDC/LZ4KD 重构
+  - 20 个冲突（全在 crystal_hybridswap，本地无定制）：采用 origin 版本；本地 sddc 独有 lz4kd_decode_delta.c 保留但不链接（功能已并入 lz4kd_decode.c）
+  - kernel/fork.c 吸收 sched/fork 失败清理修复；fs/erofs 移除 ARM64 NEON LZ4 分支；mm/page_alloc 本地已含同内容
+  - 合并提交 703de0b75390b
+- ACK 合并：742616e50d04 → 6b2ea17f1a2fb，2 提交（cf8ba5678385b HID playstation CVE + 6b2ea17f1a2fb ublk 16K __PAGE_SIZE），L0 零冲突
+  - 合并提交 c48bd3e91e0ee
+- 红线校验通过：KABI 槽位 / ghost_task×12 / NTSYNC×88 / SUBLEVEL 118 / ZRAM=n / BBG LSM 末尾
+- 编译成功：6.6.118-4k-gc48bd3e91e0e，Image 37.5M（Aug 11 07:15）

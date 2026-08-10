@@ -4,12 +4,12 @@
     "ack": {
       "remote": "https://android.googlesource.com/kernel/common",
       "branch": "android15-6.6",
-      "last_merged": "742616e50d04",
-      "last_merged_date": "2026-08-04",
-      "note": "第二轮官方源合并，已吸收"
+      "last_merged": "6b2ea17f1a2fb",
+      "last_merged_date": "2026-08-11",
+      "note": "第三轮官方源合并，已吸收（2 提交：HID CVE + ublk 16K）"
     }
   },
-  "last_maintenance": "2026-08-05",
+  "last_maintenance": "2026-08-11",
   "local_commits": [
     "450f8996cf343",
     "9bc406aeb9f2a",

@@ -3770,8 +3770,7 @@ retry:
 	if (!zram_test_flag(zram, index, ZRAM_WB)) {
 		zram_consume_prefetched(zram, index);
 		if (crystal_sddc_slot_allocated_locked(zram, index)) {
-			zram_slot_unlock(zram, index);
-			ret = crystal_sddc_read_page(zram, page, index);
+			ret = crystal_sddc_read_page_locked(zram, page, index);
 			if (ret == -EAGAIN)
 				goto retry;
 		} else {

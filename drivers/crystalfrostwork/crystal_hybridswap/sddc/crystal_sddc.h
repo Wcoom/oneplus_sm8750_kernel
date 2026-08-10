@@ -149,6 +149,9 @@ void crystal_sddc_snapshot_locked(struct zram *zram, u32 index,
 bool crystal_sddc_snapshot_matches_locked(struct zram *zram, u32 index,
 		const struct crystal_sddc_snapshot *snapshot);
 int crystal_sddc_read_page(struct zram *zram, struct page *page, u32 index);
+/* Called with the zram slot locked; always drops that lock before return. */
+int crystal_sddc_read_page_locked(struct zram *zram, struct page *page,
+		u32 index);
 int crystal_sddc_flatten(struct zram *zram, u32 index,
 		const struct crystal_sddc_snapshot *snapshot, void *dst,
 		size_t *size);
@@ -230,6 +233,12 @@ static inline bool crystal_sddc_snapshot_matches_locked(struct zram *zram,
 }
 
 static inline int crystal_sddc_read_page(struct zram *zram,
+		struct page *page, u32 index)
+{
+	return -EAGAIN;
+}
+
+static inline int crystal_sddc_read_page_locked(struct zram *zram,
 		struct page *page, u32 index)
 {
 	return -EAGAIN;

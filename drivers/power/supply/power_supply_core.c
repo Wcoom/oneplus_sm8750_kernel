@@ -1292,7 +1292,8 @@ int power_supply_get_property(struct power_supply *psy,
 		ret = -EINVAL;
 
 	if (ret == 0 && psp == POWER_SUPPLY_PROP_TEMP) {
-		val->intval -= power_supply_temp_offset_deci_c();
+		val->intval = apply_temperature_offset(NULL, val->intval,
+						       TEMP_OFFSET_DECI_C);
 	}
 
 	return ret;

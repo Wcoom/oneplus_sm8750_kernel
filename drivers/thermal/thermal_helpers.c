@@ -93,11 +93,9 @@ int __thermal_zone_get_temp(struct thermal_zone_device *tz, int *temp)
 
 	ret = tz->ops->get_temp(tz, temp);
 
-	if (!ret &&
-		strncasecmp(tz->type, "battery", 7) != 0 &&
-		strncasecmp(tz->type, "batt", 4) != 0) {
-		*temp -= thermal_temp_offset_mc();
-	}
+	if (!ret)
+		*temp = apply_temperature_offset(tz->type, *temp,
+						TEMP_OFFSET_MILLI_C);
 
 	if (IS_ENABLED(CONFIG_THERMAL_EMULATION) && tz->emul_temperature) {
 		for (count = 0; count < tz->num_trips; count++) {

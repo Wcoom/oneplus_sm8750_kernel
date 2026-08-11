@@ -315,17 +315,26 @@ config NET_SCH_FQ_GUARD
 	depends on NET_SCH_FQ
 	default n
 	help
-	  Periodically ensures that the root qdisc of data interfaces
-	  (e.g. rmnet_data*, wlan*, p2p*) stays fq, so that BBRv3 keeps
-	  fair multi-flow bandwidth sharing even if vendor netd / Qualcomm
+	  Ensures that the root qdisc of data interfaces (e.g.
+	  rmnet_data*, wlan*, p2p*) stays fq, so that BBRv3 keeps fair
+	  multi-flow bandwidth sharing even if vendor netd / Qualcomm
 	  data service reconfigures the root qdisc to a proprietary QoS
 	  stack (htb/ppq) on interface up.
 
-	  The guard listens to netdevice up/register events, then forces
-	  the root qdisc back to fq after a delay, and re-arms itself
-	  periodically (see parameters delay_ms / period_ms).
+	  The guard is event-driven: on netdevice up/register/change
+	  events it schedules a delayed check and forces the root qdisc
+	  back to fq if it was replaced. After a forced change it
+	  performs a limited number of rechecks (retry_burst) at
+	  recheck_ms intervals to fend off a short reconfiguration race;
+	  once consecutive rechecks find the root qdisc already fq the
+	  guard stops and returns to pure event-driven operation. It
+	  never polls periodically when idle.
 
-	  Runtime control: /sys/module/fq_guard/parameters/enable
+	  Runtime control (kernel cmdline or
+	  /sys/module/fq_guard/parameters/):
+	  enable, delay_ms, recheck_ms, retry_burst, blacklist.
+	  recheck_ms=0 or retry_burst=0 disables rechecking entirely.
+
 	  Boot parameter: fq_guard.enable=0
 
 	  If unsure, say N.

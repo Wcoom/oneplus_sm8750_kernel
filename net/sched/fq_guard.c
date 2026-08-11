@@ -36,16 +36,18 @@
  *    (NETDEV_CHANGE 在链路抖动时可能高频触发)导致 work 频繁执行。
  *
  * 6.6 API 核对结论(全部对照本树源码):
- *  - qdisc_create(): net/sched/sch_api.c:1215 为 static。本补丁对
- *    sch_api.c 的唯一改动:去掉该定义处的 static 前缀(不改任何逻辑),
- *    built-in 下链接期解析,无需也不新增 EXPORT_SYMBOL。
- *    6.6 签名为 7 参数且无 ops 参数:
- *        qdisc_create(dev, dev_queue, parent, handle, tca, errp, extack)
- *    任务描述中的 5 参签名(带 &fq_qdisc_ops)为旧内核接口,不适用。
+ *  - qdisc_create_by_kind(): 从 net/sched/sch_api.c 的 qdisc_create() 提炼
+ *    的窄 helper,按 kind 字符串导出(EXPORT_SYMBOL_GPL,原型在
+ *    include/net/pkt_sched.h)。qdisc_create() 已恢复 static 并委托给该
+ *    helper,fq_guard 直接调用 helper,不再 extern 引用 qdisc_create。
+ *    签名(8 参):
+ *        qdisc_create_by_kind(dev, dev_queue, parent, handle, kind,
+ *                             tca, errp, extack)
+ *    成功返回 Qdisc*,失败返回 ERR_PTR(err)(错误码与 qdisc_create 一致)。
  *  - fq_qdisc_ops: sch_fq.c:1037 为 static,built-in 也无法 extern 引用,
- *    因此通过构造 TCA_KIND="fq" 的 nlattr 由 qdisc_create() 内部
- *    qdisc_lookup_ops() 查找;qdisc 类型判断一律用 q->ops->id 字符串
- *    比较("fq"/"mq"),同样避免引用 static 的 fq_qdisc_ops。
+ *    因此 helper 按 kind="fq" 字符串由内部 qdisc_lookup_ops() 查找;
+ *    qdisc 类型判断一律用 q->ops->id 字符串比较("fq"/"mq"),
+ *    同样避免引用 static 的 fq_qdisc_ops。
  *  - dev_graft_qdisc(): sch_generic.c:1124,6.6 签名为
  *    (struct netdev_queue *dev_queue, struct Qdisc *qdisc),非任务描述的
  *    (dev, q);已 EXPORT_SYMBOL,声明在 include/net/sch_generic.h:697。
@@ -82,14 +84,6 @@
 #include <net/net_namespace.h>
 #include <net/netlink.h>
 #include <net/pkt_sched.h>
-
-/* qdisc_create 在 sch_api.c 中为 static,本补丁唯一改动是去掉 static;
- * 此处显式 extern(built-in 链接期解析)。 */
-extern struct Qdisc *qdisc_create(struct net_device *dev,
-				  struct netdev_queue *dev_queue,
-				  u32 parent, u32 handle,
-				  struct nlattr **tca, int *errp,
-				  struct netlink_ext_ack *extack);
 
 /* ---- 模块参数(built-in 即内核参数 + sysfs) ---- */
 static bool enable = true;
@@ -253,9 +247,11 @@ static int fqg_device_event(struct notifier_block *nb, unsigned long event,
 	if (delayed_work_pending(&ctx->dwork))
 		return NOTIFY_DONE;
 
-	/* 新一轮事件重置复查预算 */
-	ctx->rechecks_left = retry_burst;
-
+	/* 复查预算 rechecks_left 的唯一所有者是 fqg_work(),notifier 只负责
+	 * 触发 work,不写预算。若 notifier 也写预算,纯链路抖动等"未发生覆盖"
+	 * 的事件会在无覆盖时无谓启动一轮复查(与"只有强制改回 fq 后才复查"
+	 * 的设计意图相悖),且与 work 的写入构成双写。事件驱动本身不受影响:
+	 * netd 覆盖必然伴随事件 -> work,由 work 在发现实际被覆盖时重置预算。 */
 	queue_delayed_work(system_power_efficient_wq, &ctx->dwork,
 			   msecs_to_jiffies(delay_ms));
 	return NOTIFY_DONE;
@@ -306,28 +302,19 @@ static void fqg_work(struct work_struct *work)
 			goto out_put;
 	}
 
-	/* 3) 新建 fq qdisc:构造 TCA_KIND="fq",由 qdisc_create() 内部
-	 *    qdisc_lookup_ops() 查找已注册的 fq_qdisc_ops(避免引用
-	 *    sch_fq.c 中的 static 符号)。handle=0 自动分配。 */
+	/* 3) 新建 fq qdisc:按 kind 字符串("fq")调用 sch_api 导出的
+	 *    qdisc_create_by_kind(),由 helper 内部 qdisc_lookup_ops()
+	 *    查找已注册的 fq_qdisc_ops(避免引用 sch_fq.c 中的 static
+	 *    符号)。handle=0 自动分配。 */
 	{
 		struct nlattr *tca[TCA_MAX + 1] = {};
 		struct netlink_ext_ack extack = {};
-		struct {
-			struct nlattr nla;
-			char kind[IFNAMSIZ];
-		} kind = {
-			.nla = {
-				.nla_len = NLA_HDRLEN + sizeof("fq"),
-				.nla_type = TCA_KIND,
-			},
-			.kind = "fq",
-		};
 		struct Qdisc *new;
 
-		tca[TCA_KIND] = &kind.nla;
-		new = qdisc_create(dev, netdev_get_tx_queue(dev, 0),
-				   TC_H_ROOT, 0, tca, &err, &extack);
-		if (!new)
+		new = qdisc_create_by_kind(dev, netdev_get_tx_queue(dev, 0),
+					   TC_H_ROOT, 0, "fq", tca, &err,
+					   &extack);
+		if (IS_ERR(new))
 			goto out_put;	/* 失败:保留现状,下个周期重试 */
 
 		/* 4) 标准 root 替换流程(与 sch_api.c qdisc_graft() 的
@@ -373,7 +360,12 @@ out_unlock:
 	/* 5) 有限复查(低功耗):只有刚刚强制改回 fq 才值得复查——说明 netd
 	 *    正在争抢,短期内可能再次覆盖。若本次发现已是 fq(changed==false)
 	 *    则递减预算,连续几次都没被改动就彻底停下,不再排任何 work。
-	 *    此后回到纯事件驱动:netd 若再覆盖,会伴随 NETDEV_CHANGE 重新触发。 */
+	 *    此后回到纯事件驱动:netd 若再覆盖,会伴随 NETDEV_CHANGE 重新触发。
+	 *
+	 *    rechecks_left 的唯一写入点在本函数(notifier 事件路径只负责
+	 *    排队,不写预算):changed==true 说明检测到实际覆盖,重置整轮预算;
+	 *    changed==false 且预算 > 0 时递减。预算归零后若再发生覆盖,由新
+	 *    触发的 work 在发现覆盖时重新建立预算,事件流无需依赖 notifier。 */
 	if (!enable || recheck_ms <= 0)
 		return;
 

@@ -1207,48 +1207,67 @@ static int qdisc_block_indexes_set(struct Qdisc *sch, struct nlattr **tca,
 }
 
 /*
-   Allocate and initialize new qdisc.
-
-   Parameters are passed via opt.
+ * qdisc_create_by_kind - 按 kind 字符串创建并初始化 qdisc
+ *
+ * 从 qdisc_create() 提炼的公共子集:qdisc_lookup_ops(kind) -> qdisc_alloc()
+ * -> 初始化(parent/handle/block/stab/init/rate) -> qdisc_hash_add。
+ * 调用方须持 rtnl_lock()(与 qdisc_create() 相同)。
+ *
+ * kind 为 NULL 等价于"未指定 kind"(返回 -ENOENT);kind 必须是 NUL 结尾、
+ * 长度小于 IFNAMSIZ 的字符串(qdisc_create() 以 nla_strscpy 转换后传入,
+ * fq_guard 直接传字面量)。
+ *
+ * 成功返回新 qdisc;失败返回 ERR_PTR(err) 且 *errp 置为 err
+ * (错误码与 qdisc_create() 逐一对齐,含 CONFIG_MODULES 的 -EAGAIN 重放)。
  */
-
-struct Qdisc *qdisc_create(struct net_device *dev,
-			   struct netdev_queue *dev_queue,
-			   u32 parent, u32 handle,
-			   struct nlattr **tca, int *errp,
-			   struct netlink_ext_ack *extack)
+struct Qdisc *qdisc_create_by_kind(struct net_device *dev,
+				   struct netdev_queue *dev_queue,
+				   u32 parent, u32 handle,
+				   const char *kind,
+				   struct nlattr *tca[TCA_MAX + 1],
+				   int *errp,
+				   struct netlink_ext_ack *extack)
 {
+	struct {
+		struct nlattr nla;
+		char name[IFNAMSIZ];
+	} kind_attr;
 	int err;
-	struct nlattr *kind = tca[TCA_KIND];
 	struct Qdisc *sch;
 	struct Qdisc_ops *ops;
 	struct qdisc_size_table *stab;
 
-	ops = qdisc_lookup_ops(kind);
+	/* 按字符串重建 TCA_KIND 属性,复用 qdisc_lookup_ops() 的既有匹配
+	 * 逻辑(与 fq_guard 早期在外部构造 attr 的已验证做法一致)。 */
+	if (kind) {
+		kind_attr.nla.nla_len =
+			NLA_HDRLEN + strnlen(kind, IFNAMSIZ - 1) + 1;
+		kind_attr.nla.nla_type = TCA_KIND;
+		strscpy(kind_attr.name, kind, sizeof(kind_attr.name));
+	}
+
+	ops = qdisc_lookup_ops(kind ? &kind_attr.nla : NULL);
 #ifdef CONFIG_MODULES
 	if (ops == NULL && kind != NULL) {
-		char name[IFNAMSIZ];
-		if (nla_strscpy(name, kind, IFNAMSIZ) >= 0) {
-			/* We dropped the RTNL semaphore in order to
-			 * perform the module load.  So, even if we
-			 * succeeded in loading the module we have to
-			 * tell the caller to replay the request.  We
-			 * indicate this using -EAGAIN.
-			 * We replay the request because the device may
-			 * go away in the mean time.
+		/* We dropped the RTNL semaphore in order to
+		 * perform the module load.  So, even if we
+		 * succeeded in loading the module we have to
+		 * tell the caller to replay the request.  We
+		 * indicate this using -EAGAIN.
+		 * We replay the request because the device may
+		 * go away in the mean time.
+		 */
+		rtnl_unlock();
+		request_module("sch_%s", kind);
+		rtnl_lock();
+		ops = qdisc_lookup_ops(&kind_attr.nla);
+		if (ops != NULL) {
+			/* We will try again qdisc_lookup_ops,
+			 * so don't keep a reference.
 			 */
-			rtnl_unlock();
-			request_module("sch_%s", name);
-			rtnl_lock();
-			ops = qdisc_lookup_ops(kind);
-			if (ops != NULL) {
-				/* We will try again qdisc_lookup_ops,
-				 * so don't keep a reference.
-				 */
-				module_put(ops->owner);
-				err = -EAGAIN;
-				goto err_out;
-			}
+			module_put(ops->owner);
+			err = -EAGAIN;
+			goto err_out;
 		}
 	}
 #endif
@@ -1358,7 +1377,40 @@ err_out2:
 	module_put(ops->owner);
 err_out:
 	*errp = err;
-	return NULL;
+	return ERR_PTR(err);
+}
+EXPORT_SYMBOL_GPL(qdisc_create_by_kind);
+
+/*
+   Allocate and initialize new qdisc.
+
+   Parameters are passed via opt.
+ */
+
+static struct Qdisc *qdisc_create(struct net_device *dev,
+				  struct netdev_queue *dev_queue,
+				  u32 parent, u32 handle,
+				  struct nlattr **tca, int *errp,
+				  struct netlink_ext_ack *extack)
+{
+	char name[IFNAMSIZ];
+	const char *kind_name = NULL;
+	struct Qdisc *sch;
+
+	/* 把 TCA_KIND 属性转为字符串交给 qdisc_create_by_kind():
+	 * 解析失败(超长/无 NUL 结尾)按"未指定 kind"处理,与原实现的
+	 * -ENOENT 路径一致。 */
+	if (tca[TCA_KIND] &&
+	    nla_strscpy(name, tca[TCA_KIND], sizeof(name)) >= 0)
+		kind_name = name;
+
+	sch = qdisc_create_by_kind(dev, dev_queue, parent, handle, kind_name,
+				   tca, errp, extack);
+	if (IS_ERR(sch)) {
+		*errp = PTR_ERR(sch);
+		return NULL;
+	}
+	return sch;
 }
 
 static int qdisc_change(struct Qdisc *sch, struct nlattr **tca,

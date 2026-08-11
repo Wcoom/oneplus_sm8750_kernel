@@ -20,16 +20,6 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <uapi/linux/ntsync.h>
-#include <linux/delay.h>
-#include <linux/workqueue.h>
-#include <linux/namei.h>
-#include <linux/path.h>
-#include <linux/xattr.h>
-#include <linux/version.h>
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
-#include <linux/mnt_idmapping.h>
-#endif
 
 #define NTSYNC_NAME	"ntsync"
 
@@ -143,8 +133,6 @@ struct ntsync_device {
 
 	struct file *file;
 };
-
-static struct delayed_work ntsync_perm_work;
 
 /*
  * Single objects are locked using obj->lock.
@@ -1208,27 +1196,6 @@ static long ntsync_char_ioctl(struct file *file, unsigned int cmd,
 	}
 }
 
-static void ntsync_fix_perms_worker(struct work_struct *work)
-{
-    struct path path;
-    char *ctx = "u:object_r:gpu_device:s0";
-    if (!kern_path("/dev/ntsync", LOOKUP_FOLLOW, &path)) {
-        struct inode *inode = d_backing_inode(path.dentry);
-        if (inode) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,12,0)
-             __vfs_setxattr_noperm(path.dentry, "security.selinux", ctx, strlen(ctx) + 1, 0);
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(6,3,0)
-            __vfs_setxattr_noperm(&init_user_ns, path.dentry, "security.selinux", ctx, strlen(ctx) + 1, 0);
-#else
-            __vfs_setxattr_noperm(&nop_mnt_idmap, path.dentry, "security.selinux", ctx, strlen(ctx) + 1, 0);
-#endif
-            inode->i_mode = (inode->i_mode & ~S_IALLUGO) | 0666;
-            pr_info("ntsync: Applied 0666 and gpu_device context\n");
-        }
-        path_put(&path);
-    }
-}
-
 static const struct file_operations ntsync_fops = {
 	.owner		= THIS_MODULE,
 	.open		= ntsync_char_open,
@@ -1252,15 +1219,11 @@ static int __init ntsync_init(void)
     if (ret)
         return ret;
 
-    INIT_DELAYED_WORK(&ntsync_perm_work, ntsync_fix_perms_worker);
-    schedule_delayed_work(&ntsync_perm_work, msecs_to_jiffies(2000));
-
     return 0;
 }
 
 static void __exit ntsync_exit(void)
 {
-    cancel_delayed_work_sync(&ntsync_perm_work);
     misc_deregister(&ntsync_misc); 
 }
 

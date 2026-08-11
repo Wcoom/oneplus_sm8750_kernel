@@ -139,17 +139,15 @@ static unsigned int rkx_pkg_ipv4_ipv6_in(void *priv, struct sk_buff *skb,
 	}
 
 	rkx_log_debug("Receive net data! target=%d\n", uid);
-	if (rkx_netlink_ready()) {
-		struct rkx_event event = {
-			.type = RKX_EVT_NETWORK,
-			.u.network = {
-				.proto = proto,
-				.target_uid = uid,
-				.data_len = data_len,
-			},
-		};
-		sendMessage(&event);
-	}
+	struct rkx_event event = {
+		.type = RKX_EVT_NETWORK,
+		.u.network = {
+			.proto = proto,
+			.target_uid = uid,
+			.data_len = data_len,
+		},
+	};
+	rkx_send_event(&event);
 
 	return NF_ACCEPT;
 }

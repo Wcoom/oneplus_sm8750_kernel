@@ -3,6 +3,7 @@
 
 #include <linux/types.h>
 #include <linux/uidgid.h>
+#include <linux/kprobes.h>
 
 struct task_struct;
 struct binder_proc;
@@ -153,6 +154,26 @@ struct rkx_event
 	} u;
 };
 
+// kprobe framework (rkx_kprobe.c) — 统一 kprobe 注册/注销样板。
+// 收敛 rkx_signal / rkx_binder / rkx_binder_kp 三处事件源的
+// "static struct kprobe + static bool 标志 + register/unregister 函数对"。
+// 事件源只需声明一组 struct rkx_kprobe 表（符号名 + 回调），
+// 框架内部处理 register_kprobe/unregister_kprobe、registered 状态
+// 与失败回滚（中途失败时回滚已注册项并返回错误）。
+struct rkx_kprobe {
+	const char *symbol;            /* kprobe 目标符号名 */
+	kprobe_pre_handler_t handler;  /* pre_handler 回调（可为 NULL，如仅解析地址的临时 kprobe） */
+	struct kprobe kp;              /* 内核 kprobe 实例，注册时由框架填充 */
+	bool registered;               /* 框架内部：该 probe 当前是否已注册 */
+};
+
+int rkx_register_kprobes(struct rkx_kprobe *probes, int n);
+void rkx_unregister_kprobes(struct rkx_kprobe *probes, int n);
+
+// 事件发送助手：包装 rkx_netlink_ready() 检查 + sendMessage()，
+// 收敛各事件源 6 处 "if (rkx_netlink_ready()) { ...; sendMessage(); }" 样板。
+int rkx_send_event(struct rkx_event *ev);
+
 // genl.c
 bool rkx_netlink_ready(void);
 int sendMessage(struct rkx_event *event);
@@ -190,7 +211,9 @@ void rkx_hook_binder_transaction(struct binder_transaction *t,
 int register_signal(void);
 void unregister_signal(void);
 
-// netfilter.c
+// netfilter.c — 走独立注册（per-netns：rtnl_lock + for_each_net +
+// nf_register_net_hooks / nf_unregister_net_hooks），机制与 kprobe 框架
+// 差异过大，保留其自有注册样板（netfilter 收敛列为第二刀）。
 int register_netfilter(void);
 void unregister_netfilter(void);
 

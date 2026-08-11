@@ -11,6 +11,13 @@
 #include <linux/init.h>
 #include <linux/tracepoint.h>
 
+int rkx_send_event(struct rkx_event *ev)
+{
+	if (!rkx_netlink_ready())
+		return LINE_SUCCESS;
+	return sendMessage(ev);
+}
+
 static int __init start_rekernel(void)
 {
 	rkx_log_info("starting...\n");

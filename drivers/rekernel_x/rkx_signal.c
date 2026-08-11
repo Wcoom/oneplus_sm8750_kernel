@@ -18,8 +18,6 @@
 #include <linux/sched/signal.h>
 #include <linux/kprobes.h>
 
-static bool re_signal_hook;
-
 static void line_signal(int sig, struct task_struct *killer, struct task_struct *dst)
 {
 	if (!dst || !killer)
@@ -31,19 +29,17 @@ static void line_signal(int sig, struct task_struct *killer, struct task_struct 
 			|| sig == SIGABRT
 			|| sig == SIGQUIT)) {
 		rkx_log_debug("Process Signal! signal=%d\n", sig);
-		if (rkx_netlink_ready()) {
-			struct rkx_event event = {
-				.type = RKX_EVT_SIGNAL,
-				.u.signal = {
-					.signal = sig,
-					.killer_pid = task_tgid_nr(killer),
-					.killer_uid = task_uid(killer).val,
-					.dst_pid = task_tgid_nr(dst),
-					.dst_uid = task_uid(dst).val,
-				},
-			};
-			sendMessage(&event);
-		}
+		struct rkx_event event = {
+			.type = RKX_EVT_SIGNAL,
+			.u.signal = {
+				.signal = sig,
+				.killer_pid = task_tgid_nr(killer),
+				.killer_uid = task_uid(killer).val,
+				.dst_pid = task_tgid_nr(dst),
+				.dst_uid = task_uid(dst).val,
+			},
+		};
+		rkx_send_event(&event);
 	}
 }
 
@@ -62,28 +58,17 @@ static int __nocfi do_send_sig_info_pre(struct kprobe *p, struct pt_regs *regs)
 	return 0;
 }
 
-static struct kprobe kp_do_send_sig_info = {
-	.symbol_name = "do_send_sig_info",
-	.pre_handler = do_send_sig_info_pre,
+static struct rkx_kprobe kp_do_send_sig_info = {
+	.symbol = "do_send_sig_info",
+	.handler = do_send_sig_info_pre,
 };
 
 int register_signal(void)
 {
-	int rc = LINE_SUCCESS;
-
-	rc = register_kprobe(&kp_do_send_sig_info);
-	if (rc != LINE_SUCCESS) {
-		rkx_log_err("register do_send_sig_info kprobe failed, rc=%d\n", rc);
-		return rc;
-	}
-	re_signal_hook = true;
-	return LINE_SUCCESS;
+	return rkx_register_kprobes(&kp_do_send_sig_info, 1);
 }
 
 void unregister_signal(void)
 {
-	if (re_signal_hook) {
-		unregister_kprobe(&kp_do_send_sig_info);
-		re_signal_hook = false;
-	}
+	rkx_unregister_kprobes(&kp_do_send_sig_info, 1);
 }

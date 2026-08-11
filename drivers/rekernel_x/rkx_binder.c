@@ -49,22 +49,20 @@ static void line_binder_alloc_new_buf_locked(struct binder_alloc *alloc,
 		rcu_read_unlock();
 		if (p != NULL && line_is_frozen(p)) {
 			rkx_log_debug("Binder Free buffer full! from=%d | target=%d\n", task_uid(current).val, task_uid(p).val);
-			if (rkx_netlink_ready()) {
-				struct rkx_event event = {
-					.type = RKX_EVT_BINDER,
-					.u.binder = {
-						.binder_type = RKX_BINDER_FREE_BUFFER_FULL,
-						.oneway = 1,
-						.from_pid = task_tgid_nr(current),
-						.from_uid = task_uid(current).val,
-						.target_pid = task_tgid_nr(p),
-						.target_uid = task_uid(p).val,
-						.code = -1,
-						.rpc_name = "FREE_BUFFER_FULL",
-					},
-				};
-				sendMessage(&event);
-			}
+			struct rkx_event event = {
+				.type = RKX_EVT_BINDER,
+				.u.binder = {
+					.binder_type = RKX_BINDER_FREE_BUFFER_FULL,
+					.oneway = 1,
+					.from_pid = task_tgid_nr(current),
+					.from_uid = task_uid(current).val,
+					.target_pid = task_tgid_nr(p),
+					.target_uid = task_uid(p).val,
+					.code = -1,
+					.rpc_name = "FREE_BUFFER_FULL",
+				},
+			};
+			rkx_send_event(&event);
 		}
 	}
 }
@@ -83,21 +81,19 @@ static void line_binder_reply(struct binder_proc *target_proc, struct binder_pro
 		&& (proc->pid != target_proc->pid)
 		&& line_is_frozen(target_proc->tsk)) {
 		rkx_log_debug("Sync Binder Reply! from=%d | target=%d\n", task_uid(proc->tsk).val, task_uid(target_proc->tsk).val);
-		if (rkx_netlink_ready()) {
-			struct rkx_event event = {
-				.type = RKX_EVT_BINDER,
-				.u.binder = {
-					.binder_type = RKX_BINDER_REPLY,
-					.from_pid = task_tgid_nr(proc->tsk),
-					.from_uid = task_uid(proc->tsk).val,
-					.target_pid = task_tgid_nr(target_proc->tsk),
-					.target_uid = task_uid(target_proc->tsk).val,
-					.code = -1,
-					.rpc_name = "SYNC_BINDER_REPLY",
-				},
-			};
-			sendMessage(&event);
-		}
+		struct rkx_event event = {
+			.type = RKX_EVT_BINDER,
+			.u.binder = {
+				.binder_type = RKX_BINDER_REPLY,
+				.from_pid = task_tgid_nr(proc->tsk),
+				.from_uid = task_uid(proc->tsk).val,
+				.target_pid = task_tgid_nr(target_proc->tsk),
+				.target_uid = task_uid(target_proc->tsk).val,
+				.code = -1,
+				.rpc_name = "SYNC_BINDER_REPLY",
+			},
+		};
+		rkx_send_event(&event);
 	}
 }
 
@@ -126,21 +122,19 @@ void rkx_hook_binder_transaction(struct binder_transaction *t,
 		&& (task_tgid_nr(current) != target_proc->pid)
 		&& line_is_frozen(target_proc->tsk)) {
 		rkx_log_debug("Sync Binder Transaction! from=%d | target=%d\n", task_uid(current).val, task_uid(target_proc->tsk).val);
-		if (rkx_netlink_ready()) {
-			struct rkx_event event = {
-				.type = RKX_EVT_BINDER,
-				.u.binder = {
-					.binder_type = RKX_BINDER_TRANSACTION,
-					.from_pid = task_tgid_nr(current),
-					.from_uid = task_uid(current).val,
-					.target_pid = task_tgid_nr(target_proc->tsk),
-					.target_uid = task_uid(target_proc->tsk).val,
-					.code = -1,
-					.rpc_name = "SYNC_BINDER",
-				},
-			};
-			sendMessage(&event);
-		}
+		struct rkx_event event = {
+			.type = RKX_EVT_BINDER,
+			.u.binder = {
+				.binder_type = RKX_BINDER_TRANSACTION,
+				.from_pid = task_tgid_nr(current),
+				.from_uid = task_uid(current).val,
+				.target_pid = task_tgid_nr(target_proc->tsk),
+				.target_uid = task_uid(target_proc->tsk).val,
+				.code = -1,
+				.rpc_name = "SYNC_BINDER",
+			},
+		};
+		rkx_send_event(&event);
 	}
 
 	if ((t->flags & TF_ONE_WAY) /* async binder */
@@ -167,22 +161,20 @@ void rkx_hook_binder_transaction(struct binder_transaction *t,
 				if (i == INTERFACETOKEN_BUFF_SIZE) rpc_name[i-1] = '\0';
 			}
 			rkx_log_debug("ASync Binder Transaction! from=%d | target=%d\n", task_uid(current).val, task_uid(target_proc->tsk).val);
-			if (rkx_netlink_ready()) {
-				struct rkx_event event = {
-					.type = RKX_EVT_BINDER,
-					.u.binder = {
-						.binder_type = RKX_BINDER_TRANSACTION,
-						.oneway = 1,
-						.from_pid = task_tgid_nr(current),
-						.from_uid = task_uid(current).val,
-						.target_pid = task_tgid_nr(target_proc->tsk),
-						.target_uid = task_uid(target_proc->tsk).val,
-						.code = t->code,
-					},
-				};
-				strscpy(event.u.binder.rpc_name, rpc_name, sizeof(event.u.binder.rpc_name));
-				sendMessage(&event);
-			}
+			struct rkx_event event = {
+				.type = RKX_EVT_BINDER,
+				.u.binder = {
+					.binder_type = RKX_BINDER_TRANSACTION,
+					.oneway = 1,
+					.from_pid = task_tgid_nr(current),
+					.from_uid = task_uid(current).val,
+					.target_pid = task_tgid_nr(target_proc->tsk),
+					.target_uid = task_uid(target_proc->tsk).val,
+					.code = t->code,
+				},
+			};
+			strscpy(event.u.binder.rpc_name, rpc_name, sizeof(event.u.binder.rpc_name));
+			rkx_send_event(&event);
 		}
 	}
 }
@@ -239,48 +231,31 @@ static int __nocfi binder_transaction_pre(struct kprobe *p, struct pt_regs *regs
 	return 0;
 }
 
-static struct kprobe kp_binder_alloc_new_buf_locked = {
-	.symbol_name = "binder_alloc_new_buf_locked",
-	.pre_handler = binder_alloc_new_buf_locked_pre,
+static struct rkx_kprobe kp_binder_alloc_new_buf_locked = {
+	.symbol = "binder_alloc_new_buf_locked",
+	.handler = binder_alloc_new_buf_locked_pre,
 };
 
-static struct kprobe kp_binder_transaction = {
-	.symbol_name = "binder_transaction",
-	.pre_handler = binder_transaction_pre,
+static struct rkx_kprobe kp_binder_transaction = {
+	.symbol = "binder_transaction",
+	.handler = binder_transaction_pre,
 };
 
-static bool re_binder_hook_alloc_buf;
-static bool re_binder_hook_reply;
-
+/*
+ * 原语义:两个 kprobe 独立注册,任一失败只记日志、不阻塞另一个,
+ * 注册函数始终返回成功。故不能合并为一次表注册(合并会在失败时
+ * 回滚全部并中断),这里逐个调用统一接口(单元素)保持原行为。
+ */
 int register_binder(void)
 {
-	int rc = LINE_SUCCESS;
-
-	rc = register_kprobe(&kp_binder_alloc_new_buf_locked);
-	if (rc != LINE_SUCCESS) {
-		rkx_log_err("register binder_alloc_new_buf_locked kprobe failed, rc=%d\n", rc);
-	} else {
-		re_binder_hook_alloc_buf = true;
-	}
-
-	rc = register_kprobe(&kp_binder_transaction);
-	if (rc != LINE_SUCCESS) {
-		rkx_log_err("register binder_transaction kprobe failed, rc=%d\n", rc);
-	} else {
-		re_binder_hook_reply = true;
-	}
+	rkx_register_kprobes(&kp_binder_alloc_new_buf_locked, 1);
+	rkx_register_kprobes(&kp_binder_transaction, 1);
 
 	return LINE_SUCCESS;
 }
 
 void unregister_binder(void)
 {
-	if (re_binder_hook_reply) {
-		unregister_kprobe(&kp_binder_transaction);
-		re_binder_hook_reply = false;
-	}
-	if (re_binder_hook_alloc_buf) {
-		unregister_kprobe(&kp_binder_alloc_new_buf_locked);
-		re_binder_hook_alloc_buf = false;
-	}
+	rkx_unregister_kprobes(&kp_binder_alloc_new_buf_locked, 1);
+	rkx_unregister_kprobes(&kp_binder_transaction, 1);
 }

@@ -6,7 +6,6 @@
 
 #include "rkx_log.h"
 #include "rkx.h"
-#include "rkx_binder_alloc.h"
 #include <linux/printk.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -15,7 +14,6 @@
 #include <linux/slab.h>
 #include <linux/kprobes.h>
 #include <linux/string.h>
-#include <linux/version.h>
 #include "../android/binder_internal.h"
 
 static unsigned long (*re_kallsyms_lookup_name)(const char* name);
@@ -219,35 +217,31 @@ static int __nocfi binder_proc_transaction_pre(struct kprobe* p, struct pt_regs*
 	return 0;
 }
 
-static struct kprobe kp_kallsyms_lookup_name = {
-	.symbol_name = "kallsyms_lookup_name"
+static struct rkx_kprobe kp_kallsyms_lookup_name = {
+	.symbol = "kallsyms_lookup_name" /* 无 handler:仅一次性解析地址用 */
 };
-static struct kprobe kp_binder_proc_transaction = {
-	.symbol_name = "binder_proc_transaction",
-	.pre_handler = binder_proc_transaction_pre
+static struct rkx_kprobe kp_binder_proc_transaction = {
+	.symbol = "binder_proc_transaction",
+	.handler = binder_proc_transaction_pre
 };
-
-static bool re_kp_binder_proc_registered;
 
 void __nocfi register_binder_kp(void) {
-	int rc = LINE_SUCCESS;
-
-	rc = register_kprobe(&kp_kallsyms_lookup_name);
-	if (rc != LINE_SUCCESS) {
-		rkx_log_err("register kallsyms_lookup_name kprobe failed, rc=%d (free-async disabled)\n", rc);
+	if (rkx_register_kprobes(&kp_kallsyms_lookup_name, 1) != LINE_SUCCESS) {
+		/* 失败日志(含 rc)已由统一接口打印;此处失败仅禁用 free-async,
+		 * 不影响 signal/binder/netfilter 等其余 hook */
 		return;
 	}
-	re_kallsyms_lookup_name = (void*)kp_kallsyms_lookup_name.addr;
-	unregister_kprobe(&kp_kallsyms_lookup_name);
+	re_kallsyms_lookup_name = (void*)kp_kallsyms_lookup_name.kp.addr;
+	rkx_unregister_kprobes(&kp_kallsyms_lookup_name, 1);
 
 	re_binder_transaction_buffer_release = (void*)re_kallsyms_lookup_name("binder_transaction_buffer_release");
 	re_binder_alloc_free_buf = (void*)re_kallsyms_lookup_name("binder_alloc_free_buf");
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 0, 0)
-	re_binder_alloc_copy_from_buffer = rkx_binder_copy_from_buffer;
-#else
 	re_binder_alloc_copy_from_buffer = (void *)re_kallsyms_lookup_name("binder_alloc_copy_from_buffer");
-#endif
 	re_binder_stats = (void*)re_kallsyms_lookup_name("binder_stats");
+
+	if (re_binder_alloc_copy_from_buffer == NULL)
+		rkx_log_warn("resolve binder_alloc_copy_from_buffer failed, "
+			     "data-compare feature not enabled\n");
 
 	if (re_binder_transaction_buffer_release == NULL || re_binder_alloc_free_buf == NULL ||
 	    re_binder_alloc_copy_from_buffer == NULL || re_binder_stats == NULL) {
@@ -255,17 +249,12 @@ void __nocfi register_binder_kp(void) {
 		return;
 	}
 
-	rc = register_kprobe(&kp_binder_proc_transaction);
-	if (rc != LINE_SUCCESS) {
-		rkx_log_err("register binder_proc_transaction kprobe failed, rc=%d (free-async disabled)\n", rc);
+	if (rkx_register_kprobes(&kp_binder_proc_transaction, 1) != LINE_SUCCESS) {
+		/* 失败日志(含 rc)已由统一接口打印;此失败仅禁用 free-async */
 		return;
 	}
-	re_kp_binder_proc_registered = true;
 }
 
 void unregister_binder_kp(void) {
-	if (re_kp_binder_proc_registered) {
-		unregister_kprobe(&kp_binder_proc_transaction);
-		re_kp_binder_proc_registered = false;
-	}
+	rkx_unregister_kprobes(&kp_binder_proc_transaction, 1);
 }

@@ -20,7 +20,9 @@
 - 已判死：schedutil rate_limit_us（walt 出厂即 0）、PELT multiplier（vendor 已设 4，向上无空间）
 - **分层路线（用户已确认，2026-08-15）**：vendor 模块旋钮（walt 系列）的固化形态就是 service.d 脚本（树内无源码、Kconfig 无接线点）；树内旋钮（SCHED_FEAT/HZ/uclamp/IO/内存）定案后走真正的内核提交 + 重编译 + 刷机。浸泡期一律脚本 A/B，定案才烧源码。
 - **已定案**：zone_max_util_pct=90（Day-1 双锚点"变好"，service.d 固化）
-- **浸泡中**：hispeed_load 90→70（全部 policy）
+- **已判死**：hispeed_load 90→70（Day-1"变坏"，回退出厂 90）
+- **下一候选**：SCHED_FEAT（HRTICK/NEXT_BUDDY，debugfs 通路已验证）→ rtg_boost_freq → HZ 250→1000
+- **并行线（用户已选激进档）**：crystal_hybridswap 参数默认值固化 + fq_guard 式内核守护，见 `hybridswap-纯内核实现可行性.md` 与 `docs/adr/0002-*.md`
 - 待命候选：hispeed_load（90→70，写通路已验证）、rtg_boost_freq、SCHED_FEAT（debugfs 可挂载，NEXT_BUDDY/TTWU_QUEUE/HRTICK）、HZ 1000
 
 ## 候选队列（每项走同一循环：单变量 → 1 天浸泡 → 三档 → 无感回退）

@@ -86,8 +86,8 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 - **DeepSeek Harness（DSH）agent 已全面接管本工作区的工程工作**，预设：`claude-successor`（位于 `/root/.dsh/.agent-presets/claude-successor/`，由 `standard` 复制而来）
 - 该 preset 已移植：① 本记忆链（本文件 + `oplus13/CLAUDE.md` + `oplus13/docs/agents/*` 技能配置）② mattpocock-skills 全部 25 个工程技能（位于 preset 的 `skills/`，全部模型可调用，含 ask-matt 路由、grill-with-docs/grill-me 对齐、to-spec/to-tickets、tdd、code-review、triage、wayfinder 等）
 - **记忆双向同步**：本文件链由 DSH 的 `dsh-agent-instructions` 自动读取（AGENTS.md/CLAUDE.md 候选），DSH 会话开工前读、完工后把重要进展写回本文件链；Claude Code 与 DSH 共用同一套记忆与技能配置
-- **含创造模式全部特性**（2026-08-15）：`tool-cordis` 自修改工具集（inspect/define/run/stop/undefine）+ 两个 Cordis 技能（`cordis-plugin-development`、`editing-cordis-compositions`，在 preset `skills/` 内）+ 双平面创作规则——可创作/校验其他 preset，但绝不改动部署自带 shipped preset（升级会覆盖）
-- ⚠️ **tool-cordis 是进程单例**：其 Host Inspect Provider（Service/Event/Builtin/Tool）注册进进程级 `cordisInspect` 注册表，同一进程只允许一份。`cordis` 与 `claude-successor` 两个带 tool-cordis 的 preset 不能在同一进程共存——**切换默认 preset 后需重启 Web 进程**，claude-successor 才会成为唯一创造模式挂载；此后 cordis 会话不再需要（功能已全部并入 claude-successor）
+- **含创造模式特性**（2026-08-15）：两个 Cordis 技能（`cordis-plugin-development`、`editing-cordis-compositions`，在 preset `skills/` 内）+ 双平面创作规则——可创作/校验其他 preset，但绝不改动部署自带 shipped preset（升级会覆盖）
+- ⚠️ **tool-cordis 是进程单例**：其 Host Inspect Provider（Service/Event/Builtin/Tool）注册进进程级 `cordisInspect` 注册表，同一进程只允许一份。因此在 claude-successor 中该行**默认 disabled**，使其可与 cordis preset 共存：**动态插件工具集（cordis_inspect/define/run/stop/undefine）在 cordis 预设会话中使用**；claude-successor 保留两个 Cordis 技能与双平面创作规则，可用文件工具直接编辑 preset 组成。若日后彻底退役 cordis，移除该 disabled 标志即可启用 tool-cordis
 - 技能配置（issue 追踪器 / triage 标签 / 领域文档）以 `oplus13/docs/agents/*` 为准，两个 agent 共用，改动需两边生效
 - Claude Code 仍可用（`claude` 命令），但默认工作由 DSH 的 `claude-successor` 预设会话承担
 

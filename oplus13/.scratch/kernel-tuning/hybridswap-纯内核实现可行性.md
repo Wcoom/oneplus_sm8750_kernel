@@ -47,3 +47,14 @@
 1. **保守**（推荐起步）：固化"参数默认值"（使能 + avail/wm/erm），zram disksize 加内核默认参数；swapon 与监控保留轻量 userspace（可用 service.d 脚本替代整个 Go 模块）。
 2. **激进**：再加 fq_guard 式内核守护（约 100-200 行）。
 3. **维持现状**：继续用模块。
+
+## 5. 保守档实现要点（精确到行，2026-08-15 预研）
+
+- **Kconfig 先例**：`drivers/crystalfrostwork/crystal_hybridswap/Kconfig` 已有 `CRYSTAL_HYBRIDSWAP_ERM_AVAIL_BUFFER_DEFAULT_ON`（default y，控制 `crystal_hybridswap_internal.h:92-96` 的 erm 默认）——照此模式新增同类选项即可，defconfig 现有 crystal 选项在 `gki_defconfig:822-828`。
+- **使能固化**：`core.c:3306-3307` `atomic_set(&chs.enabled/core_enabled, 0)` → 1（或改由新 Kconfig 控制）。
+- **wm_ratio**：`crystal_hybridswap_internal.h:35` `CHS_DEFAULT_ZRAM_WM_RATIO 75` → 100（模块 profile 值）。
+- **avail_buffers**：`memcg.c:2578-2580` 初值 0/0/0 → 2200/1800/2200（模块 profile 值）。
+- **aging 是空转**：`CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS` 未开（defconfig 无此条目）时 `memory.aging_anon` 为无功能占位（Kconfig help 原文）——模块的 aging 配置在本构建不生效，**纯内核化时可直接忽略 aging 项**。
+- **zram disksize**：驱动无默认值接口（仅 `zram_drv.c:6175` `module_param(num_devices)` 一个先例），需新增 `module_param`/Kconfig 默认值；lz4kd 默认压缩已在 defconfig（`CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP="lz4kd"`），与模块的 lz4 请求略有出入（SDDC 通路用 lz4kd）。
+- **不动的部分**：swapon + priority 32767（保留一次 userspace 动作）、WebUI 监控（userspace）。
+- **KMI 安全**：全部为驱动内部 atomic/宏，不涉及导出符号与结构布局。

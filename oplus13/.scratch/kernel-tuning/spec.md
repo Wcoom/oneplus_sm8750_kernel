@@ -12,12 +12,13 @@
 - **落地**：浸泡期 KernelSU service.d 脚本快速 A/B（`99-sched-tune.sh`），定案值固化内核默认
 - **顺序**：调度 → IO → 内存；网络轴排除
 
-## 首攻项
+## 首攻项（2026-08-15 按真机实测重排）
 
-- 旋钮：schedutil `rate_limit_us`（单旋钮，双向；sysfs：`/sys/devices/system/cpu/cpufreq/policy*/schedutil/rate_limit_us`）
-- 第一档数值：0（取消限速）；变坏则降档（半值）
-- 范围：全部 cpufreq policy 统一
-- 固化：定案后新增 Kconfig 选项（接线点 `kernel/sched/cpufreq_schedutil.c:761`）
+- 旋钮：vendor **walt** governor 的 `zone_max_util_pct`（运行时 governor 为 walt，非 schedutil；schedutil 的 rate_limit_us 不适用且 walt 出厂限速已为 0）
+- 第一档：80 → **90**（全部 zone、全部 policy 统一）；无感升档一次 →100；变坏或二次无感判死
+- 持久化：service.d 脚本（`99-sched-tune.sh` v2）；**Kconfig 固化不适用**（walt 为 vendor 预编译模块，树内无源码）
+- 已判死：schedutil rate_limit_us（walt 出厂即 0）、PELT multiplier（vendor 已设 4，向上无空间）
+- 待命候选：hispeed_load（90→70，写通路已验证）、rtg_boost_freq、SCHED_FEAT（debugfs 可挂载，NEXT_BUDDY/TTWU_QUEUE/HRTICK）、HZ 1000
 
 ## 候选队列（每项走同一循环：单变量 → 1 天浸泡 → 三档 → 无感回退）
 

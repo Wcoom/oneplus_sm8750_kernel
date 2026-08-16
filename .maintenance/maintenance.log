@@ -25,3 +25,15 @@
   - 合并提交 c48bd3e91e0ee
 - 红线校验通过：KABI 槽位 / ghost_task×12 / NTSYNC×88 / SUBLEVEL 118 / ZRAM=n / BBG LSM 末尾
 - 编译成功：6.6.118-4k-gc48bd3e91e0e，Image 37.5M（Aug 11 07:15）
+
+## 2026-08-16 ACK 月度维护（第四轮，增量合并）
+- 增量：6b2ea17f1a2fb → 24c059d9e217f，5 提交（无合并提交），L0 零冲突自动合并
+  - 24c059d9e217f ANDROID: GKI: Update symbol list for Exynos SoC
+  - c079fb2a08aa3 ANDROID: mm/vmalloc: export vmap_pages_range_noflush / __get_vm_area_caller
+  - d388a7c8effc8 ANDROID: netfilter: xt_quota2: fix UAF in q2_get_counter error path（安全修复，吸收）
+  - a7f1fd7885952 ANDROID: GKI: update symbol list for xiaomi
+  - d2fc65338294c ANDROID: power: Add a vendor hook for suspend abort
+- 自动合并 4 文件：android/abi_gki_aarch64.stg（仅追加 2 function + 2 elf_symbol）、abi_gki_aarch64_xiaomi（追加 2 行）、kernel/power/process.c、mm/vmalloc.c
+- 红线校验通过：无冲突标记；vendor hook 仅新增 try_to_freeze_abort（签名完整）；KABI 槽位 sched.h:1535-1536 完好；ghost_task×12；SUBLEVEL 118；ZRAM=n；BBG LSM 末尾；defconfig 定制全 y
+- 合并提交 8362cdb3fdc8b；备份分支 backup/pre-ack-202608
+- 构建成功 exit 0：6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k，Image 39,258,624 字节

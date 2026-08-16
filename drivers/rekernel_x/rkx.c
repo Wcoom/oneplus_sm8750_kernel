@@ -18,6 +18,18 @@ int rkx_send_event(struct rkx_event *ev)
 	return sendMessage(ev);
 }
 
+/* err/exit 注销序列唯一落点：新增子系统只在此登记一次 */
+static void rkx_teardown_all(void)
+{
+	unregister_binder_kp();
+	unregister_netfilter();
+	unregister_signal();
+	unregister_binder();
+	unregister_genl();
+	destroy_free_async();
+	destroy_net_uid();
+}
+
 static int __init start_rekernel(void)
 {
 	rkx_log_info("starting...\n");
@@ -59,26 +71,14 @@ static int __init start_rekernel(void)
 	return LINE_SUCCESS;
 
 err:
-	unregister_binder_kp();
-	unregister_netfilter();
-	unregister_signal();
-	unregister_binder();
-	unregister_genl();
-	destroy_free_async();
-	destroy_net_uid();
+	rkx_teardown_all();
 	return LINE_ERROR;
 }
 
 static void __exit exit_rekernel(void)
 {
 	rkx_log_info("closing...\n");
-	unregister_binder_kp();
-	unregister_netfilter();
-	unregister_signal();
-	unregister_binder();
-	unregister_genl();
-	destroy_free_async();
-	destroy_net_uid();
+	rkx_teardown_all();
 }
 
 module_init(start_rekernel);

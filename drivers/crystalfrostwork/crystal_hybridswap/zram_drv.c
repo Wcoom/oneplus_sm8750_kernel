@@ -1632,20 +1632,12 @@ static void zram_writeback_free_buffers(struct zram_wb_item *items,
 	}
 }
 
-static void zram_writeback_abort_native(struct zram *zram,
-		struct zram_wb_item *item)
+/* abort/finish 清理路径收敛为单一 wrapper（SDDC 侧已合并为 release） */
+static void zram_writeback_release_native(struct zram_wb_item *item)
 {
 	if (!item || !item->native_sddc)
 		return;
-	crystal_sddc_native_wb_abort(zram, &item->native);
-	item->native_sddc = false;
-}
-
-static void zram_writeback_finish_native(struct zram_wb_item *item)
-{
-	if (!item || !item->native_sddc)
-		return;
-	crystal_sddc_native_wb_finish(&item->native);
+	crystal_sddc_native_wb_release(&item->native);
 	item->native_sddc = false;
 }
 
@@ -2018,7 +2010,7 @@ static int zram_writeback_pages(struct zram *zram, int mode,
 					ret = err;
 			}
 			if (err) {
-				zram_writeback_abort_native(zram,
+				zram_writeback_release_native(
 					&items[batch_count]);
 				zram_writeback_clear_under_wb(zram, cur_index);
 				continue;
@@ -2067,7 +2059,7 @@ scan_next:
 					zram_slot_unlock(zram, cur_index);
 					crystal_sddc_requeue_observation(zram,
 						cur_index);
-					zram_writeback_abort_native(zram, item);
+					zram_writeback_release_native(item);
 					item->handle = 0;
 					continue;
 				}
@@ -2103,7 +2095,7 @@ scan_next:
 				if (store_items[j].ret) {
 					if (!ret)
 						ret = store_items[j].ret;
-					zram_writeback_abort_native(zram, item);
+					zram_writeback_release_native(item);
 					zram_writeback_clear_under_wb(zram, cur_index);
 					item->handle = 0;
 					chs_log_ratelimited(CHS_LOG_ERR,
@@ -2125,7 +2117,7 @@ scan_next:
 					crystal_sddc_requeue_observation(zram,
 						cur_index);
 					zms_free(zram->zms, item->handle);
-					zram_writeback_abort_native(zram, item);
+					zram_writeback_release_native(item);
 					item->handle = 0;
 					continue;
 				}
@@ -2143,7 +2135,7 @@ scan_next:
 						&item->native)) {
 					zram_slot_unlock(zram, cur_index);
 					zms_free(zram->zms, item->handle);
-					zram_writeback_abort_native(zram, item);
+					zram_writeback_release_native(item);
 					zram_writeback_clear_under_wb(zram, cur_index);
 					item->handle = 0;
 					if (!ret)
@@ -2177,7 +2169,7 @@ scan_next:
 				atomic64_add(item->size,
 					     &zram->stats.bd_compr_data_size);
 				zram_memcg_stats_add_current(zram, cur_index);
-				zram_writeback_finish_native(item);
+				zram_writeback_release_native(item);
 				spin_lock(&zram->wb_limit_lock);
 				if (zram->wb_limit_enable && zram->bd_wb_limit > 0)
 					zram->bd_wb_limit -=
@@ -2196,7 +2188,7 @@ scan_next:
 		}
 
 		for (i = 0; i < batch_count; i++) {
-			zram_writeback_abort_native(zram, &items[i]);
+			zram_writeback_release_native(&items[i]);
 			if (items[i].handle)
 				zram_writeback_clear_under_wb(zram,
 							      items[i].index);

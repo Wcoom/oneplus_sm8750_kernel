@@ -176,9 +176,7 @@ bool crystal_sddc_native_wb_install_locked(struct zram *zram, u32 index,
 		const struct crystal_sddc_snapshot *snapshot,
 		struct crystal_sddc_wb_capture *capture);
 void crystal_sddc_native_wb_finalize_locked(struct zram *zram, u32 index);
-void crystal_sddc_native_wb_abort(struct zram *zram,
-		struct crystal_sddc_wb_capture *capture);
-void crystal_sddc_native_wb_finish(struct crystal_sddc_wb_capture *capture);
+void crystal_sddc_native_wb_release(struct crystal_sddc_wb_capture *capture);
 void crystal_sddc_native_wb_free_locked(struct zram *zram, u32 index);
 bool crystal_sddc_native_wb_pin_locked(struct zram *zram, u32 index,
 		const struct crystal_sddc_snapshot *snapshot,
@@ -292,10 +290,7 @@ static inline bool crystal_sddc_native_wb_install_locked(struct zram *zram,
 static inline void crystal_sddc_native_wb_finalize_locked(struct zram *zram,
 		u32 index) { }
 
-static inline void crystal_sddc_native_wb_abort(struct zram *zram,
-		struct crystal_sddc_wb_capture *capture) { }
-
-static inline void crystal_sddc_native_wb_finish(
+static inline void crystal_sddc_native_wb_release(
 		struct crystal_sddc_wb_capture *capture) { }
 
 static inline void crystal_sddc_native_wb_free_locked(struct zram *zram,

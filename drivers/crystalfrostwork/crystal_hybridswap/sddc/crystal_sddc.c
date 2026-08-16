@@ -3731,25 +3731,13 @@ void crystal_sddc_native_wb_finalize_locked(struct zram *zram, u32 index)
 	}
 }
 
-void crystal_sddc_native_wb_abort(struct zram *zram,
-		struct crystal_sddc_wb_capture *capture)
-{
-	struct crystal_sddc *sddc;
-	struct crystal_sddc_wb_state *state;
-
-	if (!capture)
-		return;
-	sddc = capture->manager;
-	state = capture->private;
-	if (sddc && state)
-		crystal_sddc_native_wb_capture_abort_internal(sddc,
-				capture->index, state);
-	if (sddc)
-		crystal_sddc_manager_put(sddc);
-	memset(capture, 0, sizeof(*capture));
-}
-
-void crystal_sddc_native_wb_finish(struct crystal_sddc_wb_capture *capture)
+/*
+ * native writeback 事务清理唯一出口：abort 未提交的 capture 状态、
+ * 释放 manager 引用并清零 capture。以原 abort 实现为基准合并：
+ * finish 的调用点 install 成功后 capture->private 已为 NULL，清理
+ * 逻辑自然退化；abort 的 zram 参数从未使用。二者合并安全。
+ */
+void crystal_sddc_native_wb_release(struct crystal_sddc_wb_capture *capture)
 {
 	struct crystal_sddc *sddc;
 
@@ -5046,6 +5034,53 @@ static void crystal_sddc_manager_admission_test(struct kunit *test)
 	KUNIT_EXPECT_NULL(test, crystal_sddc_manager_get(&ctx->zram));
 }
 
+/* C5：native_wb_release 合并接口的语义测试（NULL/零值/未发布 reservation） */
+static void crystal_sddc_release_null_test(struct kunit *test)
+{
+	crystal_sddc_native_wb_release(NULL);
+	KUNIT_SUCCEED(test);
+}
+
+static void crystal_sddc_release_zero_capture_test(struct kunit *test)
+{
+	struct crystal_sddc_wb_capture capture = { 0 };
+
+	crystal_sddc_native_wb_release(&capture);
+	KUNIT_EXPECT_NULL(test, capture.manager);
+	KUNIT_EXPECT_NULL(test, capture.private);
+	KUNIT_EXPECT_EQ(test, capture.index, 0);
+}
+
+static void crystal_sddc_release_aborts_unpublished_test(struct kunit *test)
+{
+	struct crystal_sddc_test_ctx *ctx = test->priv;
+	struct crystal_sddc_wb_state *wb_state;
+	struct crystal_sddc_wb_capture capture = { 0 };
+	u32 index = 3;
+	int ret;
+
+	wb_state = kzalloc(sizeof(*wb_state), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, wb_state);
+
+	ret = xa_insert(&ctx->sddc.wb_states, index, NULL, GFP_KERNEL);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	/* 模拟 native_wb_capture 成功路径持有的 manager token */
+	atomic_inc(&ctx->sddc.active_ops);
+
+	capture.manager = &ctx->sddc;
+	capture.private = wb_state;
+	capture.index = index;
+
+	crystal_sddc_native_wb_release(&capture);
+
+	KUNIT_EXPECT_NULL(test, capture.manager);
+	KUNIT_EXPECT_NULL(test, capture.private);
+	KUNIT_EXPECT_EQ(test, capture.index, 0);
+	KUNIT_EXPECT_TRUE(test, xa_empty(&ctx->sddc.wb_states));
+	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->sddc.active_ops), 0);
+}
+
 static struct kunit_case crystal_sddc_state_test_cases[] = {
 	KUNIT_CASE(crystal_sddc_ref_publish_test),
 	KUNIT_CASE(crystal_sddc_ref_generation_test),
@@ -5068,6 +5103,9 @@ static struct kunit_case crystal_sddc_state_test_cases[] = {
 	KUNIT_CASE(crystal_sddc_similarity_test),
 	KUNIT_CASE(crystal_sddc_sample_eligibility_test),
 	KUNIT_CASE(crystal_sddc_delta_admission_test),
+	KUNIT_CASE(crystal_sddc_release_null_test),
+	KUNIT_CASE(crystal_sddc_release_zero_capture_test),
+	KUNIT_CASE(crystal_sddc_release_aborts_unpublished_test),
 	{}
 };
 

@@ -2,7 +2,7 @@
 
 obj-$(CONFIG_CRYSTAL_HYBRIDSWAP) += zram.o
 
-zram-y := zcomp.o zms.o zram_drv.o core.o \
+zram-y := zcomp.o zms.o zram_drv.o core.o param.o \
 	zram_bridge.o memcg.o pressure.o stats.o
 
 zram-$(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD) += \

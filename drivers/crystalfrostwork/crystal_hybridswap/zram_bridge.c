@@ -40,16 +40,9 @@ static ssize_t hybridswap_enable_store(struct device *dev,
 				       struct device_attribute *attr,
 				       const char *buf, size_t len)
 {
-	unsigned long val;
-	int ret;
+	int ret = chs_param_store(dev, CHS_PARAM_ENABLE, buf, len);
 
-	ret = kstrtoul(buf, 0, &val);
-	if (ret)
-		return ret;
-
-	crystal_hybridswap_set_enabled(!!val);
-	crystal_hybridswap_set_core_enabled(!!val);
-	return len;
+	return ret ? ret : len;
 }
 static DEVICE_ATTR_RW(hybridswap_enable);
 
@@ -66,15 +59,9 @@ static ssize_t hybridswap_core_enable_store(struct device *dev,
 					    struct device_attribute *attr,
 					    const char *buf, size_t len)
 {
-	unsigned long val;
-	int ret;
+	int ret = chs_param_store(dev, CHS_PARAM_CORE_ENABLE, buf, len);
 
-	ret = kstrtoul(buf, 0, &val);
-	if (ret)
-		return ret;
-
-	crystal_hybridswap_set_core_enabled(!!val);
-	return len;
+	return ret ? ret : len;
 }
 static DEVICE_ATTR_RW(hybridswap_core_enable);
 
@@ -90,15 +77,9 @@ static ssize_t hybridswap_swapd_pause_store(struct device *dev,
 					    struct device_attribute *attr,
 					    const char *buf, size_t len)
 {
-	bool val;
-	int ret;
+	int ret = chs_param_store(dev, CHS_PARAM_SWAPD_PAUSE, buf, len);
 
-	ret = kstrtobool(buf, &val);
-	if (ret)
-		return ret;
-
-	crystal_hybridswap_set_swapd_pause(val);
-	return len;
+	return ret ? ret : len;
 }
 static DEVICE_ATTR_RW(hybridswap_swapd_pause);
 
@@ -113,19 +94,9 @@ static ssize_t hybridswap_loglevel_store(struct device *dev,
 					 struct device_attribute *attr,
 					 const char *buf, size_t len)
 {
-	int level;
-	int ret;
+	int ret = chs_param_store(dev, CHS_PARAM_LOGLEVEL, buf, len);
 
-	ret = kstrtoint(buf, 0, &level);
-	if (ret)
-		return ret;
-	if (level < 0 || level >= CHS_LOG_MAX) {
-		chs_log(CHS_LOG_ERR, "val %d is not valid\n", level);
-		return -EINVAL;
-	}
-
-	crystal_hybridswap_set_loglevel(level);
-	return len;
+	return ret ? ret : len;
 }
 static DEVICE_ATTR_RW(hybridswap_loglevel);
 
@@ -837,26 +808,9 @@ static ssize_t hybridswap_loop_device_store(struct device *dev,
 					    struct device_attribute *attr,
 					    const char *buf, size_t len)
 {
-	int ret;
+	int ret = chs_param_store(dev, CHS_PARAM_LOOP_DEVICE, buf, len);
 
-	ret = zram_bind_backing_dev(dev, buf, len);
-	crystal_hybridswap_record_loop_device_bind(ret);
-	if (ret) {
-		chs_log(CHS_LOG_ERR,
-			"hybridswap_loop_device backing_dev bind failed ret=%d\n",
-			ret);
-		return ret;
-	}
-
-	ret = crystal_hybridswap_set_loop_device(buf, len);
-	if (ret) {
-		chs_log(CHS_LOG_ERR,
-			"hybridswap_loop_device state update failed ret=%d\n", ret);
-		return ret;
-	}
-
-	chs_log(CHS_LOG_INFO, "hybridswap_loop_device backing_dev bind success\n");
-	return len;
+	return ret ? ret : len;
 }
 static DEVICE_ATTR_RW(hybridswap_loop_device);
 
@@ -871,15 +825,9 @@ static ssize_t hybridswap_dev_life_store(struct device *dev,
 					 struct device_attribute *attr,
 					 const char *buf, size_t len)
 {
-	unsigned long val;
-	int ret;
+	int ret = chs_param_store(dev, CHS_PARAM_DEV_LIFE, buf, len);
 
-	ret = kstrtoul(buf, 0, &val);
-	if (ret)
-		return ret;
-
-	crystal_hybridswap_set_dev_life(val);
-	return len;
+	return ret ? ret : len;
 }
 static DEVICE_ATTR_RW(hybridswap_dev_life);
 
@@ -894,15 +842,9 @@ static ssize_t hybridswap_quota_day_store(struct device *dev,
 					  struct device_attribute *attr,
 					  const char *buf, size_t len)
 {
-	unsigned long long val;
-	int ret;
+	int ret = chs_param_store(dev, CHS_PARAM_QUOTA_DAY, buf, len);
 
-	ret = kstrtoull(buf, 0, &val);
-	if (ret)
-		return ret;
-
-	crystal_hybridswap_set_quota_day(val);
-	return len;
+	return ret ? ret : len;
 }
 static DEVICE_ATTR_RW(hybridswap_quota_day);
 
@@ -926,26 +868,9 @@ static ssize_t hybridswap_zram_increase_store(struct device *dev,
 					      struct device_attribute *attr,
 					      const char *buf, size_t len)
 {
-	struct crystal_hybridswap_zram *entry;
-	unsigned long val;
-	int ret;
+	int ret = chs_param_store(dev, CHS_PARAM_ZRAM_INCREASE, buf, len);
 
-	ret = kstrtoul(buf, 0, &val);
-	if (ret)
-		return ret;
-
-	mutex_lock(&chs.zram_lock);
-	entry = crystal_hybridswap_find_zram_locked(dev);
-	if (entry)
-		entry->zram_increase_pages = val << 8;
-	mutex_unlock(&chs.zram_lock);
-
-	if (!entry)
-		return -ENODEV;
-
-	atomic64_inc(&chs.stats.zram_increase_store);
-	crystal_hybridswap_update_auto_policy();
-	return len;
+	return ret ? ret : len;
 }
 static DEVICE_ATTR_RW(hybridswap_zram_increase);
 

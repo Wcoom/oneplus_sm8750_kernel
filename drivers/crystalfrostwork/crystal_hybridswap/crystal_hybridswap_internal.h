@@ -738,6 +738,21 @@ u64 crystal_hybridswap_quota_day(void);
 int crystal_hybridswap_set_loop_device(const char *buf, size_t len);
 ssize_t crystal_hybridswap_get_loop_device(char *buf);
 void crystal_hybridswap_record_loop_device_bind(int ret);
+
+/* param.c：调优参数单一写入口（sysfs RW 属性统一分发） */
+enum chs_param_id {
+	CHS_PARAM_ENABLE,
+	CHS_PARAM_CORE_ENABLE,
+	CHS_PARAM_SWAPD_PAUSE,
+	CHS_PARAM_LOGLEVEL,
+	CHS_PARAM_LOOP_DEVICE,
+	CHS_PARAM_DEV_LIFE,
+	CHS_PARAM_QUOTA_DAY,
+	CHS_PARAM_ZRAM_INCREASE,
+};
+int chs_param_store(struct device *dev, enum chs_param_id id,
+		    const char *buf, size_t len);
+
 int crystal_hybridswap_set_zram_wm_ratio(s64 val);
 s64 crystal_hybridswap_zram_wm_ratio(void);
 int crystal_hybridswap_set_stored_wm_ratio(s64 val);

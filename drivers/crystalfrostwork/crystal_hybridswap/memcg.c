@@ -23,16 +23,9 @@
 #include <trace/hooks/cgroup.h>
 #include <trace/hooks/mm.h>
 #include <trace/hooks/vmscan.h>
+#include <linux/vmscan_balance.h>
 
 #include "crystal_hybridswap_internal.h"
-
-/* Keep in sync with the private enum in mm/vmscan.c for the vendor hook. */
-enum scan_balance {
-	SCAN_EQUAL,
-	SCAN_FRACT,
-	SCAN_ANON,
-	SCAN_FILE,
-};
 
 static DEFINE_MUTEX(memcg_lock);
 static LIST_HEAD(memcg_list);

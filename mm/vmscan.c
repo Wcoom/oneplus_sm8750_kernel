@@ -76,6 +76,7 @@
 #undef CREATE_TRACE_POINTS
 #include <trace/hooks/vmscan.h>
 #include <trace/hooks/mm.h>
+#include <linux/vmscan_balance.h>
 
 #undef CREATE_TRACE_POINTS
 #include <trace/hooks/mm.h>
@@ -3098,13 +3099,7 @@ static void customize_sc_file_is_tiny(struct scan_control *sc)
 	sc->file_is_tiny = file_is_tiny;
 }
 
-enum scan_balance {
-	SCAN_EQUAL,
-	SCAN_FRACT,
-	SCAN_ANON,
-	SCAN_FILE,
-};
-
+/* enum scan_balance 定义位于 include/linux/vmscan_balance.h */
 static void prepare_scan_count(pg_data_t *pgdat, struct scan_control *sc)
 {
 	unsigned long file;

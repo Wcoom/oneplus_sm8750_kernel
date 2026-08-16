@@ -482,7 +482,7 @@ struct zram_memcg_account {
 	size_t size;
 };
 
-static struct zram_memcg_stats_entry *
+struct zram_memcg_stats_entry *
 zram_memcg_stats_find_locked(struct zram *zram, u64 cgroup_id)
 {
 	struct zram_memcg_stats_entry *entry;
@@ -529,7 +529,7 @@ static bool zram_memcg_stats_ensure(struct zram *zram,
 	return true;
 }
 
-static void zram_memcg_stats_update(atomic64_t *counter, u64 value, bool add)
+void zram_memcg_stats_update(atomic64_t *counter, u64 value, bool add)
 {
 	s64 cur;
 
@@ -606,7 +606,7 @@ static void zram_memcg_stats_apply(struct zram *zram,
 	spin_unlock_irqrestore(&zram->memcg_stats_lock, flags);
 }
 
-static void zram_memcg_stats_add_current(struct zram *zram, u32 index)
+void zram_memcg_stats_add_current(struct zram *zram, u32 index)
 {
 	struct zram_memcg_account account;
 
@@ -614,7 +614,7 @@ static void zram_memcg_stats_add_current(struct zram *zram, u32 index)
 	zram_memcg_stats_apply(zram, &account, true);
 }
 
-static void zram_memcg_stats_sub_current(struct zram *zram, u32 index)
+void zram_memcg_stats_sub_current(struct zram *zram, u32 index)
 {
 	struct zram_memcg_account account;
 
@@ -622,32 +622,7 @@ static void zram_memcg_stats_sub_current(struct zram *zram, u32 index)
 	zram_memcg_stats_apply(zram, &account, false);
 }
 
-#if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC)
-void crystal_sddc_zram_account_sub_locked(struct zram *zram, u32 index)
-{
-	zram_memcg_stats_sub_current(zram, index);
-}
-
-void crystal_sddc_zram_account_add_locked(struct zram *zram, u32 index)
-{
-	zram_memcg_stats_add_current(zram, index);
-}
-
-void crystal_sddc_zram_ref_account(struct zram *zram, u64 memcg_id,
-		size_t size, bool add)
-{
-	struct zram_memcg_stats_entry *entry;
-
-	if (!memcg_id || !size)
-		return;
-
-	spin_lock(&zram->memcg_stats_lock);
-	entry = zram_memcg_stats_find_locked(zram, memcg_id);
-	if (entry)
-		zram_memcg_stats_update(&entry->zram_compressed_size, size, add);
-	spin_unlock(&zram->memcg_stats_lock);
-}
-#endif
+/* crystal_sddc_zram_* 记账接口实现已归位 sddc/crystal_sddc.c */
 
 static void zram_memcg_stats_clear_all(struct zram *zram)
 {
@@ -742,8 +717,8 @@ static void zram_accessed(struct zram *zram, u32 index)
 #endif
 }
 
-static inline void update_used_max(struct zram *zram,
-					const unsigned long pages)
+void update_used_max(struct zram *zram,
+			const unsigned long pages)
 {
 	unsigned long cur_max = atomic_long_read(&zram->stats.max_used_pages);
 
@@ -754,15 +729,7 @@ static inline void update_used_max(struct zram *zram,
 					  &cur_max, pages));
 }
 
-#if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC)
-bool crystal_sddc_zram_memory_limit_ok(struct zram *zram)
-{
-	unsigned long pages = zs_get_total_pages(zram->mem_pool);
-
-	update_used_max(zram, pages);
-	return !zram->limit_pages || pages <= zram->limit_pages;
-}
-#endif
+/* crystal_sddc_zram_memory_limit_ok 实现已归位 sddc/crystal_sddc.c */
 
 static void zram_atomic64_update_max(atomic64_t *max, s64 val)
 {

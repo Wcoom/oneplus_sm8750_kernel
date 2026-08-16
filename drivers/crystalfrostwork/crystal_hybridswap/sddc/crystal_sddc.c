@@ -5081,3 +5081,43 @@ static struct kunit_suite crystal_sddc_state_test_suite = {
 kunit_test_suite(crystal_sddc_state_test_suite);
 
 #endif /* CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST */
+
+/*
+ * zram 记账适配：crystal_sddc_zram_* 接口的实现。
+ * 原实现在 zram_drv.c（跨文件散布），归位至 sddc/ 后 SDDC 命名空间
+ * 函数实现全部落于本文件。依赖的 zram 记账基础设施经 zram_drv.h 共享。
+ */
+#if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC)
+void crystal_sddc_zram_account_sub_locked(struct zram *zram, u32 index)
+{
+	zram_memcg_stats_sub_current(zram, index);
+}
+
+void crystal_sddc_zram_account_add_locked(struct zram *zram, u32 index)
+{
+	zram_memcg_stats_add_current(zram, index);
+}
+
+void crystal_sddc_zram_ref_account(struct zram *zram, u64 memcg_id,
+		size_t size, bool add)
+{
+	struct zram_memcg_stats_entry *entry;
+
+	if (!memcg_id || !size)
+		return;
+
+	spin_lock(&zram->memcg_stats_lock);
+	entry = zram_memcg_stats_find_locked(zram, memcg_id);
+	if (entry)
+		zram_memcg_stats_update(&entry->zram_compressed_size, size, add);
+	spin_unlock(&zram->memcg_stats_lock);
+}
+
+bool crystal_sddc_zram_memory_limit_ok(struct zram *zram)
+{
+	unsigned long pages = zs_get_total_pages(zram->mem_pool);
+
+	update_used_max(zram, pages);
+	return !zram->limit_pages || pages <= zram->limit_pages;
+}
+#endif /* CONFIG_CRYSTAL_HYBRIDSWAP_SDDC */

@@ -282,4 +282,16 @@ struct zram {
 	struct dentry *debugfs_dir;
 #endif
 };
+
+/*
+ * 供 SDDC 记账适配（sddc/crystal_sddc.c）复用的 zram 侧记账基础设施。
+ * 原为 zram_drv.c 静态实现；SDDC 记账接口（crystal_sddc_zram_*）实现
+ * 归位 sddc/ 后，这些最小依赖随之共享。
+ */
+struct zram_memcg_stats_entry *zram_memcg_stats_find_locked(struct zram *zram,
+							    u64 cgroup_id);
+void zram_memcg_stats_update(atomic64_t *counter, u64 value, bool add);
+void zram_memcg_stats_add_current(struct zram *zram, u32 index);
+void zram_memcg_stats_sub_current(struct zram *zram, u32 index);
+void update_used_max(struct zram *zram, const unsigned long pages);
 #endif

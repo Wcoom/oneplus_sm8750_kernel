@@ -332093,6 +332093,15 @@ function {
   parameter_id: 0x18bd6530
 }
 function {
+  id: 0x91b76eb8
+  return_type_id: 0x6720d32f
+  parameter_id: 0x33756485
+  parameter_id: 0x33756485
+  parameter_id: 0x9cf21ab5
+  parameter_id: 0x0b30ee00
+  parameter_id: 0x4585663f
+}
+function {
   id: 0x91b78ec8
   return_type_id: 0x6720d32f
   parameter_id: 0x30ddb79e
@@ -361774,6 +361783,15 @@ function {
   parameter_id: 0x05501385
 }
 function {
+  id: 0xfffb0a36
+  return_type_id: 0x2ee2a594
+  parameter_id: 0x33756485
+  parameter_id: 0x33756485
+  parameter_id: 0x33756485
+  parameter_id: 0x33756485
+  parameter_id: 0x391f15ea
+}
+function {
   id: 0xfffcea5d
   return_type_id: 0x6d7f5ff6
   parameter_id: 0x0562c566
@@ -363517,6 +363535,15 @@ elf_symbol {
   crc: 0xca983fc0
   type_id: 0x9ac6895a
   full_name: "__get_task_ioprio"
+}
+elf_symbol {
+  id: 0xbe82973d
+  name: "__get_vm_area_caller"
+  is_defined: true
+  symbol_type: FUNCTION
+  crc: 0xafc30746
+  type_id: 0xfffb0a36
+  full_name: "__get_vm_area_caller"
 }
 elf_symbol {
   id: 0xea677002
@@ -372675,6 +372702,15 @@ elf_symbol {
   full_name: "__traceiter_android_vh_try_fixup_sea"
 }
 elf_symbol {
+  id: 0x5077741e
+  name: "__traceiter_android_vh_try_to_freeze_abort"
+  is_defined: true
+  symbol_type: FUNCTION
+  crc: 0x46c6c732
+  type_id: 0x9ab9affb
+  full_name: "__traceiter_android_vh_try_to_freeze_abort"
+}
+elf_symbol {
   id: 0x2bc25325
   name: "__traceiter_android_vh_try_to_freeze_todo"
   is_defined: true
@@ -380998,6 +381034,15 @@ elf_symbol {
   crc: 0x742bd80d
   type_id: 0x18ccbd2c
   full_name: "__tracepoint_android_vh_try_fixup_sea"
+}
+elf_symbol {
+  id: 0x0bc2efcc
+  name: "__tracepoint_android_vh_try_to_freeze_abort"
+  is_defined: true
+  symbol_type: OBJECT
+  crc: 0x9d87d045
+  type_id: 0x18ccbd2c
+  full_name: "__tracepoint_android_vh_try_to_freeze_abort"
 }
 elf_symbol {
   id: 0xd9d2bcff
@@ -445627,6 +445672,15 @@ elf_symbol {
   full_name: "vmap"
 }
 elf_symbol {
+  id: 0xf1e4c40a
+  name: "vmap_pages_range_noflush"
+  is_defined: true
+  symbol_type: FUNCTION
+  crc: 0xd95a5594
+  type_id: 0x91b76eb8
+  full_name: "vmap_pages_range_noflush"
+}
+elf_symbol {
   id: 0xdd7d73a5
   name: "vmemdup_user"
   is_defined: true
@@ -447740,6 +447794,7 @@ interface {
   symbol_id: 0x46f82598
   symbol_id: 0x7babe2df
   symbol_id: 0x73476ba5
+  symbol_id: 0xbe82973d
   symbol_id: 0xea677002
   symbol_id: 0x3a5255b8
   symbol_id: 0xa3a6c885
@@ -448757,6 +448812,7 @@ interface {
   symbol_id: 0xfeff2e7f
   symbol_id: 0x641d703d
   symbol_id: 0xeac5f4dd
+  symbol_id: 0x5077741e
   symbol_id: 0x2bc25325
   symbol_id: 0xd8abda6b
   symbol_id: 0x0119fc41
@@ -449682,6 +449738,7 @@ interface {
   symbol_id: 0x69721329
   symbol_id: 0x2df766e3
   symbol_id: 0x0896a337
+  symbol_id: 0x0bc2efcc
   symbol_id: 0xd9d2bcff
   symbol_id: 0x8d5e4915
   symbol_id: 0x09ba106b
@@ -456852,6 +456909,7 @@ interface {
   symbol_id: 0xa1a341df
   symbol_id: 0xf7787d5c
   symbol_id: 0x8119b492
+  symbol_id: 0xf1e4c40a
   symbol_id: 0xdd7d73a5
   symbol_id: 0xe4441605
   symbol_id: 0x7d46f112

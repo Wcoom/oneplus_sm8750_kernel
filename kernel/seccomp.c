@@ -565,22 +565,36 @@ static void __seccomp_filter_release(struct seccomp_filter *orig)
  *
  * @tsk: task the filter should be released from.
  *
- * This function should only be called when the task is exiting as
- * it detaches it from its filter tree. PF_EXITING has to be set
- * for the task.
+ * Live tasks must not be detached from their filter tree. PF_EXITING has to
+ * be set for real tasks. A task snapshot without a sighand is also accepted
+ * for compatibility with callers of the pre-bfafe5efa975 interface; such a
+ * snapshot is already detached and therefore does not need siglock.
  */
 void seccomp_filter_release(struct task_struct *tsk)
 {
 	struct seccomp_filter *orig;
 
-	if (WARN_ON((tsk->flags & PF_EXITING) == 0))
-		return;
+	if (tsk->sighand) {
+		if (WARN_ON((tsk->flags & PF_EXITING) == 0))
+			return;
 
-	spin_lock_irq(&tsk->sighand->siglock);
-	orig = tsk->seccomp.filter;
-	/* Detach task from its filter tree. */
-	tsk->seccomp.filter = NULL;
-	spin_unlock_irq(&tsk->sighand->siglock);
+		spin_lock_irq(&tsk->sighand->siglock);
+		orig = tsk->seccomp.filter;
+		/* Detach task from its filter tree. */
+		tsk->seccomp.filter = NULL;
+		spin_unlock_irq(&tsk->sighand->siglock);
+	} else {
+		/*
+		 * Before bfafe5efa975 ("seccomp: release task filters when the
+		 * task exits"), callers passed a detached task snapshot with no
+		 * sighand. Android 6.6 kernels can contain that change as a
+		 * backport, while external callers still select the old contract
+		 * from LINUX_VERSION_CODE. Preserve that unambiguous old contract
+		 * without allowing a live task to bypass the PF_EXITING check.
+		 */
+		orig = tsk->seccomp.filter;
+		tsk->seccomp.filter = NULL;
+	}
 	__seccomp_filter_release(orig);
 }
 

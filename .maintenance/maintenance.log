@@ -37,3 +37,19 @@
 - 红线校验通过：无冲突标记；vendor hook 仅新增 try_to_freeze_abort（签名完整）；KABI 槽位 sched.h:1535-1536 完好；ghost_task×12；SUBLEVEL 118；ZRAM=n；BBG LSM 末尾；defconfig 定制全 y
 - 合并提交 8362cdb3fdc8b；备份分支 backup/pre-ack-202608
 - 构建成功 exit 0：6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k，Image 39,258,624 字节
+
+## 2026-08-17 ACK 增量维护 + 真机 seccomp 审计
+- ACK 增量：24c059d9e217f → 606edb22359b4，1 提交，L0 零冲突
+  - 606edb22359b4 ANDROID: gzvm: fix VM/vCPU creation error-path leaks
+  - 合并提交 57b888edbb7a7；备份分支 backup/pre-ack-20260817
+- 真机审计发现 KernelSU sucompat 反复触发 kernel/seccomp.c:576（22 次），WARN 后提前返回并泄漏 seccomp filter 引用
+  - 根因：ACK 将 Linux 6.11 的 bfafe5efa975 新契约回移到 6.6，外置 KernelSU 仍按 LINUX_VERSION_CODE 选择 sighand=NULL 旧契约
+  - 修复 a0f59328855f9：真实 task 保持 PF_EXITING + siglock；仅兼容无 sighand 的已分离快照，不改变 ABI/KMI 或符号签名
+- 红线校验通过：ABI/stg、vendor hook、sched.h KABI 未变化；ghost_task×12；SUBLEVEL 118；ZRAM=n；定制配置全在
+- 构建 exit 0：Image 39,258,624 字节；SHA-256 dbf1687479087bc3c1829ab9a5d4d8fb75e6e4c2794b73c47fb1a109117d85a3
+- 产物：AnyKernel3-20260817-2320.zip（32,153,126 字节），设备端 Image 哈希一致
+- 真机刷入成功（OnePlus 13 PJZ110，2026-08-17）
+  - 新内核 #31，boot_id=e68e6185-b5d6-46ac-ae1b-2aa82df22dc6，无 panic/Oops
+  - KernelSU su 压力 50/50 成功，dmesg su 事件 56 次，seccomp WARN 刷前/刷后均为 0
+  - verify_kernel.sh：PASS=5 / WARN=0 / FAIL=0（fq_guard、swappiness=200、default_qdisc=fq）
+- 剩余 15 个启动 WARN 来自既有/vendor 边界（重复 proc/sysfs、SPMI 超时、块设备 holder、cnss2 IRQ wake、schedinfo ctor+ZERO、context tracking），未修改通用内核断言掩盖问题

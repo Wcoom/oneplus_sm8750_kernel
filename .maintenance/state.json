@@ -4,13 +4,14 @@
     "ack": {
       "remote": "https://android.googlesource.com/kernel/common",
       "branch": "android15-6.6",
-      "last_merged": "24c059d9e217f",
-      "last_merged_date": "2026-08-16",
-      "note": "第四轮官方源合并，L0 零冲突（5 提交：xt_quota2 UAF + try_to_freeze_abort hook + vmalloc 导出 + symbol list）"
+      "last_merged": "606edb22359b4",
+      "last_merged_date": "2026-08-17",
+      "note": "第五轮官方源增量合并，L0 零冲突（1 提交：gzvm VM/vCPU 创建失败路径引用泄漏修复）"
     }
   },
-  "last_maintenance": "2026-08-16",
+  "last_maintenance": "2026-08-17",
   "local_commits": [
+    "a0f59328855f9",
     "450f8996cf343",
     "9bc406aeb9f2a",
     "8416f24b45be9",

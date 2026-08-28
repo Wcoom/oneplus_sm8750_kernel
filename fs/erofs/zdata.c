@@ -8,6 +8,7 @@
 #include <linux/psi.h>
 #include <linux/cpuhotplug.h>
 #include <trace/events/erofs.h>
+#include <trace/hooks/fs.h>
 
 #define Z_EROFS_PCLUSTER_MAX_PAGES	(Z_EROFS_PCLUSTER_MAX_SIZE / PAGE_SIZE)
 #define Z_EROFS_INLINE_BVECS		2
@@ -1647,6 +1648,8 @@ static void z_erofs_submissionqueue_endio(struct bio *bio)
 	struct bio_vec *bvec;
 	struct bvec_iter_all iter_all;
 
+	trace_android_vh_erofs_iostat_update(q->sb, bio);
+
 	bio_for_each_segment_all(bvec, bio, iter_all) {
 		struct page *page = bvec->bv_page;
 
@@ -1729,6 +1732,7 @@ submit_bio_retry:
 					WARN(1, "erofs submit empty io, bio=0x%p, bi_opf=0x%x, bi_sector=%llu\n",
 					     bio, bio->bi_opf, bio->bi_iter.bi_sector);
                                 //#endif
+				trace_android_vh_erofs_iostat_submit(sb, bio);
 				submit_bio(bio);
 				if (memstall) {
 					psi_memstall_leave(&pflags);
@@ -1776,8 +1780,10 @@ submit_bio_retry:
 			move_to_bypass_jobqueue(pcl, qtail, owned_head);
 	} while (owned_head != Z_EROFS_PCLUSTER_TAIL);
 
-	if (bio)
+	if (bio) {
+		trace_android_vh_erofs_iostat_submit(sb, bio);
 		submit_bio(bio);
+	}
 	if (memstall)
 		psi_memstall_leave(&pflags);
 

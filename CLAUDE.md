@@ -18,6 +18,7 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 |---|---|
 | `6.6/` | GKI 6.6 ACK 内核树（`MODULE.bazel`/`launch_cvd.sh`/`flash_device.sh`，含 `kernel`、`common-modules`、`external`、`prebuilts`） |
 | `oplus13/` | **OnePlus 13 (SM8750) 定制内核工作区**：`android_kernel_common_oneplus_sm8750`（内核源码）、`clang-19/`（工具链）、`AnyKernel3-6.6.112-NOKSU-OnePlus8Elite/`（刷机包模板）、`op_mods/`、`docs/`、`bpf.sh`、`CLAUDE.md`（项目详细记忆）、`ACK维护任务书.md`（月度维护任务书） |
+| `pddump/` | **原创 payload.bin 解包工具**（v1.0.0，Go，对标 payload-dumper-go）：多核并行解压（12 核实测 5.3 倍提速）、顺序写盘、稀疏输出；交付物 `pddump/dist/pddump-windows-amd64.zip`（Windows exe + 说明）；项目记忆见 `pddump/CLAUDE.md`；构建需 `export PATH=/usr/local/go/bin:$PATH GOPROXY=https://goproxy.cn,direct`（本机网络受限，仅 goproxy.cn/dl.google.com/github git 可用） |
 | `deepseek-harness/` | DeepSeek Harness（DSH）源码 checkout |
 | `内核构建.sh` | 内核构建脚本（clang-19 + ccache 伪装，增量编译） |
 | `dabao.sh` | AnyKernel3 刷机包打包脚本 |
@@ -28,6 +29,7 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 ## 3. Claude Code 运行环境
 
 - **本体**：`/root/.local/bin/claude`（native 安装，v2.1.233；`claude --version` 可查）
+- **Go 工具链**：`/usr/local/go/bin/go`（go1.24.6，2026-08 安装）；本机外网受限，Go 模块必须用 `GOPROXY=https://goproxy.cn,direct`；pddump 项目的 Linux/Windows 构建与测试均依赖此工具链
 - **用户级配置**：`/root/.claude/settings.json`；全局状态：`/root/.claude.json`
 - **项目级权限白名单**：`/home/wcoom/oplus13/.claude/settings.local.json`（已授权 `Bash(git *)`、`Bash(curl *)`、`Bash(gh *)`、`Bash(python3 *)` 等，免确认执行）
 - **API 路由**：DeepSeek 中转（`ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`，key 在 settings.json 的 `ANTHROPIC_AUTH_TOKEN`）

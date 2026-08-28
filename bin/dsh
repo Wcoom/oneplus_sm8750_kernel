@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# dsh — 一键启动 DeepSeek Harness（当前 agent：web profile）
+#
+# 用法：
+#   dsh                启动 Web GUI（当前 agent）；若已在运行则自动打开浏览器
+#   dsh --bg           后台启动 Web GUI，日志写入 ~/.dsh/logs/
+#   dsh <CLI 参数>     透传给 DSH CLI（如 dsh --profile tui / dsh --help / dsh web）
+#
+# 实现：DSH CLI 入口在 deepseek-harness 仓库内（pnpm dsh → node --import tsx/esm apps/cli/src/bin.ts），
+# 依赖仓库相对路径，故必须先 cd 到仓库目录再执行。
+set -euo pipefail
+
+HARNESS_DIR="/home/wcoom/deepseek-harness"
+WEB_URL="http://127.0.0.1:3080"
+LOG_DIR="${HOME}/.dsh/logs"
+
+BG=""
+if [[ "${1:-}" == "--bg" ]]; then
+  BG=1
+  shift
+fi
+
+# 无参数 → 默认启动 web（当前 agent）
+if [[ $# -eq 0 ]]; then
+  set -- web
+fi
+
+# web 已在运行：不重复启动，直接打开浏览器
+is_web() { [[ "$1" == "web" ]] || { [[ "$1" == "--profile" ]] && [[ "${2:-}" == "web" ]]; }; }
+if is_web "$@" && curl -s -o /dev/null -m 1 "$WEB_URL"; then
+  echo "✅ DSH Web（当前 agent）已在运行：$WEB_URL"
+  (xdg-open "$WEB_URL" >/dev/null 2>&1 || cmd.exe /c start "$WEB_URL" >/dev/null 2>&1) || true
+  exit 0
+fi
+
+cd "$HARNESS_DIR"
+if [[ -n "$BG" ]]; then
+  mkdir -p "$LOG_DIR"
+  log="$LOG_DIR/dsh-$(date +%Y%m%d-%H%M%S).log"
+  nohup pnpm dsh "$@" >"$log" 2>&1 &
+  echo "🚀 DSH 已在后台启动（$*），日志：$log"
+  echo "   网页地址：$WEB_URL"
+else
+  echo "🚀 启动 DSH（$*）……"
+  exec pnpm dsh "$@"
+fi

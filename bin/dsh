@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# dsh — 一键启动 DeepSeek Harness（当前 agent：web profile）
+# dsh — DeepSeek Harness 一键启动/停止（当前 agent：web profile）
 #
 # 用法：
 #   dsh                启动 Web GUI（当前 agent）；若已在运行则自动打开浏览器
 #   dsh --bg           后台启动 Web GUI，日志写入 ~/.dsh/logs/
+#   dsh stop           停止所有正在运行的 DSH 实例（优雅退出，超时强制结束）
 #   dsh <CLI 参数>     透传给 DSH CLI（如 dsh --profile tui / dsh --help / dsh web）
 #
 # 实现：DSH CLI 入口在 deepseek-harness 仓库内（pnpm dsh → node --import tsx/esm apps/cli/src/bin.ts），
@@ -14,6 +15,44 @@ HARNESS_DIR="/home/wcoom/deepseek-harness"
 WEB_URL="http://127.0.0.1:3080"
 LOG_DIR="${HOME}/.dsh/logs"
 
+# ── dsh stop：一键停止所有 DSH 实例 ─────────────────────────────────────
+# DSH 以 pnpm dsh <profile> 启动，整棵进程树同属一个进程组（组长为 pnpm 主进程），
+# 向该组发 SIGTERM 即可整体优雅退出；等待 10 秒未退出则 SIGKILL 兜底。
+stop_dsh() {
+  local pids pgid mypgid remaining
+  pids=$(pgrep -f 'pnpm dsh' || true)
+  if [[ -z "$pids" ]]; then
+    echo "ℹ️ 没有正在运行的 DSH 进程"
+    return 0
+  fi
+  mypgid=$(ps -o pgid= -p $$ | tr -d ' ')
+  echo "🛑 停止 DSH 实例（PID: $(echo "$pids" | tr '\n' ' ')）……"
+  for pid in $pids; do
+    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+    if [[ -n "$pgid" && "$pgid" != "1" && "$pgid" != "$mypgid" ]]; then
+      # 整组优雅停止（含 node / esbuild 等子进程）
+      kill -TERM -- "-$pgid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    else
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
+  # 等待优雅退出，最长 10 秒
+  for _ in {1..10}; do
+    remaining=$(pgrep -f 'pnpm dsh' || true)
+    [[ -z "$remaining" ]] && { echo "✅ DSH 已停止"; return 0; }
+    sleep 1
+  done
+  pkill -9 -f 'pnpm dsh' 2>/dev/null || true
+  echo "⚠️ 优雅退出超时，已强制停止"
+}
+
+# ── 子命令：stop ────────────────────────────────────────────────────────
+if [[ "${1:-}" == "stop" ]]; then
+  stop_dsh
+  exit
+fi
+
+# ── 启动 ────────────────────────────────────────────────────────────────
 BG=""
 if [[ "${1:-}" == "--bg" ]]; then
   BG=1

@@ -53,3 +53,22 @@
   - KernelSU su 压力 50/50 成功，dmesg su 事件 56 次，seccomp WARN 刷前/刷后均为 0
   - verify_kernel.sh：PASS=5 / WARN=0 / FAIL=0（fq_guard、swappiness=200、default_qdisc=fq）
 - 剩余 15 个启动 WARN 来自既有/vendor 边界（重复 proc/sysfs、SPMI 超时、块设备 holder、cnss2 IRQ wake、schedinfo ctor+ZERO、context tracking），未修改通用内核断言掩盖问题
+
+=== 2026-08-28 第六轮 ACK 合并 ===
+- fetch: 606edb22359b4..5ef17cb58b6e6 (274 提交, LTS 回移大轮 + ANDROID fuse-bpf/fscrypt/vendor hooks)
+- 冲突: 2 处
+  * L1 android/abi_gki_aarch64.stg.allowed_breaks → 本地侧无条目，取 ACK 侧 fscrypt break 记录
+  * L2 fs/erofs/zdata.c → 融合：OPLUS_STORAGE_FS 空 bio WARN(本地) + trace_android_vh_erofs_iostat_submit(上游)，顺序 检查→hook→submit_bio
+- 红线校验: 冲突标记 0；hook 仅新增 4 个；KABI 槽位/ghost_task×12/NTSYNC/ZRAM=n/BBG/SUBLEVEL 全过
+- 合并提交: 70c996f51f86a
+- 备份分支: backup/pre-ack-20260828
+
+--- 构建与验证（2026-08-28 续） ---
+- 构建: exit 0，Image 39,258,624 字节，SHA-256 c0ed8f0ff9a1c7cacd8084e7a3ce1c932af81c0dd378d948195db43f9f8c6824
+- 核验: ntsync×97 / FQ_GUARD+REKERNEL_X+NTSYNC+BBG+SYSVIPC=y / 版本串 6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k
+- 审核: DeepSeek-V4-Flash 独立审核 PASS（无红线问题，2 项低级别风格观察）
+- 打包: AnyKernel3-20260828-1858.zip (31M)
+- 刷机: 设备 5d6d4090 slot _b；注意坑：/data/local/tmp 解包后 tools 无执行位（模板 zip 打包时权限丢失），需设备侧 chmod -R 755
+- 真机验证: boot 分区内核 md5 与本地 Image 一致；boot_completed=1；KernelSU root 完好；
+  50 次 su -c true 全成功；seccomp_filter_release WARN=0（1 条命中为 KernelSU init 正常日志）；
+  verify_kernel.sh PASS=5/WARN=0/FAIL=0；温度偏移 sysctl=0 可读；/dev/ntsync 0666 存在

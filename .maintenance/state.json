@@ -4,12 +4,12 @@
     "ack": {
       "remote": "https://android.googlesource.com/kernel/common",
       "branch": "android15-6.6",
-      "last_merged": "606edb22359b4",
-      "last_merged_date": "2026-08-17",
-      "note": "第五轮官方源增量合并，L0 零冲突（1 提交：gzvm VM/vCPU 创建失败路径引用泄漏修复）"
+      "last_merged": "5ef17cb58b6e6",
+      "last_merged_date": "2026-08-28",
+      "note": "第六轮官方源增量合并，274 提交（LTS 回移大轮 + ANDROID fuse-bpf/fscrypt/vendor hooks）；L1 allowed_breaks 取 ACK 侧 + L2 erofs zdata.c 融合；真机刷入验证 PASS=5"
     }
   },
-  "last_maintenance": "2026-08-17",
+  "last_maintenance": "2026-08-28",
   "local_commits": [
     "a0f59328855f9",
     "450f8996cf343",

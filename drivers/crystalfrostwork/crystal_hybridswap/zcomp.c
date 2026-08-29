@@ -16,6 +16,7 @@
 #include "zcomp.h"
 #if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD)
 #include "sddc/crystal_sddc_codec.h"
+#include "sddc/lz4kd/lz4kd.h"
 #endif
 
 static const char * const backends[] = {
@@ -35,6 +36,9 @@ static const char * const backends[] = {
 #if IS_ENABLED(CONFIG_CRYPTO_LZ4KD) || \
 	IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD)
 	"lz4kd",
+#endif
+#if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD)
+	"lz4kds",
 #endif
 #if IS_ENABLED(CONFIG_CRYPTO_DEFLATE)
 	"deflate",
@@ -87,7 +91,7 @@ static const struct zcomp_backend_ops crypto_backend_ops = {
 };
 
 #if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD)
-static int lz4kd_backend_create(struct zcomp_strm *zstrm, const char *name)
+static int lz4kds_backend_create(struct zcomp_strm *zstrm, const char *name)
 {
 	struct crystal_sddc_codec *codec;
 
@@ -99,13 +103,13 @@ static int lz4kd_backend_create(struct zcomp_strm *zstrm, const char *name)
 	return 0;
 }
 
-static void lz4kd_backend_destroy(struct zcomp_strm *zstrm)
+static void lz4kds_backend_destroy(struct zcomp_strm *zstrm)
 {
 	crystal_sddc_codec_destroy(zstrm->backend_data);
 	zstrm->backend_data = NULL;
 }
 
-static int lz4kd_backend_compress(struct zcomp_strm *zstrm,
+static int lz4kds_backend_compress(struct zcomp_strm *zstrm,
 		const void *src, unsigned int src_len, void *dst,
 		unsigned int *dst_len)
 {
@@ -113,7 +117,7 @@ static int lz4kd_backend_compress(struct zcomp_strm *zstrm,
 					   dst, dst_len);
 }
 
-static int lz4kd_backend_decompress(struct zcomp_strm *zstrm,
+static int lz4kds_backend_decompress(struct zcomp_strm *zstrm,
 		const void *src, unsigned int src_len, void *dst,
 		unsigned int *dst_len)
 {
@@ -121,7 +125,7 @@ static int lz4kd_backend_decompress(struct zcomp_strm *zstrm,
 					     dst, dst_len);
 }
 
-static int lz4kd_backend_compress_delta(struct zcomp_strm *zstrm,
+static int lz4kds_backend_compress_delta(struct zcomp_strm *zstrm,
 		const void *ref, unsigned int ref_len, const void *src,
 		unsigned int src_len, void *dst, unsigned int *dst_len,
 		unsigned int out_limit)
@@ -130,7 +134,7 @@ static int lz4kd_backend_compress_delta(struct zcomp_strm *zstrm,
 			ref_len, src, src_len, dst, dst_len, out_limit);
 }
 
-static int lz4kd_backend_decompress_delta(struct zcomp_strm *zstrm,
+static int lz4kds_backend_decompress_delta(struct zcomp_strm *zstrm,
 		const void *src, unsigned int src_len, const void *ref,
 		unsigned int ref_len, void *dst, unsigned int *dst_len)
 {
@@ -139,7 +143,7 @@ static int lz4kd_backend_decompress_delta(struct zcomp_strm *zstrm,
 }
 
 static int
-lz4kd_backend_decompress_delta_borrowed(struct zcomp_strm *zstrm,
+lz4kds_backend_decompress_delta_borrowed(struct zcomp_strm *zstrm,
 		const void *src, unsigned int src_len, const void *ref,
 		unsigned int ref_len, const void **restored,
 		unsigned int *restored_len)
@@ -148,23 +152,85 @@ lz4kd_backend_decompress_delta_borrowed(struct zcomp_strm *zstrm,
 			src, src_len, ref, ref_len, restored, restored_len);
 }
 
-static const struct zcomp_backend_ops lz4kd_backend_ops = {
-	.create = lz4kd_backend_create,
-	.destroy = lz4kd_backend_destroy,
-	.compress = lz4kd_backend_compress,
-	.decompress = lz4kd_backend_decompress,
-	.compress_delta = lz4kd_backend_compress_delta,
-	.decompress_delta = lz4kd_backend_decompress_delta,
+static const struct zcomp_backend_ops lz4kds_backend_ops = {
+	.create = lz4kds_backend_create,
+	.destroy = lz4kds_backend_destroy,
+	.compress = lz4kds_backend_compress,
+	.decompress = lz4kds_backend_decompress,
+	.compress_delta = lz4kds_backend_compress_delta,
+	.decompress_delta = lz4kds_backend_decompress_delta,
 	.decompress_delta_borrowed =
-		lz4kd_backend_decompress_delta_borrowed,
+		lz4kds_backend_decompress_delta_borrowed,
+};
+
+/* 纯 LZ4KD backend（无 SDDC delta）：与 lz4kds 拆分对齐 v3.5 语义 */
+static int lz4kd_pure_backend_create(struct zcomp_strm *zstrm, const char *name)
+{
+	void *state;
+
+	(void)name;
+	state = kvzalloc(crystal_lz4kd_encode_state_bytes_min(), GFP_KERNEL);
+	if (!state)
+		return -ENOMEM;
+	zstrm->backend_data = state;
+	return 0;
+}
+
+static void lz4kd_pure_backend_destroy(struct zcomp_strm *zstrm)
+{
+	kvfree(zstrm->backend_data);
+	zstrm->backend_data = NULL;
+}
+
+static int lz4kd_pure_backend_compress(struct zcomp_strm *zstrm,
+		const void *src, unsigned int src_len, void *dst,
+		unsigned int *dst_len)
+{
+	int ret;
+
+	ret = crystal_lz4kd_encode(zstrm->backend_data, src, dst, src_len,
+				   *dst_len, 0);
+	if (ret < 0)
+		return -EINVAL;
+	if (ret > 0)
+		*dst_len = ret;
+
+	return 0;
+}
+
+static int lz4kd_pure_backend_decompress(struct zcomp_strm *zstrm,
+		const void *src, unsigned int src_len, void *dst,
+		unsigned int *dst_len)
+{
+	int ret;
+
+	ret = crystal_lz4kd_decode(src, dst, src_len, *dst_len);
+	if (ret != PAGE_SIZE)
+		return -EINVAL;
+
+	*dst_len = ret;
+	return 0;
+}
+
+static const struct zcomp_backend_ops lz4kd_pure_backend_ops = {
+	.create = lz4kd_pure_backend_create,
+	.destroy = lz4kd_pure_backend_destroy,
+	.compress = lz4kd_pure_backend_compress,
+	.decompress = lz4kd_pure_backend_decompress,
+	/*
+	 * delta ops 保持 NULL：zcomp_supports_delta() 判定不支持，
+	 * SDDC 数据通路自动走普通压缩路径。
+	 */
 };
 #endif
 
 static const struct zcomp_backend_ops *zcomp_backend(const char *name)
 {
 #if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD)
+	if (!strcmp(name, "lz4kds"))
+		return &lz4kds_backend_ops;
 	if (!strcmp(name, "lz4kd"))
-		return &lz4kd_backend_ops;
+		return &lz4kd_pure_backend_ops;
 #endif
 	return &crypto_backend_ops;
 }
@@ -213,7 +279,7 @@ static int zcomp_strm_init(struct zcomp_strm *zstrm,
 bool zcomp_available_algorithm(const char *comp)
 {
 #if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD)
-	if (!strcmp(comp, "lz4kd"))
+	if (!strcmp(comp, "lz4kds") || !strcmp(comp, "lz4kd"))
 		return crystal_sddc_codec_available();
 #endif
 	/*

@@ -95,12 +95,6 @@ struct crystal_sddc_stats_snapshot {
 	u64 indexed;
 	u64 refs;
 	u64 ref_bytes;
-	u64 wb_ref_pins;
-	u64 wb_ref_pin_bytes;
-	u64 wb_ref_pin_max;
-	u64 wb_ref_pin_bytes_max;
-	u64 wb_ref_pin_events;
-	u64 wb_ref_unpin_events;
 	u64 wb_deltas;
 	u64 wb_delta_bytes;
 	u64 wb_aliases;
@@ -115,6 +109,7 @@ struct crystal_sddc_stats_snapshot {
 	u64 delta_matches;
 	u64 delta_small_rejects;
 	u64 delta_no_gain;
+	u64 delta_proof_failures;
 	u64 delta_match_bytes_max;
 	u64 saved_bytes;
 	u64 saved_bytes_total;
@@ -131,10 +126,6 @@ struct crystal_sddc_stats_snapshot {
 	u64 conversion_failures;
 	u64 decode_failures;
 	u64 flatten_failures;
-	u64 integrity_checks;
-	u64 integrity_failures;
-	u64 integrity_skipped;
-	u64 integrity_hash_failures;
 	u64 limit_rejects;
 	u64 pending_max;
 	u32 pending;

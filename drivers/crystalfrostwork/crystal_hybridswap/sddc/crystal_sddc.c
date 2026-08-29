@@ -118,6 +118,7 @@ struct crystal_sddc_workspace {
 	void *ordinary;
 	void *ref_data;
 	void *wire;
+	void *proof;
 };
 
 struct crystal_sddc_candidate {
@@ -167,12 +168,6 @@ struct crystal_sddc_stats {
 	atomic64_t indexed;
 	atomic64_t refs;
 	atomic64_t ref_bytes;
-	atomic64_t wb_ref_pins;
-	atomic64_t wb_ref_pin_bytes;
-	atomic64_t wb_ref_pin_max;
-	atomic64_t wb_ref_pin_bytes_max;
-	atomic64_t wb_ref_pin_events;
-	atomic64_t wb_ref_unpin_events;
 	atomic64_t wb_deltas;
 	atomic64_t wb_delta_bytes;
 	atomic64_t wb_aliases;
@@ -187,6 +182,7 @@ struct crystal_sddc_stats {
 	atomic64_t delta_matches;
 	atomic64_t delta_small_rejects;
 	atomic64_t delta_no_gain;
+	atomic64_t delta_proof_failures;
 	atomic64_t delta_match_bytes_max;
 	atomic64_t saved_bytes;
 	atomic64_t saved_bytes_total;
@@ -754,65 +750,11 @@ static void crystal_sddc_atomic64_update_max(atomic64_t *value, s64 candidate)
 	}
 }
 
-static void crystal_sddc_native_wb_account_pin(struct crystal_sddc *sddc,
-		const struct crystal_sddc_wb_state *state)
-{
-	s64 pins;
-	s64 pin_bytes;
-
-	if (!sddc || !state)
-		return;
-
-	pins = atomic64_inc_return(&sddc->stats.wb_ref_pins);
-	pin_bytes = atomic64_add_return(state->ref_size,
-			&sddc->stats.wb_ref_pin_bytes);
-	atomic64_inc(&sddc->stats.wb_ref_pin_events);
-	crystal_sddc_atomic64_update_max(&sddc->stats.wb_ref_pin_max, pins);
-	crystal_sddc_atomic64_update_max(&sddc->stats.wb_ref_pin_bytes_max,
-			pin_bytes);
-}
-
-static void crystal_sddc_native_wb_unaccount_pin(struct crystal_sddc *sddc,
-		const struct crystal_sddc_wb_state *state)
-{
-	if (!sddc || !state || !state->accounted)
-		return;
-
-	atomic64_dec(&sddc->stats.wb_ref_pins);
-	atomic64_sub(state->ref_size, &sddc->stats.wb_ref_pin_bytes);
-	atomic64_inc(&sddc->stats.wb_ref_unpin_events);
-}
-
 static const char *crystal_sddc_native_wb_disk_name(struct crystal_sddc *sddc)
 {
 	if (!sddc || !sddc->zram || !sddc->zram->disk)
 		return "unknown";
 	return sddc->zram->disk->disk_name;
-}
-
-static void crystal_sddc_native_wb_log_pin(struct crystal_sddc *sddc,
-		u32 index, const struct crystal_sddc_wb_state *state,
-		const char *event)
-{
-	if (!sddc || !state || !event)
-		return;
-
-	chs_log_ratelimited(CHS_LOG_INFO,
-		"sddc_native_debug event=%s dev=%s index=%u kind=%u ref=%u:%u ref_size=%u target_size=%u wire_size=%u accounted=%u wb_ref_pins=%lld wb_ref_pin_bytes=%lld wb_ref_pin_max=%lld wb_ref_pin_bytes_max=%lld refs=%lld ref_bytes=%lld wb_deltas=%lld wb_aliases=%lld wb_delta_bytes=%lld wb_alias_bytes=%lld\n",
-		event, crystal_sddc_native_wb_disk_name(sddc), index,
-		state->kind, state->ref.id, state->ref.generation,
-		state->ref_size, state->target_size, state->wire_size,
-		state->accounted,
-		(long long)atomic64_read(&sddc->stats.wb_ref_pins),
-		(long long)atomic64_read(&sddc->stats.wb_ref_pin_bytes),
-		(long long)atomic64_read(&sddc->stats.wb_ref_pin_max),
-		(long long)atomic64_read(&sddc->stats.wb_ref_pin_bytes_max),
-		(long long)atomic64_read(&sddc->stats.refs),
-		(long long)atomic64_read(&sddc->stats.ref_bytes),
-		(long long)atomic64_read(&sddc->stats.wb_deltas),
-		(long long)atomic64_read(&sddc->stats.wb_aliases),
-		(long long)atomic64_read(&sddc->stats.wb_delta_bytes),
-		(long long)atomic64_read(&sddc->stats.wb_alias_bytes));
 }
 
 static u32 crystal_sddc_page_hash(const void *page_data)
@@ -904,9 +846,12 @@ crystal_sddc_workspace_alloc(gfp_t gfp_mask)
 	workspace->ordinary = kmalloc(PAGE_SIZE, gfp_mask);
 	workspace->ref_data = kmalloc(PAGE_SIZE, gfp_mask);
 	workspace->wire = kmalloc(PAGE_SIZE, gfp_mask);
-	if (workspace->ordinary && workspace->ref_data && workspace->wire)
+	workspace->proof = kmalloc(PAGE_SIZE, gfp_mask);
+	if (workspace->ordinary && workspace->ref_data && workspace->wire &&
+	    workspace->proof)
 		return workspace;
 
+	kfree(workspace->proof);
 	kfree(workspace->wire);
 	kfree(workspace->ref_data);
 	kfree(workspace->ordinary);
@@ -918,6 +863,7 @@ static void crystal_sddc_workspace_free(struct crystal_sddc_workspace *workspace
 {
 	if (!workspace)
 		return;
+	kfree(workspace->proof);
 	kfree(workspace->wire);
 	kfree(workspace->ref_data);
 	kfree(workspace->ordinary);
@@ -2167,6 +2113,30 @@ static bool crystal_sddc_try_delta_from_source(struct crystal_sddc *sddc,
 	if (!delta) {
 		atomic64_inc(&sddc->stats.delta_no_gain);
 		goto out;
+	}
+
+	/*
+	 * delta proof（对齐上游 v3.4 完整性诊断与归因）：压缩成功后立即
+	 * round-trip 解码验证，防止错误 delta 数据写入存储导致读路径失败。
+	 * 验证失败计入 delta_proof_failures 并放弃本次 delta。
+	 */
+	{
+		/* 初值仅作占位：decompress_delta 内部按 PAGE_SIZE 校验并将
+		 * 实际解码长度写回 proof_len */
+		unsigned int proof_len = PAGE_SIZE;
+		int proof_ret;
+
+		zstrm = zcomp_stream_get(sddc->zram->comps[target->prio]);
+		if (!zstrm)
+			goto out;
+		proof_ret = zcomp_decompress_delta(zstrm, delta, delta_len,
+				workspace->ref_data, source->key.size,
+				workspace->proof, &proof_len);
+		zcomp_stream_put(sddc->zram->comps[target->prio]);
+		if (proof_ret || proof_len != target->size) {
+			atomic64_inc(&sddc->stats.delta_proof_failures);
+			goto out;
+		}
 	}
 
 	wire_size = sizeof(header) + delta_len;
@@ -3717,7 +3687,6 @@ void crystal_sddc_native_wb_finalize_locked(struct zram *zram, u32 index)
 	state->mutation_seq = sddc->mutation_seq[index];
 	if (!state->accounted) {
 		state->accounted = true;
-		crystal_sddc_native_wb_account_pin(sddc, state);
 		if (state->kind == CRYSTAL_SDDC_DELTA) {
 			atomic64_inc(&sddc->stats.wb_deltas);
 			atomic64_add(state->wire_size,
@@ -3727,7 +3696,6 @@ void crystal_sddc_native_wb_finalize_locked(struct zram *zram, u32 index)
 			atomic64_add(state->wire_size,
 				     &sddc->stats.wb_alias_bytes);
 		}
-		crystal_sddc_native_wb_log_pin(sddc, index, state, "finalize");
 	}
 }
 
@@ -3772,8 +3740,6 @@ void crystal_sddc_native_wb_free_locked(struct zram *zram, u32 index)
 		atomic64_dec(&sddc->stats.wb_aliases);
 		atomic64_sub(state->wire_size, &sddc->stats.wb_alias_bytes);
 	}
-	crystal_sddc_native_wb_unaccount_pin(sddc, state);
-	crystal_sddc_native_wb_log_pin(sddc, index, state, "free");
 	crystal_sddc_ref_put(state->ref_obj);
 	kfree(state);
 }
@@ -4008,15 +3974,6 @@ void crystal_sddc_get_stats(struct zram *zram,
 	stats->indexed = atomic64_read(&sddc->stats.indexed);
 	stats->refs = atomic64_read(&sddc->stats.refs);
 	stats->ref_bytes = atomic64_read(&sddc->stats.ref_bytes);
-	stats->wb_ref_pins = atomic64_read(&sddc->stats.wb_ref_pins);
-	stats->wb_ref_pin_bytes = atomic64_read(&sddc->stats.wb_ref_pin_bytes);
-	stats->wb_ref_pin_max = atomic64_read(&sddc->stats.wb_ref_pin_max);
-	stats->wb_ref_pin_bytes_max =
-		atomic64_read(&sddc->stats.wb_ref_pin_bytes_max);
-	stats->wb_ref_pin_events =
-		atomic64_read(&sddc->stats.wb_ref_pin_events);
-	stats->wb_ref_unpin_events =
-		atomic64_read(&sddc->stats.wb_ref_unpin_events);
 	stats->wb_deltas = atomic64_read(&sddc->stats.wb_deltas);
 	stats->wb_delta_bytes = atomic64_read(&sddc->stats.wb_delta_bytes);
 	stats->wb_aliases = atomic64_read(&sddc->stats.wb_aliases);
@@ -4032,6 +3989,8 @@ void crystal_sddc_get_stats(struct zram *zram,
 	stats->delta_small_rejects =
 		atomic64_read(&sddc->stats.delta_small_rejects);
 	stats->delta_no_gain = atomic64_read(&sddc->stats.delta_no_gain);
+	stats->delta_proof_failures =
+		atomic64_read(&sddc->stats.delta_proof_failures);
 	stats->delta_match_bytes_max =
 		atomic64_read(&sddc->stats.delta_match_bytes_max);
 	stats->saved_bytes = atomic64_read(&sddc->stats.saved_bytes);
@@ -4059,14 +4018,6 @@ void crystal_sddc_get_stats(struct zram *zram,
 		atomic64_read(&sddc->stats.conversion_failures);
 	stats->decode_failures = atomic64_read(&sddc->stats.decode_failures);
 	stats->flatten_failures = atomic64_read(&sddc->stats.flatten_failures);
-	stats->integrity_checks =
-		atomic64_read(&sddc->stats.integrity_checks);
-	stats->integrity_failures =
-		atomic64_read(&sddc->stats.integrity_failures);
-	stats->integrity_skipped =
-		atomic64_read(&sddc->stats.integrity_skipped);
-	stats->integrity_hash_failures =
-		atomic64_read(&sddc->stats.integrity_hash_failures);
 	stats->limit_rejects = atomic64_read(&sddc->stats.limit_rejects);
 	stats->pending_max = atomic64_read(&sddc->stats.pending_max);
 	spin_lock(&sddc->state_lock);

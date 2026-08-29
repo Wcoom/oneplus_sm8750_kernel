@@ -2434,11 +2434,10 @@ int crystal_hybridswap_zram_pressure_snapshot(struct device *dev,
 
 	sddc_valid = crystal_sddc_debug_snapshot(zram, &sddc_stats);
 	chs_log_ratelimited(CHS_LOG_INFO,
-		"sddc_native_debug event=pressure dev=%llu valid=%u stored=%llu same=%llu writeback=%llu resident=%llu total=%llu ratio=%u mem_used_pages=%llu sddc_enabled=%u refs=%llu ref_bytes=%llu wb_ref_pins=%llu wb_ref_pin_bytes=%llu wb_deltas=%llu wb_aliases=%llu wb_delta_bytes=%llu wb_alias_bytes=%llu zms_valid=%u zms_dirty_pages=%lu zms_used_blocks=%lu zms_objects=%lu\n",
+		"sddc_native_debug event=pressure dev=%llu valid=%u stored=%llu same=%llu writeback=%llu resident=%llu total=%llu ratio=%u mem_used_pages=%llu sddc_enabled=%u refs=%llu ref_bytes=%llu wb_deltas=%llu wb_aliases=%llu wb_delta_bytes=%llu wb_alias_bytes=%llu zms_valid=%u zms_dirty_pages=%lu zms_used_blocks=%lu zms_objects=%lu\n",
 		snapshot->device_id, snapshot->valid, stored, same, writeback,
 		resident, total, snapshot->resident_ratio, mem_used_pages,
 		sddc_valid, sddc_stats.refs, sddc_stats.ref_bytes,
-		sddc_stats.wb_ref_pins, sddc_stats.wb_ref_pin_bytes,
 		sddc_stats.wb_deltas, sddc_stats.wb_aliases,
 		sddc_stats.wb_delta_bytes, sddc_stats.wb_alias_bytes,
 		zms_valid,
@@ -3249,12 +3248,6 @@ static ssize_t sddc_stat_show(struct device *dev,
 		"indexed: %llu\n"
 		"refs: %llu\n"
 		"ref_bytes: %llu\n"
-		"wb_ref_pins: %llu\n"
-		"wb_ref_pin_bytes: %llu\n"
-		"wb_ref_pin_max: %llu\n"
-		"wb_ref_pin_bytes_max: %llu\n"
-		"wb_ref_pin_events: %llu\n"
-		"wb_ref_unpin_events: %llu\n"
 		"wb_deltas: %llu\n"
 		"wb_delta_bytes: %llu\n"
 		"wb_aliases: %llu\n"
@@ -3269,6 +3262,7 @@ static ssize_t sddc_stat_show(struct device *dev,
 		"delta_matches: %llu\n"
 		"delta_small_rejects: %llu\n"
 		"delta_no_gain: %llu\n"
+		"delta_proof_failures: %llu\n"
 		"delta_match_bytes_max: %llu\n"
 		"saved_bytes: %llu\n"
 		"saved_bytes_total: %llu\n"
@@ -3285,25 +3279,19 @@ static ssize_t sddc_stat_show(struct device *dev,
 		"conversion_failures: %llu\n"
 		"decode_failures: %llu\n"
 		"flatten_failures: %llu\n"
-		"integrity_checks: %llu\n"
-		"integrity_failures: %llu\n"
-		"integrity_skipped: %llu\n"
-		"integrity_hash_failures: %llu\n"
 		"limit_rejects: %llu\n",
 		stats.enabled, stats.queued, stats.coalesced, stats.dropped,
 		stats.ineligible, stats.shutdown_discarded, stats.worker_runs,
 		stats.pending, stats.pending_max, stats.observed, stats.stale,
 		stats.indexed,
-		stats.refs, stats.ref_bytes, stats.wb_ref_pins,
-		stats.wb_ref_pin_bytes, stats.wb_ref_pin_max,
-		stats.wb_ref_pin_bytes_max, stats.wb_ref_pin_events,
-		stats.wb_ref_unpin_events, stats.wb_deltas,
+		stats.refs, stats.ref_bytes, stats.wb_deltas,
 		stats.wb_delta_bytes, stats.wb_aliases,
 		stats.wb_alias_bytes, stats.aliases, stats.deltas,
 		stats.delta_bytes, stats.alias_attempts, stats.alias_hits,
 		stats.delta_attempts, stats.delta_hits, stats.delta_matches,
 		stats.delta_small_rejects, stats.delta_no_gain,
-		stats.delta_match_bytes_max, stats.saved_bytes,
+		stats.delta_proof_failures, stats.delta_match_bytes_max,
+		stats.saved_bytes,
 		stats.saved_bytes_total, stats.released_aliases,
 		stats.released_deltas, stats.released_saved_bytes,
 		stats.released_writeback_saved_bytes,
@@ -3314,8 +3302,6 @@ static ssize_t sddc_stat_show(struct device *dev,
 		stats.released_reset_saved_bytes,
 		stats.released_other_saved_bytes, stats.conversion_failures,
 		stats.decode_failures, stats.flatten_failures,
-		stats.integrity_checks, stats.integrity_failures,
-		stats.integrity_skipped, stats.integrity_hash_failures,
 		stats.limit_rejects);
 }
 

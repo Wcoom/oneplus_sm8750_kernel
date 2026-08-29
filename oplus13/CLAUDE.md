@@ -19,11 +19,11 @@
 - **git 远程**: `origin` = 上游 whitewhale0612（只拉取，勿推送）；`ack` = `https://android.googlesource.com/kernel/common`（官方源）；`github` = 个人仓库 `Wcoom/oneplus_sm8750_kernel`（推送目标，SSH 认证）
 - **当前分支**: `6.6.118-13T`
 
-## 当前稳定基线（2026-08-28 核实）
+## 当前稳定基线（2026-08-29 核实）
 
-- **HEAD**: `0db9942686f0a`（ACK 第六轮合并 + 维护记录，已推送 `github`），内核工作区干净
+- **HEAD**: `941a8c58f2f8d`（v3.5 prebuilt 反推同步 3 提交，已推送 `github`），内核工作区干净
 - **版本**: 固定名 `6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k`（SUBLEVEL 118；`CONFIG_LOCALVERSION` 写死 + `LOCALVERSION_AUTO` 关闭，不再随提交哈希变化）
-- **产物**: `out/arch/arm64/boot/Image` 39,258,624 字节，SHA-256 `c0ed8f0ff9a1c7cacd8084e7a3ce1c932af81c0dd378d948195db43f9f8c6824`（md5 `4a554b5ade0fabd1f3f46397b9cfad32`）；刷机包 `AnyKernel3-20260828-1858.zip` 31M
+- **产物**: `out/arch/arm64/boot/Image` 39,258,624 字节，SHA-256 `1ac3cbeb4527c2e986a1f64720dc75fc97028cfb23f4e99e8a55fc87a1652261`（md5 `cedb1217ef0fe3c6df2d1745e0c491ec`）；刷机包 `AnyKernel3-20260829-1020.zip` 31M
 - **ccache**: 4.48G / 5G（本轮构建命中率 65.63%）
 - `ahead origin 10728` 属正常现象（ACK 合并带入大量上游历史）
 - 推送认证：GitHub PAT 权限不足（403），已改用 ed25519 SSH key（`wcoom@wsl2`）
@@ -172,6 +172,17 @@
     - 红线校验全过：冲突标记零残留、hook 无改删、KABI 槽位/ghost_task×12/NTSYNC×97/ZRAM=n/BBG/SUBLEVEL 118 全在；构建 exit 0（Image 39,258,624 字节，SHA-256 `c0ed8f0f`）；DeepSeek-V4-Flash 独立审核 PASS
     - **已刷入真机并验证（2026-08-28）**：设备 `5d6d4090` slot _b；boot 分区内核段 md5 与本地 Image 一致（版本串固定，以 md5 区分新旧）；boot_completed=1、KernelSU root 完好、50 次 su 全成功、seccomp WARN=0；verify_kernel.sh PASS=5/WARN=0/FAIL=0；温度偏移 sysctl=0 可读；/dev/ntsync 0666
     - 打包 `AnyKernel3-20260828-1858.zip`（31M）；已推送 github（`9b46d92f3d6f2..0db9942686f0a`）
+
+15. **v3.5 prebuilt 反推同步（lz4kds 算法拆分 + SDDC 诊断对齐，2026-08-29）**（`ac2523ece303b` + `8f0998ee9052d` + `941a8c58f2f8d`，已推送 github）
+    - **背景**：上游 whitewhale0612 仓库已闭源（禁止 git 同步）；用户刷入上游 v3.5 官方 prebuilt，用 adb 日志反推 v3.3→v3.5 增量并应用到本地源码。反推素材与报告在 `oplus13/.scratch/rev-v35/`（findings.md、brief.md、claude-code-analysis.md、dmesg_v35.txt）
+    - **反推结论**：本地（08-11 同步版）几乎已是 v3.3+ 完整状态；日志可实锤的增量仅：① lz4kds 算法拆分 ② SDDC 诊断体系重构（sddc_stat 输出删 wb_ref_pin×6+integrity×4 字段、加 delta_proof_failures）；v3.4/v3.5 changelog 的"调度稳定性修复/MGLRU 修复"无法从日志反推（本地 MGLRU config 与 v3.5 一致；context_tracking WARN 两边同码同行）；Droidspaces 本地已有；codex 子代理两次 thread-start 失败（服务不可用），改由 claude-code 子代理完成独立分析
+    - **v3.5 激活事实**：真机 comp_algorithm 激活 [lz4kds] 但 ZRAM_DEF_COMP 配置值为 "lz4kd"，且用户空间无 lz4kds 写入点（/data/adb、/vendor、/system、/product init 均无）——v3.5 的 lz4kds 激活来自内核侧默认
+    - **`ac2523ece303b` zcomp 拆分**：backends[] 加 lz4kds（SDDC codec 包装 backend 更名 lz4kds_backend_*）；新增 lz4kd_pure_backend_*（直接包装 crystal_lz4kd_encode/decode，delta ops NULL 自动走普通路径）；按名分发；默认 ZRAM_DEF_COMP 保持 lz4kd
+    - **`8f0998ee9052d` SDDC 诊断对齐**：快照/内部 atomic/get_stats/sysfs 输出删 wb_ref_pin×6+integrity×4、加 delta_proof_failures；删 writeback ref-pin 统计函数；try_delta_from_source 加 delta_proof round-trip 验证（压缩后立即解码回验，失败计数放弃 delta）；workspace 加 proof 页；**integrity hash 校验逻辑保留**（内部计数仍在，仅输出隐藏——数据完整性防线不删）
+    - **`941a8c58f2f8d` 默认算法 lz4kd→lz4kds**（对齐 v3.5 运行时激活 SDDC）
+    - **验证（真机，已刷入 2 次）**：最终版 `AnyKernel3-20260829-1020.zip` 刷入：boot 内核 md5 与本地 Image 一致（cedb1217）；boot_completed=1；su×10 全成功；comp_algorithm 激活 [lz4kds]、SDDC enabled=1、deltas≈96K、aliases≈49K、saved_bytes≈180MB、delta_proof_failures=0；sddc_stat 字段与 v3.5 完全一致；pressure 日志新格式（无 wb_ref_pins）；dmesg 25 条 WARNING 与 v3.5 基线一致（context_tracking/proc_register/spmi 等既有 vendor WARN）
+    - **红线全过**：KABI 槽位（sched.h 1535-1536）、ghost_task×12、ZRAM=n、NTSYNC/BBG/REKERNEL_X/FQ_GUARD、SUBLEVEL 118
+    - **审核**：DeepSeek-V4-Flash 通过（3 条低严重度建议已处理）；发现 pressure.c:169 有上游自带 EXPORT_SYMBOL_GPL（"crystal 目录零 EXPORT_SYMBOL"旧说法不成立，非本次引入）；备份分支 `backup-6.6.118-13T-pre-v35-rev`
 
 > 2026-08-28 第六轮合并后的 2 个提交（合并 + 维护记录）已推送 `github`（第五轮 3 个提交此前也已推送，2026-08-17 的"尚未推送"记录已过时）。此前 24 个提交的历史统计沿用 2026-08-16 口径。
 

@@ -20,6 +20,7 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 | `oplus13/` | **OnePlus 13 (SM8750) 定制内核工作区**：`android_kernel_common_oneplus_sm8750`（内核源码）、`clang-19/`（工具链）、`AnyKernel3-6.6.112-NOKSU-OnePlus8Elite/`（刷机包模板）、`op_mods/`、`docs/`、`bpf.sh`、`CLAUDE.md`（项目详细记忆）、`ACK维护任务书.md`（月度维护任务书） |
 | `pddump/` | **原创 payload.bin 解包工具**（v1.0.0，Go，对标 payload-dumper-go）：多核并行解压（12 核实测 5.3 倍提速）、顺序写盘、稀疏输出；交付物 `pddump/dist/pddump-windows-amd64.zip`（Windows exe + 说明）；项目记忆见 `pddump/CLAUDE.md`；构建需 `export PATH=/usr/local/go/bin:$PATH GOPROXY=https://goproxy.cn,direct`（本机网络受限，仅 goproxy.cn/dl.google.com/github git 可用） |
 | `deepseek-harness/` | DeepSeek Harness（DSH）源码 checkout |
+| `mihomo-ebpf-smart-export/` | **mihomo 透明代理移植项目**（ColorOS 15 设备，Magisk /data/adb/box 部署）：`repo/`（源码 git 仓库，分支 official-20260828 = 官方 metacubex/Alpha 061966e7 + 5 个本地定制 commit：ebpf 移植、smart LightGBM 移植、bypass 提前启动、Model.bin 加固、vernesong nodes filter 同步）、`deploy/`（部署资产）、`tools/`（bpf 工具 + git-gh-proxy.sh）、`MEMORY.md`（项目详细记忆，排障根因在此）、`README.md`；项目记忆在项目内，本文件只放指针 |
 | `内核构建.sh` | 内核构建脚本（clang-19 + ccache 伪装，增量编译） |
 | `dabao.sh` | AnyKernel3 刷机包打包脚本 |
 | `android-ndk-r25c/` | Android NDK |
@@ -67,6 +68,11 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 - **内核源码**：`/home/wcoom/oplus13/android_kernel_common_oneplus_sm8750`，分支 `6.6.118-13T`
   - 远程：`origin`（上游 whitewhale0612，只拉勿推）、`ack`（google googlesource 官方源）、`github`（个人仓库 Wcoom/oneplus_sm8750_kernel，SSH ed25519 推送）
 - **详细内核项目上下文**（五项定制、ABI 红线守点、ZRAM 配置注意事项等）见 `/home/wcoom/oplus13/CLAUDE.md`
+
+### mihomo 工程速查（2026-08-29 起）
+
+- **网络链路（重要）**：WSL/Windows 直连 GitHub 超时、gh-proxy.com 被 fake-ip（198.18.0.111）污染；可行链路 = WSL → 手机 mihomo HTTP 代理（192.168.1.177:7890，wlan0 同网段）→ gh-proxy.com → GitHub 全链路 200。git 用法：`git -c http.proxy=http://192.168.1.177:7890 ls-remote https://gh-proxy.com/https://github.com/<repo>.git`；包装器 `mihomo-ebpf-smart-export/tools/git-gh-proxy.sh`（手机 IP 为 DHCP 动态，变了要改 PHONE_PROXY）
+- **mihomo 构建/部署**：`GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -tags with_ebpf`（GOOS=android 才能读 Android 系统 CA 池；缺 with_ebpf 则 bpf fd=0 无劫持）；部署到 `/data/adb/box/bin/mihomo`，chown root:net_admin 后必须再 chmod 6755（chown 会清 setuid 位）；必须 setsid 启动；Windows adb 位于 `/mnt/c/WINDOWS/system32/adb.exe`（WSL 内无 adb）
 
 ## 6. 会话惯例
 

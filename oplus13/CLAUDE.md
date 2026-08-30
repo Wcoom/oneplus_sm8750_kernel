@@ -222,6 +222,13 @@
     - **持久化**：`/data/adb/fq_guard/fq_guard_ko.ko` + `/data/adb/service.d/99-fq-guard.sh`（bootanim stopped 后现解析地址 + insmod；**KASLR 每次开机地址变，必须现解析**）
     - **构建**：`bash oplus13/fq_guard_ko/build.sh`（需先跑过 内核构建.sh 有 out/）；加载：`sh install.sh`（push 到设备后）
 
+20. **fq_guard_ko 集成进 ReKernel-X 模块 zip（2026-08-30）**（根仓库 `510c85a`，工作目录 `oplus13/ReKernel-X-1.5/`）
+    - **背景**：用户要求把 fq_guard_ko 集成进 `/storage/emulated/0/Download/ReKernel-X-1.5.zip`（KernelSU/Magisk 模块载体）并删除独立自启脚本
+    - **zip 结构**：`META-INF/`（安装器）+ `customize.sh`（按 `android${AND_VER}-${CORE_VER}` 匹配 kmod/ 的 rkx ko 拷到模块根）+ `module.prop`（id=rekernel_x v1.5）+ `post-fs-data.sh`（开机 insmod）+ `kmod/`（8 个旧版 rkx ko，20260313）
+    - **改动**：`kmod/fq_guard_ko.ko` 放入；customize.sh 在 `rm -rf kmod` 前加一行拷出 fq_guard_ko.ko；post-fs-data.sh 在 rkx 循环前加 fq_guard 加载段（卸载残留 → kptr_restrict=0 → 现解析 fq_qdisc_ops 地址 → insmod 传 `fq_ops_addr`，失败退化无参）
+    - **新 zip 已推回手机覆盖原文件**（965KB）；**旧自启 `/data/adb/service.d/99-fq-guard.sh` 与 `/data/adb/fq_guard/` 已删除**，加载职责移交模块——**下次重启后生效**，重启前当前加载的 fq_guard_ko 继续运行
+    - **注意**：① kmod/ 内旧 rkx ko（20260313）vermagic 与上游 v3.5 不匹配会静默加载失败，不影响 fq_guard_ko（本机内核已 built-in rkx，无需该 ko）；② KASLR 地址每次开机变，post-fs-data 现解析；③ 重新打包命令与集成说明见 `ReKernel-X-1.5/README.md`；④ zip 打包时 .sh/update-binary 必须 0755 权限
+
 > 2026-08-28 第六轮合并后的 2 个提交（合并 + 维护记录）已推送 `github`（第五轮 3 个提交此前也已推送，2026-08-17 的"尚未推送"记录已过时）。此前 24 个提交的历史统计沿用 2026-08-16 口径。
 
 > 2026-08-06 已清洗全部远程提交正文中的 Claude Code `Co-Authored-By` trailer 并重写历史：3 个定制提交与 3 个合并提交 hash 变更（ReKernel-X `3eb91d7cace`、BBG `cc7887d802`、Droidspaces `605e6859e4`、ACK 两轮 `be9610f4683`/`4860642a0474`、whitewhale 同步 `656ece04bd3`），上游 ack/origin 历史 hash 不变；已强制推送到 `github`。

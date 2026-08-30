@@ -19,22 +19,22 @@
 - **git 远程**: `origin` = 上游 whitewhale0612（只拉取，勿推送）；`ack` = `https://android.googlesource.com/kernel/common`（官方源）；`github` = 个人仓库 `Wcoom/oneplus_sm8750_kernel`（推送目标，SSH 认证）
 - **当前分支**: `6.6.118-13T`
 
-## 当前稳定基线（2026-08-29 核实）
+## 当前稳定基线（2026-08-30 更新）
 
-- **HEAD**: `941a8c58f2f8d`（v3.5 prebuilt 反推同步 3 提交，已推送 `github`），内核工作区干净
+- **HEAD**: `c60d286c556c1`（**BBG 已整体移除**：先 revert `1268a1a` 放行提交 `2b6eea3`，再删除符号链接/挂载/配置 `c60d286`；子仓库 bundle 备份 `oplus13/Baseband-guard-backup-20260902.bundle`；**已推送 github**，2026-09-02）
 - **版本**: 固定名 `6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k`（SUBLEVEL 118；`CONFIG_LOCALVERSION` 写死 + `LOCALVERSION_AUTO` 关闭，不再随提交哈希变化）
-- **产物**: `out/arch/arm64/boot/Image` 39,258,624 字节，SHA-256 `1ac3cbeb4527c2e986a1f64720dc75fc97028cfb23f4e99e8a55fc87a1652261`（md5 `cedb1217ef0fe3c6df2d1745e0c491ec`）；刷机包 `AnyKernel3-20260829-1020.zip` 31M
-- **ccache**: 4.48G / 5G（本轮构建命中率 65.63%）
+- **产物**: `out/arch/arm64/boot/Image` 39,258,624 字节，md5 `0e54d8b815497fed0df09c1ef1a717f5`（2026-08-30 构建，含 BBG 修改）；已刷入真机验证
+- **构建脚本**（2026-08-30 修复）：`内核构建.sh` 自包含 `cd`（不依赖 cwd）+ `PAHOLE=/usr/bin/pahole`（原 6.6/prebuilts 路径随 6.6/ 删除失效；clang-19/bin/pahole 悬空链接已改指 /usr/bin/pahole v1.25）
+- **ccache**: 4.38G / 5G
 - `ahead origin 10728` 属正常现象（ACK 合并带入大量上游历史）
 - 推送认证：GitHub PAT 权限不足（403），已改用 ed25519 SSH key（`wcoom@wsl2`）
 
-**五项定制均已挂载并在 `out/.config` 中生效**（非仅 defconfig 声明）：
+**四项定制均已挂载并在 `out/.config` 中生效**（非仅 defconfig 声明；BBG 已于 2026-09-02 整体移除）：
 
 | 定制 | 代码位置 | 配置项 |
 |---|---|---|
 | fq_guard | `net/sched/fq_guard.c` | `CONFIG_NET_SCH_FQ_GUARD=y` + `CONFIG_DEFAULT_FQ=y` |
 | ReKernel-X | `drivers/rekernel_x/rkx*.c` | `CONFIG_REKERNEL_X=y` |
-| Baseband-guard | `security/baseband-guard`（符号链接 → `Baseband-guard/`） | `CONFIG_BBG=y`，`CONFIG_LSM` 末尾 `baseband_guard` |
 | Droidspaces | `drivers/misc/ntsync.c` + `include/uapi/linux/ntsync.h` | `CONFIG_NTSYNC/SYSVIPC/PID_NS/IPC_NS/USER_NS/NAMESPACES/POSIX_MQUEUE=y` |
 | 温度偏移 | `kernel/temp_offset_sysctl.c` + `include/linux/temp_offset_sysctl.h` | `/proc/sys/kernel/temperature_offset_celsius`（sysctl，obj-y 无条件编译） |
 
@@ -78,7 +78,7 @@
    - 含 netfilter 网络事件、free-async 异步清理、frozen 检测；零轮询/零常驻线程/零 wakelock
    - 另移除 `kernel/module/module_overlay/modules/qcom-scm.ko`
 
-3. **Baseband-guard (BBG)** (`security/baseband-guard`, commit `cc7887d802`)
+3. **Baseband-guard (BBG)** (`security/baseband-guard`, commit `cc7887d802`)——**已于 2026-09-02 整体移除，见第 17 条**
    - 经 vc-teahouse/Baseband-guard `setup.sh` 接入：符号链接 + `security/Makefile/Kconfig` 挂载
    - `CONFIG_BBG=y`；`CONFIG_LSM` 末尾追加 `baseband_guard`（selinux 之后）；`BBG_BLOCK_BOOT/RECOVERY` 保持 n
 
@@ -183,6 +183,22 @@
     - **验证（真机，已刷入 2 次）**：最终版 `AnyKernel3-20260829-1020.zip` 刷入：boot 内核 md5 与本地 Image 一致（cedb1217）；boot_completed=1；su×10 全成功；comp_algorithm 激活 [lz4kds]、SDDC enabled=1、deltas≈96K、aliases≈49K、saved_bytes≈180MB、delta_proof_failures=0；sddc_stat 字段与 v3.5 完全一致；pressure 日志新格式（无 wb_ref_pins）；dmesg 25 条 WARNING 与 v3.5 基线一致（context_tracking/proc_register/spmi 等既有 vendor WARN）
     - **红线全过**：KABI 槽位（sched.h 1535-1536）、ghost_task×12、ZRAM=n、NTSYNC/BBG/REKERNEL_X/FQ_GUARD、SUBLEVEL 118
     - **审核**：DeepSeek-V4-Flash 通过（3 条低严重度建议已处理）；发现 pressure.c:169 有上游自带 EXPORT_SYMBOL_GPL（"crystal 目录零 EXPORT_SYMBOL"旧说法不成立，非本次引入）；备份分支 `backup-6.6.118-13T-pre-v35-rev`
+
+16. **BBG 放行 vendor_dlkm 刷写（2026-08-30，重做+定案）**——**内核侧 BBG 已于 2026-09-02 整体移除（见第 17 条），本条的放行修改与模块侧 dm 镜像直写方案随之作废；fopbatt 模块后续刷写不再受内核 BBG 拦截**
+    - **背景**：上午 Codex 会话改 BBG 放行 vendor_dlkm（`fd3fd39`+`c1048de`）被回退；用户要求重做且"有根据不要猜测、不放行整个 super"
+    - **真机取证链**：① vendor_dlkm_b=dm-18（super 动态分区，无 bd_meta_info，仅加 allowlist 无效）② BBG deny 日志实锤：`deny write dev=8:14 path=/dev/block/sda14 comm=lpadd_auto`（fopbatt 模块 `lpadd_auto --replace super vendor_dlkm_b` 刷写被拦，写 super 不在 allowlist）③ dm-linear 的 BLKROSET ioctl 转发到底层设备，dm 自身 ro=1 清不掉（`blockdev --setrw` 无效）④ 直写 dm-18 被 ro 拒
+    - **内核修改**（子仓库 `eba53b9` + 主仓库 `1268a1a`，gitlink 一致）：allowlist 追加 `vendor_dlkm`；`blkdev_helper.c` 新增 `is_allowed_dm_partition_dev()`（dm_get_md/dm_copy_name_and_uuid 解析 dm 名→同一 allowlist，IS_BUILTIN(CONFIG_BLK_DEV_DM) 保护）；判定接入 `reverse_allow_match_and_cache` 单一入口。**不放行 super**
+    - **模块侧改造**（fopbatt 电池工具包 8.2.14-beta，`/home/wcoom/fopbatt-bbg-fix/`，根仓库 b92af23）：`kot_run_lpadd_once` 改为 dm 镜像直写——`dmctl table` 读映射 → `dmctl create vendor_dlkm_<非当前slot>`（同名映射、ro=0、BBG allowlist 放行）→ `dd bs=4M conv=fsync` 直写 → `dmctl delete`；重启后 init 重建分区生效。**不写 super 分区表**
+    - **验证（真机全通）**：镜像设备写往返与 dm-18 逐字节一致（erofs superblock 恢复）；完整模块安装流程（ksud install）"vendor_dlkm 写入成功"、BBG deny=0；重启后 boot_completed=1、oplus_chg_v2.ko 从新分区加载运行、/data/opbatt 完整
+    - **教训**：BBG 判定是 dev_t 级，动态分区刷写必须经 dm 名称解析；lpadd_auto 类工具写 super 与 BBG 保护意图冲突，模块侧绕行是正解
+
+17. **BBG 整体移除（2026-09-02）**（`2b6eea3d43fc7` + `c60d286c556c1`，已推送 github）
+    - **背景**：真机观察 BBG 的 LSM 块设备写拦截导致部分模块安装失败，且每次块写都走 BBG 判定链严重影响 IO——用户决定源码中彻底移除该定制
+    - **第一步**（`2b6eea3d43fc7`）：`git revert 1268a1a`（回退 8-30 的 vendor_dlkm 放行修改，gitlink 指回子仓库 `6e32d81`）
+    - **第二步**（`c60d286c556c1`）：整体移除——删除顶层 gitlink `Baseband-guard`（160000）与符号链接 `security/baseband-guard`（120000）；`security/Makefile` 删除 `obj-$(CONFIG_BBG)` 行、`security/Kconfig` 删除 source 行；`gki_defconfig` 删除注释 + `CONFIG_BBG=y` + `CONFIG_LSM=...baseband_guard` 三行，**CONFIG_LSM 恢复内核默认列表**（BBG 引入前 defconfig 无显式 CONFIG_LSM）；恢复后三个文件与引入提交 `cc7887d802^` 逐字一致
+    - **子仓库**：磁盘 `Baseband-guard/` 目录整体删除；完整历史（含本地提交 `6e32d81` 锁安全、`eba53b9` vendor_dlkm 放行）已打包 `oplus13/Baseband-guard-backup-20260902.bundle`
+    - **备份分支**：`backup-6.6.118-13T-pre-bbg-removal`（位于 1268a1a，含 BBG 全部状态）
+    - **验证**：主仓库 grep `CONFIG_BBG/baseband_guard/baseband-guard` 零残留；增量构建 exit 0（新 Image md5 见"当前稳定基线"）；**五项定制 → 四项定制**，后续红线校验清单不再含 BBG
 
 > 2026-08-28 第六轮合并后的 2 个提交（合并 + 维护记录）已推送 `github`（第五轮 3 个提交此前也已推送，2026-08-17 的"尚未推送"记录已过时）。此前 24 个提交的历史统计沿用 2026-08-16 口径。
 

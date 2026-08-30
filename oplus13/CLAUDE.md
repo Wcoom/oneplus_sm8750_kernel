@@ -9,7 +9,7 @@
 - **gki内核源码目录**: `/home/wcoom/oplus13/android_kernel_common_oneplus_sm8750`
 - **打包**: `/home/wcoom/dabao.sh` 将 `out/arch/arm64/boot/Image` 复制进 `AnyKernel3-6.6.112-NOKSU-OnePlus8Elite/` 并打 zip
   - 命名规则：`AnyKernel3-<Image镜像时间>.zip`（`date -r $IMAGE +%Y%m%d-%H%M`，如 `AnyKernel3-20260811-1231.zip`；2026-08-11 起弃用提交哈希）
-- **刷机到实体机（WSL 调用 Windows 侧 ADB）**：使用 `adb.exe -s 5d6d4090 ...`；Windows 端设备直连，WSL 无 USB 直通。
+- **刷机到实体机（WSL 调用 Windows 侧 ADB）**：使用 `/mnt/d/刷机/platform-tools/adb.exe -s 5d6d4090 ...`（2026-08-30 核实实际路径，旧记录 `/mnt/c/WINDOWS/system32` 已失效）；Windows 端设备直连，WSL 无 USB 直通。
   - 设备：OnePlus 13 PJZ110，序列号 `5d6d4090`，Android 16，KernelSU root（`ksud 3.2.5-63-ga33dbca3`，LKM 不受 boot kernel 替换影响）
   - 刷入法（无 TWRP/管理器 App 时）：zip 推送到 `/data/local/tmp/` 后解包；`su -c` 的 `cd; export PATH=$PWD/tools:$PATH; sh anykernel.sh` 必须作为整体交给 root shell，避免 Windows adb 重组参数后只让 `cd` 进入 root shell、继而报 `magiskboot: inaccessible or not found`；设置 `OUTFD=1` 后由 AnyKernel3 仅替换当前 slot boot 中的内核。
   - anykernel.sh 逻辑：有 init_boot → `split_boot`（仅换内核）+ `flash_boot`（dd 写回当前 slot boot 分区）；刷完 `adb reboot` 生效
@@ -21,15 +21,15 @@
 
 ## 当前稳定基线（2026-08-30 更新）
 
-- **HEAD**: `c60d286c556c1`（**BBG 已整体移除**：先 revert `1268a1a` 放行提交 `2b6eea3`，再删除符号链接/挂载/配置 `c60d286`；子仓库 bundle 备份 `oplus13/Baseband-guard-backup-20260902.bundle`；**已推送 github**，2026-09-02）
+- **HEAD**: `c60d286c556c1`（**BBG 已整体移除**：先 revert `1268a1a` 放行提交 `2b6eea3`，再删除符号链接/挂载/配置 `c60d286`；子仓库 bundle 备份 `oplus13/Baseband-guard-backup-20260902.bundle`；**已推送 github**，2026-08-30）
 - **版本**: 固定名 `6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k`（SUBLEVEL 118；`CONFIG_LOCALVERSION` 写死 + `LOCALVERSION_AUTO` 关闭，不再随提交哈希变化）
-- **产物**: `out/arch/arm64/boot/Image` 39,258,624 字节，md5 `965e04aff87aa07125291a5040801bff`（2026-09-02 构建，无 BBG）；上一版 md5 `0e54d8b8...`（2026-08-30 含 BBG）
+- **产物**: `out/arch/arm64/boot/Image` 39,258,624 字节，md5 `965e04aff87aa07125291a5040801bff`（2026-08-30 构建，无 BBG）；上一版 md5 `0e54d8b8...`（2026-08-30 含 BBG）
 - **构建脚本**（2026-08-30 修复）：`内核构建.sh` 自包含 `cd`（不依赖 cwd）+ `PAHOLE=/usr/bin/pahole`（原 6.6/prebuilts 路径随 6.6/ 删除失效；clang-19/bin/pahole 悬空链接已改指 /usr/bin/pahole v1.25）
 - **ccache**: 4.38G / 5G
 - `ahead origin 10728` 属正常现象（ACK 合并带入大量上游历史）
 - 推送认证：GitHub PAT 权限不足（403），已改用 ed25519 SSH key（`wcoom@wsl2`）
 
-**四项定制均已挂载并在 `out/.config` 中生效**（非仅 defconfig 声明；BBG 已于 2026-09-02 整体移除）：
+**四项定制均已挂载并在 `out/.config` 中生效**（非仅 defconfig 声明；BBG 已于 2026-08-30 整体移除）：
 
 | 定制 | 代码位置 | 配置项 |
 |---|---|---|
@@ -78,7 +78,7 @@
    - 含 netfilter 网络事件、free-async 异步清理、frozen 检测；零轮询/零常驻线程/零 wakelock
    - 另移除 `kernel/module/module_overlay/modules/qcom-scm.ko`
 
-3. **Baseband-guard (BBG)** (`security/baseband-guard`, commit `cc7887d802`)——**已于 2026-09-02 整体移除，见第 17 条**
+3. **Baseband-guard (BBG)** (`security/baseband-guard`, commit `cc7887d802`)——**已于 2026-08-30 整体移除，见第 17 条**
    - 经 vc-teahouse/Baseband-guard `setup.sh` 接入：符号链接 + `security/Makefile/Kconfig` 挂载
    - `CONFIG_BBG=y`；`CONFIG_LSM` 末尾追加 `baseband_guard`（selinux 之后）；`BBG_BLOCK_BOOT/RECOVERY` 保持 n
 
@@ -184,7 +184,7 @@
     - **红线全过**：KABI 槽位（sched.h 1535-1536）、ghost_task×12、ZRAM=n、NTSYNC/BBG/REKERNEL_X/FQ_GUARD、SUBLEVEL 118
     - **审核**：DeepSeek-V4-Flash 通过（3 条低严重度建议已处理）；发现 pressure.c:169 有上游自带 EXPORT_SYMBOL_GPL（"crystal 目录零 EXPORT_SYMBOL"旧说法不成立，非本次引入）；备份分支 `backup-6.6.118-13T-pre-v35-rev`
 
-16. **BBG 放行 vendor_dlkm 刷写（2026-08-30，重做+定案）**——**内核侧 BBG 已于 2026-09-02 整体移除（见第 17 条），本条的放行修改与模块侧 dm 镜像直写方案随之作废；fopbatt 模块后续刷写不再受内核 BBG 拦截**
+16. **BBG 放行 vendor_dlkm 刷写（2026-08-30，重做+定案）**——**内核侧 BBG 已于 2026-08-30 整体移除（见第 17 条），本条的放行修改与模块侧 dm 镜像直写方案随之作废；fopbatt 模块后续刷写不再受内核 BBG 拦截**
     - **背景**：上午 Codex 会话改 BBG 放行 vendor_dlkm（`fd3fd39`+`c1048de`）被回退；用户要求重做且"有根据不要猜测、不放行整个 super"
     - **真机取证链**：① vendor_dlkm_b=dm-18（super 动态分区，无 bd_meta_info，仅加 allowlist 无效）② BBG deny 日志实锤：`deny write dev=8:14 path=/dev/block/sda14 comm=lpadd_auto`（fopbatt 模块 `lpadd_auto --replace super vendor_dlkm_b` 刷写被拦，写 super 不在 allowlist）③ dm-linear 的 BLKROSET ioctl 转发到底层设备，dm 自身 ro=1 清不掉（`blockdev --setrw` 无效）④ 直写 dm-18 被 ro 拒
     - **内核修改**（子仓库 `eba53b9` + 主仓库 `1268a1a`，gitlink 一致）：allowlist 追加 `vendor_dlkm`；`blkdev_helper.c` 新增 `is_allowed_dm_partition_dev()`（dm_get_md/dm_copy_name_and_uuid 解析 dm 名→同一 allowlist，IS_BUILTIN(CONFIG_BLK_DEV_DM) 保护）；判定接入 `reverse_allow_match_and_cache` 单一入口。**不放行 super**
@@ -192,13 +192,20 @@
     - **验证（真机全通）**：镜像设备写往返与 dm-18 逐字节一致（erofs superblock 恢复）；完整模块安装流程（ksud install）"vendor_dlkm 写入成功"、BBG deny=0；重启后 boot_completed=1、oplus_chg_v2.ko 从新分区加载运行、/data/opbatt 完整
     - **教训**：BBG 判定是 dev_t 级，动态分区刷写必须经 dm 名称解析；lpadd_auto 类工具写 super 与 BBG 保护意图冲突，模块侧绕行是正解
 
-17. **BBG 整体移除（2026-09-02）**（`2b6eea3d43fc7` + `c60d286c556c1`，已推送 github）
+17. **BBG 整体移除（2026-08-30）**（`2b6eea3d43fc7` + `c60d286c556c1`，已推送 github）
     - **背景**：真机观察 BBG 的 LSM 块设备写拦截导致部分模块安装失败，且每次块写都走 BBG 判定链严重影响 IO——用户决定源码中彻底移除该定制
     - **第一步**（`2b6eea3d43fc7`）：`git revert 1268a1a`（回退 8-30 的 vendor_dlkm 放行修改，gitlink 指回子仓库 `6e32d81`）
     - **第二步**（`c60d286c556c1`）：整体移除——删除顶层 gitlink `Baseband-guard`（160000）与符号链接 `security/baseband-guard`（120000）；`security/Makefile` 删除 `obj-$(CONFIG_BBG)` 行、`security/Kconfig` 删除 source 行；`gki_defconfig` 删除注释 + `CONFIG_BBG=y` + `CONFIG_LSM=...baseband_guard` 三行，**CONFIG_LSM 恢复内核默认列表**（BBG 引入前 defconfig 无显式 CONFIG_LSM）；恢复后三个文件与引入提交 `cc7887d802^` 逐字一致
     - **子仓库**：磁盘 `Baseband-guard/` 目录整体删除；完整历史（含本地提交 `6e32d81` 锁安全、`eba53b9` vendor_dlkm 放行）已打包 `oplus13/Baseband-guard-backup-20260902.bundle`
     - **备份分支**：`backup-6.6.118-13T-pre-bbg-removal`（位于 1268a1a，含 BBG 全部状态）
     - **验证**：主仓库 grep `CONFIG_BBG/baseband_guard/baseband-guard` 零残留；增量构建 exit 0（新 Image md5 见"当前稳定基线"）；**五项定制 → 四项定制**，后续红线校验清单不再含 BBG
+
+18. **真机网络栈核验（2026-08-30）——当前 boot 仍是上游 v3.5 prebuilt，本地内核未刷入**
+    - 背景：用户要求验证手机端 BBRv3 与 fq 队列搭配是否成功（精确到每链接/每网卡）；adb 实测（`D:\刷机\platform-tools\adb.exe`，设备 `5d6d4090`）
+    - **当前内核身份**：uname 版本串 `6.6.118-android15-8-gf4dc45704e54-abogki20260808-4k #5`（2026-08-24 构建）≠ 本地基线串 `abogki20260727`；boot 分区内核段 md5 `56242631579b38e9761b774dc098f23d` ≠ 本地 Image `965e04af...`——**本地 2026-08-30 无 BBG 内核（md5 965e04af）尚未刷入真机**
+    - **BBRv3 验证：成功**。`/proc/bbr_version`=3；dmesg `[0.430659] /proc/bbr_version created, version: 3`；`tcp_available_congestion_control`=reno bbr cubic、全局默认 bbr；**102/102 个 TCP 链接全部 bbr**（ESTAB+CLOSE-WAIT，详情行 `bbr:(bw:...,mrtt:...,pacing_gain:2.77344,cwnd_gain:2)`——pacing_gain 2.77344 为 v3 特征增益）；启用机制为 whitewhale KERN_TUNING（`request_set_tcp_bbr_enable: enable = 1`、`update bbr_uid` uid 10129/10163 is_p2p=1）
+    - **fq 验证：未生效**。全网卡 root qdisc 无一是 fq：wlan0=htb（→ppq→htb→tsd/sfq）、rmnet_data0-3=mq（31 子队列 fq_codel）、rmnet_data4=htb、rmnet_ipa0/ifb2=fq_codel、vgate0=mq+fq_codel、lo=noqueue；`/sys/module/fq_guard/` 不存在、dmesg 无 fq_guard 日志
+    - **结论与决策**：bbr 半边成功、fq 半边落空，根因 = 当前内核是上游 v3.5 prebuilt（自带 BBR v3 但**不含本地 fq_guard**，默认 qdisc fq_codel），非配置问题；本地内核刷入后预期 fq_guard 生效（白名单前缀 `rmnet_data`/`r_rmnet_data`/`wlan`/`p2p`/`wifi-aware`/`vgate`/`usb`/`rndis`/`eth`/`bt-pan`，黑名单 `rmnet_ims`）；**用户决定暂不刷机**，保留上游 v3.5 prebuilt 继续使用
 
 > 2026-08-28 第六轮合并后的 2 个提交（合并 + 维护记录）已推送 `github`（第五轮 3 个提交此前也已推送，2026-08-17 的"尚未推送"记录已过时）。此前 24 个提交的历史统计沿用 2026-08-16 口径。
 

@@ -1,0 +1,13 @@
+.Module.symvers.cmd
+.fq_guard_ko.ko.cmd
+.fq_guard_ko.mod.cmd
+.fq_guard_ko.mod.o.cmd
+.fq_guard_ko.o.cmd
+.modules.order.cmd
+Module.symvers
+fq_guard_ko.ko
+fq_guard_ko.mod
+fq_guard_ko.mod.c
+fq_guard_ko.mod.o
+fq_guard_ko.o
+modules.order

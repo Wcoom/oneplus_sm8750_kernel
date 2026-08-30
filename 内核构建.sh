@@ -58,13 +58,16 @@ export JOBS=8
 #   脚本仅对"未设置 LOCALVERSION 环境变量"的情况追加 +；置空可精确还原版本串）
 export LOCALVERSION=""
 
+# 进入内核源码目录（脚本自包含，不依赖调用方 cwd）
+cd /home/wcoom/oplus13/android_kernel_common_oneplus_sm8750 || exit 1
+
 # 执行 Make
 # 注意：这里去掉了 CC="ccache clang"，因为 PATH 已经搞定了
 make -j$JOBS \
     LLVM=1 \
     ARCH=arm64 \
     CROSS_COMPILE=aarch64-linux-gnu- \
-    PAHOLE=/home/wcoom/6.6/prebuilts/kernel-build-tools/linux-x86/bin/pahole \
+    PAHOLE=/usr/bin/pahole \
     LD=ld.lld \
     HOSTLD=ld.lld \
     O=out \

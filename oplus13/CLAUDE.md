@@ -207,6 +207,21 @@
     - **fq 验证：未生效**。全网卡 root qdisc 无一是 fq：wlan0=htb（→ppq→htb→tsd/sfq）、rmnet_data0-3=mq（31 子队列 fq_codel）、rmnet_data4=htb、rmnet_ipa0/ifb2=fq_codel、vgate0=mq+fq_codel、lo=noqueue；`/sys/module/fq_guard/` 不存在、dmesg 无 fq_guard 日志
     - **结论与决策**：bbr 半边成功、fq 半边落空，根因 = 当前内核是上游 v3.5 prebuilt（自带 BBR v3 但**不含本地 fq_guard**，默认 qdisc fq_codel），非配置问题；本地内核刷入后预期 fq_guard 生效（白名单前缀 `rmnet_data`/`r_rmnet_data`/`wlan`/`p2p`/`wifi-aware`/`vgate`/`usb`/`rndis`/`eth`/`bt-pan`，黑名单 `rmnet_ims`）；**用户决定暂不刷机**，保留上游 v3.5 prebuilt 继续使用
 
+19. **fq_guard_ko：给上游 v3.5 prebuilt 内核用的 fq 守护可加载模块（2026-08-30）**（根仓库 `c097e1f`，源码 `oplus13/fq_guard_ko/`）
+    - **背景**：第 18 条核验后用户要求把本地 fq_guard 做成 .ko 给上游 v3.5 用（不重刷内核）；真机实测全过
+    - **上游内核 API 约束与对策**：
+      - `qdisc_create_by_kind()` 是本地 C3 新增导出，上游没有 → 改用上游同样导出的 `qdisc_create_dflt()`（sch_generic.c，返回 NULL 非 ERR_PTR）+ 手动 `qdisc_hash_add()`
+      - `fq_qdisc_ops` 是 sch_fq.c static（上游本地都无法 extern）→ 用户态解析 `/proc/kallsyms` 经 `fq_ops_addr=` 模块参数传入；**oplus 安全补丁禁止内核态读 kallsyms**（dmesg "kernel read not supported for file /kallsyms"），内核态解析仅作 fallback；`kptr_restrict` 需先写 0（su 可写）
+      - vermagic：构建时临时覆盖 `out/include/generated/utsrelease.h` 为 `abogki20260808-4k`（build.sh 自动备份恢复）；SMP/preempt/mod_unload/modversions/HZ250 两边一致
+      - 签名：`MODULE_SIG_PROTECT=y` 下**未签名模块可加载**（signing.c 的 PROTECT 分支 return 0），本地密钥签名反而 fatal 验签失败 → 构建用 `CONFIG_MODULE_SIG_ALL=` 覆盖为不签名
+      - CRC（MODVERSIONS）：本地 Module.symvers 与上游同源，全部符号 CRC 一致，一次通过
+    - **两个新功能（相对本地 built-in）**：
+      - `fqg_scan_existing()`：模块事后加载时主动遍历 init_net 现有接口排队 work，**加载即生效**（本地 built-in 开机早期注册不依赖此）
+      - `event_recheck` 兜底复查（默认 true）：work 快速路径跳过时额外排一次复查——**真机抓到本地 built-in 同样存在的时序漏洞**：wifi 重连时 netd 在 fq_guard 检查之后才配 htb 且 tc 配置无 NETDEV 事件，导致守护失效；兜底复查 5s 后抓住覆盖换回（dmesg 1338.349 实锤）。**本地内置版待回移植此修复**
+    - **真机验证**：insmod exit=0；scan 后 wlan0(17队列)/rmnet_data0-2(31)/vgate0(256)/rmnet_data4 全部 `qdisc fq`；rmnet_data3/4 DOWN 时正确跳过（netif_running 检查）；wifi toggle 事件驱动 + 兜底复查均生效；BBR 48 链接全 bbr 无副作用；模块参数 enable/event_recheck/delay_ms 等 sysfs 可调
+    - **持久化**：`/data/adb/fq_guard/fq_guard_ko.ko` + `/data/adb/service.d/99-fq-guard.sh`（bootanim stopped 后现解析地址 + insmod；**KASLR 每次开机地址变，必须现解析**）
+    - **构建**：`bash oplus13/fq_guard_ko/build.sh`（需先跑过 内核构建.sh 有 out/）；加载：`sh install.sh`（push 到设备后）
+
 > 2026-08-28 第六轮合并后的 2 个提交（合并 + 维护记录）已推送 `github`（第五轮 3 个提交此前也已推送，2026-08-17 的"尚未推送"记录已过时）。此前 24 个提交的历史统计沿用 2026-08-16 口径。
 
 > 2026-08-06 已清洗全部远程提交正文中的 Claude Code `Co-Authored-By` trailer 并重写历史：3 个定制提交与 3 个合并提交 hash 变更（ReKernel-X `3eb91d7cace`、BBG `cc7887d802`、Droidspaces `605e6859e4`、ACK 两轮 `be9610f4683`/`4860642a0474`、whitewhale 同步 `656ece04bd3`），上游 ack/origin 历史 hash 不变；已强制推送到 `github`。

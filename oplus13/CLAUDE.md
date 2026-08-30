@@ -23,7 +23,7 @@
 
 - **HEAD**: `c60d286c556c1`（**BBG 已整体移除**：先 revert `1268a1a` 放行提交 `2b6eea3`，再删除符号链接/挂载/配置 `c60d286`；子仓库 bundle 备份 `oplus13/Baseband-guard-backup-20260902.bundle`；**已推送 github**，2026-09-02）
 - **版本**: 固定名 `6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k`（SUBLEVEL 118；`CONFIG_LOCALVERSION` 写死 + `LOCALVERSION_AUTO` 关闭，不再随提交哈希变化）
-- **产物**: `out/arch/arm64/boot/Image` 39,258,624 字节，md5 `0e54d8b815497fed0df09c1ef1a717f5`（2026-08-30 构建，含 BBG 修改）；已刷入真机验证
+- **产物**: `out/arch/arm64/boot/Image` 39,258,624 字节，md5 `965e04aff87aa07125291a5040801bff`（2026-09-02 构建，无 BBG）；上一版 md5 `0e54d8b8...`（2026-08-30 含 BBG）
 - **构建脚本**（2026-08-30 修复）：`内核构建.sh` 自包含 `cd`（不依赖 cwd）+ `PAHOLE=/usr/bin/pahole`（原 6.6/prebuilts 路径随 6.6/ 删除失效；clang-19/bin/pahole 悬空链接已改指 /usr/bin/pahole v1.25）
 - **ccache**: 4.38G / 5G
 - `ahead origin 10728` 属正常现象（ACK 合并带入大量上游历史）

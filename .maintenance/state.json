@@ -4,12 +4,12 @@
     "ack": {
       "remote": "https://android.googlesource.com/kernel/common",
       "branch": "android15-6.6",
-      "last_merged": "5ef17cb58b6e6",
-      "last_merged_date": "2026-08-28",
-      "note": "第六轮官方源增量合并，274 提交（LTS 回移大轮 + ANDROID fuse-bpf/fscrypt/vendor hooks）；L1 allowed_breaks 取 ACK 侧 + L2 erofs zdata.c 融合；真机刷入验证 PASS=5"
+      "last_merged": "d645d30475a90d74210e3afe85e9a6ba748019b3",
+      "last_merged_date": "2026-09-09",
+      "note": "第七轮官方源增量合并，21 提交；按要求回退至 941a8c58f2f8d1093e1ec722057e55cbe960aa11 后以双父合并提交 574270a7d4613899504118109097bf9531c6bb98 合入，L0 零冲突；BBG gitlink 6e32d811ef5072c5454577915c118db5ba2b5c15 由本地 bundle 精确恢复"
     }
   },
-  "last_maintenance": "2026-08-28",
+  "last_maintenance": "2026-09-09",
   "local_commits": [
     "a0f59328855f9",
     "450f8996cf343",

@@ -19,17 +19,17 @@
 - **git 远程**: `origin` = 上游 whitewhale0612（只拉取，勿推送）；`ack` = `https://android.googlesource.com/kernel/common`（官方源）；`github` = 个人仓库 `Wcoom/oneplus_sm8750_kernel`（推送目标，SSH 认证）
 - **当前分支**: `6.6.118-13T`
 
-## 当前稳定基线（2026-08-30 更新）
+## 当前稳定基线（2026-09-09 更新）
 
-- **HEAD**: `c60d286c556c1`（**BBG 已整体移除**：先 revert `1268a1a` 放行提交 `2b6eea3`，再删除符号链接/挂载/配置 `c60d286`；子仓库 bundle 备份 `oplus13/Baseband-guard-backup-20260902.bundle`；**已推送 github**，2026-08-30）
+- **HEAD**: `e79471cd46638aa8749a0bb03d88dd308390f404`（维护记录提交；内核合并提交 `574270a7d4613899504118109097bf9531c6bb98` 的第一父提交为用户指定回退基线 `941a8c58f2f8d1093e1ec722057e55cbe960aa11`，第二父提交为官方 ACK `d645d30475a90d74210e3afe85e9a6ba748019b3`；按本轮回退结果恢复 BBG）
 - **版本**: 固定名 `6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k`（SUBLEVEL 118；`CONFIG_LOCALVERSION` 写死 + `LOCALVERSION_AUTO` 关闭，不再随提交哈希变化）
-- **产物**: `out/arch/arm64/boot/Image` 39,258,624 字节，md5 `965e04aff87aa07125291a5040801bff`（2026-08-30 构建，无 BBG）；上一版 md5 `0e54d8b8...`（2026-08-30 含 BBG）
+- **产物**: `out/arch/arm64/boot/Image` 39,262,720 字节，md5 `1941bbaa88628ffd9c8f04c3667e00c2`，SHA-256 `26777f41d73a0fd9fc3e6e15c40c34d71575478ca1acba70355f833667ea5549`（2026-09-09 构建，含 BBG 与最新 ACK）
 - **构建脚本**（2026-08-30 修复）：`内核构建.sh` 自包含 `cd`（不依赖 cwd）+ `PAHOLE=/usr/bin/pahole`（原 6.6/prebuilts 路径随 6.6/ 删除失效；clang-19/bin/pahole 悬空链接已改指 /usr/bin/pahole v1.25）
-- **ccache**: 4.38G / 5G
-- `ahead origin 10728` 属正常现象（ACK 合并带入大量上游历史）
+- **ccache**: 4.32G / 5G
+- `ahead origin 10755` 属正常现象（ACK 合并带入大量上游历史）
 - 推送认证：GitHub PAT 权限不足（403），已改用 ed25519 SSH key（`wcoom@wsl2`）
 
-**四项定制均已挂载并在 `out/.config` 中生效**（非仅 defconfig 声明；BBG 已于 2026-08-30 整体移除）：
+**五项定制均已挂载并在 `out/.config` 中生效**（非仅 defconfig 声明；BBG 随本轮回退恢复）：
 
 | 定制 | 代码位置 | 配置项 |
 |---|---|---|
@@ -37,6 +37,7 @@
 | ReKernel-X | `drivers/rekernel_x/rkx*.c` | `CONFIG_REKERNEL_X=y` |
 | Droidspaces | `drivers/misc/ntsync.c` + `include/uapi/linux/ntsync.h` | `CONFIG_NTSYNC/SYSVIPC/PID_NS/IPC_NS/USER_NS/NAMESPACES/POSIX_MQUEUE=y` |
 | 温度偏移 | `kernel/temp_offset_sysctl.c` + `include/linux/temp_offset_sysctl.h` | `/proc/sys/kernel/temperature_offset_celsius`（sysctl，obj-y 无条件编译） |
+| Baseband-guard | `Baseband-guard@6e32d811` + `security/baseband-guard` | `CONFIG_BBG=y` + `CONFIG_LSM` 末尾 `baseband_guard` |
 
 **ABI 红线守点**：`include/linux/sched.h:1535-1536` 用 `ANDROID_KABI_USE(6, sysv_sem)` + `_ANDROID_KABI_REPLACE(7,8, sysv_shm)` 占预留槽位；`kernel/pid.c` ghost_task 12 处引用完好。
 
@@ -55,7 +56,7 @@
 > 2026-08-06 提交 `522eb9730e2bc` 移除 zram 1:2 与 watermark 100 两项本地调优，保留 swappiness=200（ACK 基线自带，勿当本地改动回退）。
 
 
-## 本地修改（截至 2026-08-16 的 24 个提交；后续维护见第 13 项）
+## 本地修改与维护记录（截至 2026-09-09；后续维护见第 21 项）
 
 1. **fq_guard** (`net/sched/fq_guard.c`, commit `d4050a049` + 稳定性/低功耗优化, `CONFIG_NET_SCH_FQ_GUARD=y`)
    - 内核源码级守护：监听 NETDEV_UP/CHANGE/REGISTER，延迟后强制替换数据接口 root qdisc 为 fq
@@ -78,9 +79,10 @@
    - 含 netfilter 网络事件、free-async 异步清理、frozen 检测；零轮询/零常驻线程/零 wakelock
    - 另移除 `kernel/module/module_overlay/modules/qcom-scm.ko`
 
-3. **Baseband-guard (BBG)** (`security/baseband-guard`, commit `cc7887d802`)——**已于 2026-08-30 整体移除，见第 17 条**
+3. **Baseband-guard (BBG)** (`security/baseband-guard`, commit `cc7887d802`)——**随 2026-09-09 回退至 `941a8c58` 恢复**
    - 经 vc-teahouse/Baseband-guard `setup.sh` 接入：符号链接 + `security/Makefile/Kconfig` 挂载
    - `CONFIG_BBG=y`；`CONFIG_LSM` 末尾追加 `baseband_guard`（selinux 之后）；`BBG_BLOCK_BOOT/RECOVERY` 保持 n
+   - 顶层 gitlink 精确为 `6e32d811ef5072c5454577915c118db5ba2b5c15`；源码由 `Baseband-guard-backup-20260902.bundle` 恢复
 
 4. **Droidspaces 容器支持** (commit `605e6859e4`, 2026-08-05)
    - 来源：cctv18/oppo_oplus_realme_sm8750 `.github/workflows/fastbuild_6.6.118.yml`「启用 Droidspaces 容器支持」步骤
@@ -229,7 +231,13 @@
     - **新 zip 已推回手机覆盖原文件**（965KB）；**旧自启 `/data/adb/service.d/99-fq-guard.sh` 与 `/data/adb/fq_guard/` 已删除**，加载职责移交模块——**下次重启后生效**，重启前当前加载的 fq_guard_ko 继续运行
     - **注意**：① kmod/ 内旧 rkx ko（20260313）vermagic 与上游 v3.5 不匹配会静默加载失败，不影响 fq_guard_ko（本机内核已 built-in rkx，无需该 ko）；② KASLR 地址每次开机变，post-fs-data 现解析；③ 重新打包命令与集成说明见 `ReKernel-X-1.5/README.md`；④ zip 打包时 .sh/update-binary 必须 0755 权限
 
-> 2026-08-28 第六轮合并后的 2 个提交（合并 + 维护记录）已推送 `github`（第五轮 3 个提交此前也已推送，2026-08-17 的"尚未推送"记录已过时）。此前 24 个提交的历史统计沿用 2026-08-16 口径。
+21. **2026-09-09 回退并合并 ACK 第七轮**（内核合并 `574270a7d4613` + 维护记录 `e79471cd46638`）
+    - 按要求将 `6.6.118-13T` 回退到 `941a8c58f2f8d1093e1ec722057e55cbe960aa11`，建立备份分支 `backup/rollback-20260909-pre-reset`，再以双父合并提交吸收官方 `ack/android15-6.6` 最新 `d645d30475a90d74210e3afe85e9a6ba748019b3`。
+    - ACK 增量 21 个提交，共同基线为 `5ef17cb58b6e6ede5281d9950baf0738c9c5f14d`；L0 零冲突；`android/abi_gki_aarch64.stg` 仅新增；vendor hooks 无本地改删。
+    - 红线通过：KABI 槽位、ghost_task×12、NTSYNC×97、SUBLEVEL 118、ZRAM=n、Crystal Hybridswap、FQ_GUARD、ReKernel-X、BBG 与命名空间配置均保持。
+    - 增量构建通过，Image 39,262,720 字节，SHA-256 `26777f41d73a0fd9fc3e6e15c40c34d71575478ca1acba70355f833667ea5549`；打包 `AnyKernel3-20260909-2343.zip`（32,162,700 字节，SHA-256 `d421eb9face9c43463ed09d784a0c074d208d083ccc509425c50ee442dce141f`）。
+
+> 2026-09-09 第七轮合并与产物记录见第 21 项；2026-08-28 第六轮的合并 + 维护记录及第五轮提交均属于既有历史。此前维护记录中的真机验证结论仍按各自日期有效。
 
 > 2026-08-06 已清洗全部远程提交正文中的 Claude Code `Co-Authored-By` trailer 并重写历史：3 个定制提交与 3 个合并提交 hash 变更（ReKernel-X `3eb91d7cace`、BBG `cc7887d802`、Droidspaces `605e6859e4`、ACK 两轮 `be9610f4683`/`4860642a0474`、whitewhale 同步 `656ece04bd3`），上游 ack/origin 历史 hash 不变；已强制推送到 `github`。
 

@@ -21,7 +21,7 @@
 
 ## 当前稳定基线（2026-09-09 更新）
 
-- **HEAD**: `e79471cd46638aa8749a0bb03d88dd308390f404`（维护记录提交；内核合并提交 `574270a7d4613899504118109097bf9531c6bb98` 的第一父提交为用户指定回退基线 `941a8c58f2f8d1093e1ec722057e55cbe960aa11`，第二父提交为官方 ACK `d645d30475a90d74210e3afe85e9a6ba748019b3`；按本轮回退结果恢复 BBG）
+- **HEAD**: `e79471cd46638aa8749a0bb03d88dd308390f404`（维护记录提交；内核合并提交 `574270a7d4613899504118109097bf9531c6bb98` 的第一父提交为用户指定回退基线 `941a8c58f2f8d1093e1ec722057e55cbe960aa11`，第二父提交为官方 ACK `d645d30475a90d74210e3afe85e9a6ba748019b3`；按本轮回退结果恢复 BBG；已推送 `github` 并发布 `v6.6.118-13T-20260909`）
 - **版本**: 固定名 `6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k`（SUBLEVEL 118；`CONFIG_LOCALVERSION` 写死 + `LOCALVERSION_AUTO` 关闭，不再随提交哈希变化）
 - **产物**: `out/arch/arm64/boot/Image` 39,262,720 字节，md5 `1941bbaa88628ffd9c8f04c3667e00c2`，SHA-256 `26777f41d73a0fd9fc3e6e15c40c34d71575478ca1acba70355f833667ea5549`（2026-09-09 构建，含 BBG 与最新 ACK）
 - **构建脚本**（2026-08-30 修复）：`内核构建.sh` 自包含 `cd`（不依赖 cwd）+ `PAHOLE=/usr/bin/pahole`（原 6.6/prebuilts 路径随 6.6/ 删除失效；clang-19/bin/pahole 悬空链接已改指 /usr/bin/pahole v1.25）
@@ -235,7 +235,7 @@
     - 按要求将 `6.6.118-13T` 回退到 `941a8c58f2f8d1093e1ec722057e55cbe960aa11`，建立备份分支 `backup/rollback-20260909-pre-reset`，再以双父合并提交吸收官方 `ack/android15-6.6` 最新 `d645d30475a90d74210e3afe85e9a6ba748019b3`。
     - ACK 增量 21 个提交，共同基线为 `5ef17cb58b6e6ede5281d9950baf0738c9c5f14d`；L0 零冲突；`android/abi_gki_aarch64.stg` 仅新增；vendor hooks 无本地改删。
     - 红线通过：KABI 槽位、ghost_task×12、NTSYNC×97、SUBLEVEL 118、ZRAM=n、Crystal Hybridswap、FQ_GUARD、ReKernel-X、BBG 与命名空间配置均保持。
-    - 增量构建通过，Image 39,262,720 字节，SHA-256 `26777f41d73a0fd9fc3e6e15c40c34d71575478ca1acba70355f833667ea5549`；打包 `AnyKernel3-20260909-2343.zip`（32,162,700 字节，SHA-256 `d421eb9face9c43463ed09d784a0c074d208d083ccc509425c50ee442dce141f`）。
+    - 增量构建通过，Image 39,262,720 字节，SHA-256 `26777f41d73a0fd9fc3e6e15c40c34d71575478ca1acba70355f833667ea5549`；打包 `AnyKernel3-20260909-2343.zip`（32,162,700 字节，SHA-256 `d421eb9face9c43463ed09d784a0c074d208d083ccc509425c50ee442dce141f`），已发布 GitHub Release `v6.6.118-13T-20260909`。
 
 > 2026-09-09 第七轮合并与产物记录见第 21 项；2026-08-28 第六轮的合并 + 维护记录及第五轮提交均属于既有历史。此前维护记录中的真机验证结论仍按各自日期有效。
 

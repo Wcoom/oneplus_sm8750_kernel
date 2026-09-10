@@ -179,10 +179,12 @@ static void async_io_complete(struct kiocb *kiocb, long ret)
 	unsigned long flags;
 
 	spin_lock_irqsave(&io_ctx->lock, flags);
-	if (ret < 0 && !io_ctx->ret)
-		io_ctx->ret = ret;
-	else
+	if (ret < 0) {
+		if (!io_ctx->ret)
+			io_ctx->ret = ret;
+	} else {
 		io_ctx->bytes_read += ret;
+	}
 
 	io_ctx->nr_reqs--;
 
@@ -486,7 +488,8 @@ static void wrap_io_complete(struct wrap_io_ctx *io_ctx)
 	loff_t file_offs = io_ctx->file_seg.offs;
 	int i;
 
-	if (io_ctx->bytes_read < (offset_in_page(file_offs) + io_ctx->file_seg.len))
+	if (io_ctx->ret ||
+	    io_ctx->bytes_read < (offset_in_page(file_offs) + io_ctx->file_seg.len))
 		goto out;
 
 	tot_len = io_ctx->file_seg.len;

@@ -161,6 +161,35 @@ UI 融合（聊天内嵌子代理卡片 + 递归嵌套渲染 + 详情页 + 工�
 
 **待办**：真实模型的端到端子代理跑通——用户配置的模型（`gpt-5.6-sol` / `gpt-5.5`）在其中转上均返回 HTTP 404，需用户换一个可用模型。
 
+### 独立审核与修复（2026-09-10）
+
+变更提交后经 `subagent_review`（DeepSeek-V4.1-Flash）独立审核，结论为
+「方向正确、实现中上，但宣称的语义只兑现了一半」，给出 3 个阻断 + 9 个重要问题，全部已修（提交 `cdf053d`）：
+
+- **B1**（最严重）：后台子代理在父 run 进入终态后，事件被整条链路丢弃——`AgentRuntimeSession`
+  终态后 `emit()` 返回 false；`acceptEvent` 先写 checkpoint 再判存活，而 checkpoint 行已被 ACK 删除，
+  写入会撞 `runtime_inflight_events` 外键，异常沿子代理 `onEvent` 链冒泡会把成功的作业打成失败；
+  UI 侧 `runConversationIds` 也已移除。修法：先判存活再落盘 + recorder `sealed` 门禁；
+  UI 在回合收尾把仍在 Running 的卡片转为 `backgroundPending`（诚实且可持久化）；
+  后续回合 `job_output`/`job_list` 取回时重发 `SubagentFinished` 回填真实结论。
+  ⚠️ **架构事实**：事件通道是按 run 建立的，父 run 结束后后台作业的新事件到不了 UI，
+  这是已知限制（彻底解决要给后台作业独立会话通道）。
+- **B2**：详情页入口从未接线（`onOpenSubagent` 所有调用点都没传）→ 新增
+  `AgentHomeAction/AgentChatAction.OpenSubagent`，沿既有 action 通道逐层接到卡片。
+- **B3**：回放会追加同 id 卡片 → LazyColumn 重复 key 崩溃。修法：卡片加 `parentRunId`
+  供 `resetForReplay` 精确过滤 + 创建处按 id 去重。
+- **M1** 闸门竞态（先置位再复查）、**M2** 取消路径改走闸门、**M3** `model=` 覆盖须继承父能力位、
+  **M4** `cancelRequested` 语义、**M6** 共用状态映射、**M7** 浏览器预览误挂、
+  **M8** `result`/`steers` 纳入载荷上限、**M9** 后台血统内的派生不被父 run 取消牵连。
+- **O1 教训**：用 Python 脚本批量重排导入时把整文件的空行一起删了（124 处），
+  污染了 diff。**凡是用脚本改源码，改完必须 `git diff --stat` 确认没有非预期删除**，
+  并把「纯新增 vs 混入格式变更」作为提交前检查项。
+
+仍未修（已记入设计文档「已知限制」）：M5 嵌套增量未走合帧（长轨迹 O(n²)，性能项）、
+后台作业的实时轨迹缺失、非 UI 入口 sessionKey 退化为 runId 导致跨回合不可达。
+
+**验证**：全量单测 871 例，唯一失败为已用基线对照实验证明的既有环境问题。
+
 ### 本机 Android 构建环境（2026-09-10 建立，重要）
 
 - **工具链**：`/opt/jdk-25`（OpenJDK 25，华为镜像下载）+ `/opt/android-sdk`

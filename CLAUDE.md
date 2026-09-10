@@ -105,6 +105,19 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 - **记忆优化 = DeepSeek-V4-Flash**：主 agent 用 `subagent_memory` 工具后台委派 flash 子代理把新事实写入本记忆链（重要工作完成或会话收尾时执行）
 - 记忆与技能不冲突：见 §4「记忆与技能的分工边界」——记忆只存事实与配置，技能流程以各 SKILL.md 为准
 
+### 模型名与官方文档对齐（2026-09-10 起生效）
+
+- **现行模型名只有两个**（来源：官方文档 `api-docs.deepseek.com/zh-cn` 与线上 `GET https://api.deepseek.com/models`，与实际调用三方实测一致）：`deepseek-flash`（模型版本 DeepSeek-V4.1-Flash，1M 上下文、输出上限 384K、支持图像理解与思考模式）；`deepseek-v4-pro`（DeepSeek-V4-Pro-0813，1M 上下文、输出上限 384K、不支持图像）
+- **旧名的服务端行为**：`deepseek-v4-flash`、`deepseek-v4-flash-vision-exp`（对应模型已下线）仍可调用，但服务端路由到 V4.1-Flash，并把响应 `model` 字段改写为 `deepseek-flash`（实测确认）；`deepseek-chat`、`deepseek-reasoner` 同样被路由为 `deepseek-flash`。故 §3「模型映射」里的旧名不改也能跑，但响应 `model` 字段与线上目录一律按新名理解
+- **V4 Pro 下线计划**：自北京时间 2026-09-14 12:00 起，`deepseek-v4-pro` 的请求全部路由到 V4.1-Flash 并按 Flash 计费，V4 Pro 有序下线（至 V4.1 Pro 上线前）
+- **价格**（元/百万 token，空闲/高峰）：flash 输入缓存未命中 1/2、输出 4/8；v4-pro 输入 4.5/9、输出 13.5/27
+- **本机 DSH 配置改动（已提交）**：`/root/.dsh/settings.yaml` 的 `agent-default-model.model` 原本已是 `deepseek-flash`（正确），`subagent-model-selection.allowedModels` 由 deepseek-v4-flash / deepseek-v4-pro / deepseek-v4-flash-vision-exp 收敛为 `deepseek-flash` 与 `deepseek-v4-pro`（提交 86c1bf4，仓库 `/root/.dsh`）；`/root/.dsh/.agent-presets/claude-successor/agent.cordis.yml` 的 `subagent_review` 与 `subagent_memory` 两个子代理 `agentOptions.model` 由 `deepseek-v4-flash` 改为 `deepseek-flash`，persona 中「运行在 DeepSeek-V4-Flash 上」等 3 处文本更新为 DeepSeek-V4.1-Flash（提交 760fdb5）；同一仓库另把上一会话遗留的暂存改动提交为 c2baae3（DSH 0.1.5-rc.1 standard 基线重同步：persona text→prefix/suffix、spawn 行 modelSelectionEnabled、补 present 行）
+- **harness 源码改动（已提交）**：`deepseek-harness/` 提交 `12d109cbb0 feat(llm)!: default to the documented DeepSeek model names`（39 个文件）；`packages/llm/llm-deepseek/src/index.ts` 的 DEFAULT_MODELS 由 4 条收敛为 2 条（`deepseek-flash` + `deepseek-v4-pro`），`deepseek-flash` 承接原 v4-flash 的描述、图像能力与 `systemPromptUpdate: 'in-history'`；真实默认调用路径改为 `deepseek-flash`（ACP app 行 `packages/bundle/acp-app/cordis.patch.yml`、TypeScript SDK、subagent-dsh-sdk、web-search-deepseek、Python SDK 与示例）
+- ⚠️ **与上游方向相反**：上游 2026-09-09 的 `441385fe38 retain V4 models alongside V41 Flash` 与 `0729dbec66 restore V4 Flash Vision Exp catalog entry` 刻意保留旧条目，本次经用户明确确认后移除；将来与上游同步/rebase 时需留意这处冲突。有意保留未改：`packages/client/connection/src/client/fixture.ts`（GUI 演示 fixture）、`apps/cli/tests/profiles/headless/*.patch.yml`（测试夹具）、`snapshots/**`（录制回放内容）、`apps/web/tests/scaffold.ts` 的 REPLAY_PROVIDERS
+- **验证**：相关包单测 762 项全通过；`pnpm run test:docs` 16 项文档门禁全通过；`verify-translation-pairing` 789 对全部一致
+- **生效方式**：DSH 以 `node --import tsx/esm apps/cli/src/bin.ts` 从源码加载模块、无热重载——DEFAULT_MODELS 等源码改动必须重启 `dsh`（`dsh stop && dsh`）才对运行中的实例生效；settings.yaml 与 preset 的改动同样需重启新会话才可靠生效
+- ⚠️ **既存失败（与本改动无关）**：`snapshots/session/headless.snapshot.ts` 的 `web-search-endpoint-guidance` 场景回放失败——其录制内容最后更新于 2026-09-06，而上游 2026-09-09 提交 `bc5fd3b8dc feat(llm): default Chat Completions to DeepSeek V41 Flash` 改了默认模型，属录制过时
+
 ### dsh 命令与多端产品子代理（2026-08-28 起生效）
 
 - **全局 `dsh` 命令**：`/usr/local/bin/dsh` → `/home/wcoom/bin/dsh`（脚本在根仓库，git 管理）。`dsh` 一键启动 Web GUI（已在运行则直接开浏览器）；`dsh --bg` 后台启动（日志 `~/.dsh/logs/`）；`dsh stop` 一键停止全部 DSH 实例（SIGTERM 进程组优雅退出，10s 超时强杀）；其余参数透传 DSH CLI（如 `dsh --profile tui`）

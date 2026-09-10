@@ -131,3 +131,52 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 - **认证**：Codex 子代理走 `~/.Codex/settings.json` 原生设置（ANTHROPIC_AUTH_TOKEN + DeepSeek 中转 BASE_URL）；Codex 走 `~/.codex/auth.json` 原生登录
 - **配置 git 仓库**：`/root/.dsh`（profile 配置、settings.yaml）与 `/root/.dsh/.agent-presets`（preset 组成）均为独立 git 仓库；sessions/storages/凭据已 gitignore。改配置先改对应文件再提交
 - **生效方式**：bundle 安装与 preset 工具行变更需重启——`dsh stop && dsh`，新会话即具备三个产品子代理工具
+
+## 8. Eta 多代理移植工程（2026-09-10 起）
+
+**目标**：以 [Mangi-11/Eta](https://github.com/Mangi-11/Eta) 为底座，把 DSH 原生的多代理能力
+（子代理 spawn/fork、父子会话层级、后台作业）移植进这个 Android 应用并完成 UI 融合。
+
+| 路径 | 内容 |
+|---|---|
+| `eta-android/` | 工作区仓库（含 `notes/` 四份架构测绘地图、工具链脚本、`phone-backup/` 设备备份） |
+| `eta-android/Eta/` | 底座源码（独立 git 仓库，分支 `dsh-multiagent`，origin 为上游只拉勿推） |
+| `eta-android/notes/` | 00 移植设计 + 01 工具系统 / 02 数据与会话层 / 03 UI 与状态层 测绘地图（5600 行，全部带 file:line） |
+
+**底座架构要点**（改造前必读）：
+- Runtime 跑在模块自身进程 `AgentRuntimeService`，App 进程通过 Binder（`AgentRuntimeWire`）对接；
+  **单会话模型**：`activeSession` 单槽位，新 run 直接取消旧 run。
+- 工具边界只有一个函数式接口：`fun interface ToolExecutor { fun execute(toolCall): ToolResult }`；
+  工具目录由 9 个 `Agent*ToolCatalog` 装配，能力合同唯一事实源是 `AgentToolRequirements`
+  （未登记会让整轮目录构建抛异常，且有单测断言「登记集合 == 目录集合」）。
+- Room 版本 18，13 张表，`fallbackToDestructiveMigration(dropAllTables=true)`——**漏写迁移会静默清库**；
+  会话写入是 `ConversationDao.replaceAll()` 全量 DELETE+INSERT。
+
+**已交付**（提交 `3691ec4`、`0945471`）：子代理注册表与递归执行器（同进程内复用 `AgentModelClient.complete`，
+零 IPC 协议改动）、4 个新事件（嵌套事件按字符串编码，规避 `AgentEventJsonCodec` 的扁平投影丢事件）、
+7 个工具（`subagent`/`subagent_fork`/`list_agents`/`subagent_message`/`job_list`/`job_output`/`job_kill`）、
+UI 融合（聊天内嵌子代理卡片 + 递归嵌套渲染 + 详情页 + 工具能力页分组）、卡片持久化（复用 `tools_json` 槽位，不引入迁移）。
+全量单测 863 例，唯一失败用例已用基线对照证明为既有环境问题（root 下 `canWrite()` 恒真）。
+装机实测已通过：APK 安装、用户数据回灌、应用正常运行、「多代理」分组在真机正确渲染。
+
+**待办**：真实模型的端到端子代理跑通——用户配置的模型（`gpt-5.6-sol` / `gpt-5.5`）在其中转上均返回 HTTP 404，需用户换一个可用模型。
+
+### 本机 Android 构建环境（2026-09-10 建立，重要）
+
+- **工具链**：`/opt/jdk-25`（OpenJDK 25，华为镜像下载）+ `/opt/android-sdk`
+  （cmdline-tools、platform-tools 37.0.1、`platforms;android-37.0`、`build-tools;37.0.0`、`ndk;29.0.14206865`）。
+  环境变量由 `eta-android/gradle-env.sh` 统一导出；`Eta/local.properties` 指向 SDK（已 gitignore）。
+- ⚠️ **本机所有外网必须走代理 `127.0.0.1:7897`**（直连全超时），而 **Gradle 不读 `http_proxy` 环境变量**，
+  必须写 `~/.gradle/gradle.properties` 的 `systemProp.http(s).proxyHost/Port`；否则构建会静默挂死在
+  「Calculating task graph」阶段。**同理必须设 `org.gradle.java.installations.paths=/opt/jdk-25`**，
+  否则 foojay 工具链解析会去联网下载 JDK（然后失败）。
+- ⚠️ 代理对 `repo.maven.apache.org` 等会出现 TLS 握手中断（`Remote host terminated the handshake`）。
+  解法：`~/.gradle/init.d/mirrors.gradle.kts` 把**阿里云镜像排到仓库列表最前**
+  （public / google / gradle-plugin 三个），并把 `maven.aliyun.com` 加入 `nonProxyHosts` 直连。
+- Gradle 发行包从**华为镜像**手动预置到 wrapper 缓存（`mirrors.huaweicloud.com/gradle/` 实测 10MB/s，
+  官方源仅 ~8KB/s）。JDK 同理：Adoptium API 会 SSL 中断，用华为镜像。
+- ⚠️ `pkill -f "<模式>"` 会匹配到自身命令行导致自杀——本会话踩过两次，务必用 `pkill -f "Gradle[D]aemon"` 这类不自匹配写法。
+- **ADB 在 Windows 侧**：`/mnt/d/刷机/platform-tools/adb.exe`（WSL 内无 adb；设备 PJZ110 / Android 16 / KernelSU root）。
+  辅助脚本 `eta-android/adb-tap.sh` 可按文案或无障碍描述定位并点击界面元素。
+- 构建命令：`cd eta-android/Eta && source ../gradle-env.sh && ./gradlew :app:assembleDebug :app:testDebugUnitTest`
+  （首次全量约 15 分钟，增量 1-2 分钟）。

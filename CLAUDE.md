@@ -33,7 +33,7 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 - **用户级配置**：`/root/.claude/settings.json`；全局状态：`/root/.claude.json`
 - **项目级权限白名单**：`/home/wcoom/oplus13/.claude/settings.local.json`（已授权 `Bash(git *)`、`Bash(curl *)`、`Bash(gh *)`、`Bash(python3 *)` 等，免确认执行）
 - **API 路由**：DeepSeek 中转（`ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`，key 在 settings.json 的 `ANTHROPIC_AUTH_TOKEN`）
-- **模型映射**：`haiku → deepseek-v4-flash`；`sonnet/opus → deepseek-v4-pro[1M]`；`CLAUDE_CODE_EFFORT_LEVEL=max`；自动压缩窗口 786432
+- **模型映射**：`haiku → deepseek-flash`；`sonnet/opus → deepseek-v4-pro[1M]`；`CLAUDE_CODE_EFFORT_LEVEL=max`；自动压缩窗口 786432（2026-09-10 起默认与 haiku 映射由旧名 `deepseek-v4-flash` 改为现行名 `deepseek-flash`，见 §7「模型名与官方文档对齐」）
 - **默认语言**：简体中文（全局偏好，见 `/root/.claude/CLAUDE.md`）
 
 ## 4. Skills 插件：mattpocock-skills（已引入并启用）

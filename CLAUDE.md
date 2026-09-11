@@ -150,6 +150,8 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 - **默认模型未改**：`agent-default-model` 仍是 `deepseek-official/deepseek-flash`；要用 gpt-5.x 做主模型，在 GUI 模型选择器里切换即可
 - **提交**：`/root/.dsh` 仓库 `7ee9ad3`（接入；同时纳入此前会话遗留未入库的 `fastai` 路由：deepseek-v4-flash/v4-pro、glm-5.3/glm-5.3-flash，走 `openai-completions`）与 `d14f638`（修复端点缺 `/v1` 与 gpt-5.6 模态漏声明）
 
+- **2026-09-11 后续变动**：用户在 GUI 把默认模型切成 `openai/gpt-6-astra`（该模型目录条目的 `max` 档可用，与既有 `reasoningEffort: max` 兼容，不像 `gpt-5.5` 的 `max` 为 null），并移除了 `fastai` 路由（旧 key 的 deepseek/glm 模型不再使用）；`subagent-model-selection.allowedModels` 里两条指向 `fastai` 的悬空引用已同步清理，现为 openai 7 条 + deepseek-official 2 条。提交 `a515236`。
+
 ### 生成类模型接入（图像 / 视频，2026-09-11 起生效）
 
 - **背景**：中转 `/v1/models` 从 13 个涨到 24 个，新增的 `seedance-2.0/2.5-*`、`veo3.1-time`、`wan-3.0-time`、`minimax-h3-time` 都是生成类模型而非对话模型：实测在 `/v1/responses` 上返回 500，所以**不能**塞进 `llm-pi-ai` 的 models 列表（只会让模型选择器多出必然失败的项）

@@ -259,7 +259,7 @@ nft_do_chain(struct nft_pktinfo *pkt, void *priv)
 	struct nft_regs regs = {};
 	unsigned int stackptr = 0;
 	struct nft_jumpstack jumpstack[NFT_JUMP_STACK_SIZE];
-	bool genbit = READ_ONCE(net->nft.gencursor);
+	bool genbit = READ_ONCE(net_nft(net).gencursor);
 	struct nft_rule_blob *blob;
 	struct nft_traceinfo info;
 

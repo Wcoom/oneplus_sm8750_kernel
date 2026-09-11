@@ -421,10 +421,16 @@ static struct net *net_alloc(void)
 	if (!net)
 		goto out_free;
 
+#if defined(CONFIG_NF_TABLES) || defined(CONFIG_NF_TABLES_MODULE)
+	net->ext = kzalloc(sizeof(*net->ext), GFP_KERNEL);
+	if (!net->ext)
+		goto out_free_2;
+#endif
+
 #ifdef CONFIG_KEYS
 	net->key_domain = kzalloc(sizeof(struct key_tag), GFP_KERNEL);
 	if (!net->key_domain)
-		goto out_free_2;
+		goto out_free_3;
 	refcount_set(&net->key_domain->usage, 1);
 #endif
 
@@ -433,6 +439,18 @@ out:
 	return net;
 
 #ifdef CONFIG_KEYS
+out_free_3:
+#endif
+#if defined(CONFIG_NF_TABLES) || defined(CONFIG_NF_TABLES_MODULE)
+	kfree(net->ext);
+	net->ext = NULL;
+#endif
+#ifdef CONFIG_KEYS
+out_free_2:
+	kmem_cache_free(net_cachep, net);
+	net = NULL;
+#endif
+#if !defined(CONFIG_KEYS)
 out_free_2:
 	kmem_cache_free(net_cachep, net);
 	net = NULL;
@@ -450,6 +468,9 @@ void net_passive_dec(struct net *net)
 		/* There should not be any trackers left there. */
 		ref_tracker_dir_exit(&net->notrefcnt_tracker);
 
+#if defined(CONFIG_NF_TABLES) || defined(CONFIG_NF_TABLES_MODULE)
+		kfree(net->ext);
+#endif
 		kmem_cache_free(net_cachep, net);
 	}
 }
@@ -1127,6 +1148,12 @@ void __init net_ns_init(void)
 		panic("Could not allocate generic netns");
 
 	rcu_assign_pointer(init_net.gen, ng);
+
+#if defined(CONFIG_NF_TABLES) || defined(CONFIG_NF_TABLES_MODULE)
+	init_net.ext = kzalloc(sizeof(*init_net.ext), GFP_KERNEL);
+	if (!init_net.ext)
+		panic("Could not allocate init_net extensions");
+#endif
 
 #ifdef CONFIG_KEYS
 	init_net.key_domain = &init_net_key_domain;

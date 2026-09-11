@@ -1540,7 +1540,7 @@ void nft_trace_notify(const struct nft_pktinfo *pkt,
  */
 static inline unsigned int nft_gencursor_next(const struct net *net)
 {
-	return net->nft.gencursor + 1 == 1 ? 1 : 0;
+	return net_nft(net).gencursor + 1 == 1 ? 1 : 0;
 }
 
 static inline u8 nft_genmask_next(const struct net *net)
@@ -1551,7 +1551,7 @@ static inline u8 nft_genmask_next(const struct net *net)
 static inline u8 nft_genmask_cur(const struct net *net)
 {
 	/* Use READ_ONCE() to prevent refetching the value for atomicity */
-	return 1 << READ_ONCE(net->nft.gencursor);
+	return 1 << READ_ONCE(net_nft(net).gencursor);
 }
 
 #define NFT_GENMASK_ANY		((1 << 0) | (1 << 1))

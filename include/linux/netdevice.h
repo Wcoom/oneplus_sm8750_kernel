@@ -2170,9 +2170,6 @@ struct net_device {
 	const struct iw_handler_def *wireless_handlers;
 	struct iw_public_data	*wireless_data;
 	const struct ethtool_ops *ethtool_ops;
-#ifdef CONFIG_NET_L3_MASTER_DEV
-	const struct l3mdev_ops	*l3mdev_ops;
-#endif
 #if IS_ENABLED(CONFIG_IPV6)
 	const struct ndisc_ops *ndisc_ops;
 #endif
@@ -2450,7 +2447,11 @@ struct net_device {
 	ANDROID_KABI_RESERVE(5);
 	ANDROID_KABI_RESERVE(6);
 	ANDROID_KABI_RESERVE(7);
+#if defined(CONFIG_NET_L3_MASTER_DEV)
+	ANDROID_KABI_USE(8, const struct l3mdev_ops	*l3mdev_ops;);
+#else
 	ANDROID_KABI_RESERVE(8);
+#endif
 };
 #define to_net_dev(d) container_of(d, struct net_device, dev)
 

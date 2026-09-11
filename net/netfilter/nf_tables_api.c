@@ -10321,7 +10321,7 @@ static int nf_tables_commit(struct net *net, struct sk_buff *skb)
 	gc_seq = nft_gc_seq_begin(nft_net);
 
 	/* step 3. Start new generation, rules_gen_X now in use. */
-	net->nft.gencursor = nft_gencursor_next(net);
+	net_nft(net).gencursor = nft_gencursor_next(net);
 
 	list_for_each_entry_safe(trans, next, &nft_net->commit_list, list) {
 		nf_tables_commit_audit_collect(&adl, trans->ctx.table,

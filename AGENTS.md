@@ -132,6 +132,19 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 - **配置 git 仓库**：`/root/.dsh`（profile 配置、settings.yaml）与 `/root/.dsh/.agent-presets`（preset 组成）均为独立 git 仓库；sessions/storages/凭据已 gitignore。改配置先改对应文件再提交
 - **生效方式**：bundle 安装与 preset 工具行变更需重启——`dsh stop && dsh`，新会话即具备三个产品子代理工具
 
+### FastAI OpenAI 中转接入（2026-09-11 起生效）
+
+- **中转**：`https://www.fastaitoken.com`，OpenAI 兼容（`/v1/chat/completions` 与 `/v1/responses` 均可用），Codex 风格反代。`/v1/responses` 尊重请求自带的 `instructions`，只有在请求未提供时才注入 Codex 默认人格（实测确认，故不影响 DSH 的 persona）
+- **DSH 路由**：`/root/.dsh/settings.yaml` 的 `llm-pi-ai.providers.openai`（显示名 `FastAI OpenAI`）。路由名复用 pi-ai 内置 `openai` 目录，推理级别/上下文/模态/成本字段全部继承目录条目，只覆盖 `baseURL: https://www.fastaitoken.com/v1` 与 `apiKeyEnv: FASTAI_OPENAI_API_KEY`；协议取目录默认的 `openai-responses`（pi-ai 硬编码发送 `store: false`，正合该中转要求）
+- **密钥**：key 存 `/root/.dsh/.credentials.yaml` 的 `FASTAI_OPENAI_API_KEY`（该文件已被 `.gitignore` 忽略，不入库）；settings.yaml 只写引用名，不含密钥
+- **收录模型（7 个，全部经 `/v1/responses` 实测可用）**：`gpt-5.5`、`gpt-5.6`、`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`、`gpt-6-astra`、`gpt-5.3-codex-spark`。其中 `gpt-5.6` 是中转独有名字（pi-ai 目录无此条目），按 5.6 家族元数据显式声明（272k 上下文 / 128k 输出 / off·low·medium·high·xhigh·max 六档推理）
+- **不可用（勿再收录）**：`gpt-5.4`、`gpt-5.5-pro` 返回 404（分组不支持）；`gpt-5.4-mini` 返回 400（Codex/ChatGPT 账号不支持）
+- **已验证**：llm-pi-ai 自身的 `Config`/`assertServiceable` 校验通过（`fastai` 与 `openai` 两个路由均无诊断）；`dsh --profile headless` 以 `openai/gpt-5.5` 真实跑通一次工具调用（读取文件首行并原样返回），reasoning 流正常
+- **已知观测**：该中转 `/v1/responses` 偶发长时间无响应（曾一次 120s 收到 0 字节），批量连发请求时更易触发，日常单发未见问题；DSH 侧 `streamIdleTimeoutMs` 默认 300s 可容忍
+- **生效方式**：`llm-pi-ai` 段每请求重读，settings.yaml 改动无需重启；新会话即可在模型选择器选到 `FastAI OpenAI` 的模型；`subagent-model-selection.allowedModels` 已同步加入这 7 个模型
+- **默认模型未改**：`agent-default-model` 仍是 `deepseek-official/deepseek-flash`；要用 gpt-5.x 做主模型，在 GUI 模型选择器里切换即可
+- **提交**：`/root/.dsh` 仓库提交 `7ee9ad3`（该提交同时纳入了此前会话遗留未入库的 `fastai` 路由：deepseek-v4-flash/v4-pro、glm-5.3/glm-5.3-flash，走 `openai-completions`）
+
 ## 8. Eta 多代理移植工程（2026-09-10 起）
 
 **目标**：以 [Mangi-11/Eta](https://github.com/Mangi-11/Eta) 为底座，把 DSH 原生的多代理能力

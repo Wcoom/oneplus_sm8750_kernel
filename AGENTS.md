@@ -150,6 +150,20 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 - **默认模型未改**：`agent-default-model` 仍是 `deepseek-official/deepseek-flash`；要用 gpt-5.x 做主模型，在 GUI 模型选择器里切换即可
 - **提交**：`/root/.dsh` 仓库 `7ee9ad3`（接入；同时纳入此前会话遗留未入库的 `fastai` 路由：deepseek-v4-flash/v4-pro、glm-5.3/glm-5.3-flash，走 `openai-completions`）与 `d14f638`（修复端点缺 `/v1` 与 gpt-5.6 模态漏声明）
 
+### 生成类模型接入（图像 / 视频，2026-09-11 起生效）
+
+- **背景**：中转 `/v1/models` 从 13 个涨到 24 个，新增的 `seedance-2.0/2.5-*`、`veo3.1-time`、`wan-3.0-time`、`minimax-h3-time` 都是生成类模型而非对话模型：实测在 `/v1/responses` 上返回 500，所以**不能**塞进 `llm-pi-ai` 的 models 列表（只会让模型选择器多出必然失败的项）
+- **方案**：新增零依赖 stdio MCP 服务器 `/home/wcoom/dsh-media-mcp/server.mjs`（提交 `1d17b0d`，文档见同目录 README.md），经 `@deepseek-ai/dsh-mcp-client` 挂载，暴露 `mcp__media__generate_image` 与 `mcp__media__generate_video` 两个工具；挂载行在 `/root/.dsh/profiles/web/cordis.patch.yml`（提交 `d4f5c72`）
+- ⚠️ **patch 层的语法坑**：`- id: <name>` 是**按 id 覆盖已有行**，新增行必须写成 `- insert:` 列表；写成前者会报 `patch: entry "..." not found`
+- ⚠️ **必配项**：`toolCallTimeoutMs: 1500000`（25 分钟）。视频是异步任务，实测 4 秒片约 8 分钟，mcp-client 默认的 60 秒会在任务完成前掐断调用
+- **凭据**：服务器优先读环境变量 `FASTAI_API_KEY`，否则读 DSH 凭据库 `/root/.dsh/.credentials.yaml` 的 `FASTAI_OPENAI_API_KEY`；配置与仓库里都不含密钥；产物默认落 `/home/wcoom/media-out`（已在根仓库 .gitignore 忽略）
+- **中转生成协议（实测）**：图像走 `POST /v1/images/generations`（OpenAI 兼容，一次性返回 `data[].url`，`gpt-image-2` 十几秒出 1024×1024；缺 prompt 时它返回 500 而不是 400）；视频走 Sora 风格异步任务——`POST /v1/videos` 返回 202 + `{id, status, progress}`，轮询 `GET /v1/videos/<id>`，终态对象带 `video_url` / `result_url` / `download_url`（火山 VOD 签名链接，约 24 小时有效）；**`GET /v1/videos/<id>/content` 不可用**（404 `Videos API is not supported for this platform`）；`GET /v1/videos` 无列表端点（404），任务只能按 id 查
+- **模型可用性**：`gpt-image-2` 可用（默认）、`seedance-2.0-pro-token` 可用（默认，4 秒片约 8.7 万 tokens）、`veo3.1-time` 可建任务；`seedance-2.0-time`、`seedance-2.0-token`、`seedance-2.5-token`、`wan-3.0-time`、`minimax-h3-time` 在中转侧报 400 `MEDIA_COUNT_UNAVAILABLE`（它自己没有可用账号）
+- **网络注意**：该中转会偶发中断连接（表现为 `fetch failed`，重试即好），服务器已对网络层失败自动重试 2 次；`node fetch` 直连正常，无需代理
+- **已验证**：MCP 协议握手与工具列表冒烟通过；图像与视频两条链路都实跑出产物（2.6MB MP4 / 1.9MB PNG，且已用 read_image 目视确认内容正确）；headless 会话端到端调用 `mcp__media__generate_image` 成功并返回产物路径
+- **生效方式**：web profile 的 `patchReload` 是 `live`，新会话即应具备这两个工具；若模型/工具列表里没出现，执行 `dsh stop && dsh`（会中断当前会话）
+- **费用提示**：生成调用真实计费，视频明显贵于图像，工具描述里已提示优先用图像
+
 ## 8. Eta 多代理移植工程（2026-09-10 起）
 
 **目标**：以 [Mangi-11/Eta](https://github.com/Mangi-11/Eta) 为底座，把 DSH 原生的多代理能力

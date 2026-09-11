@@ -90,17 +90,17 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 
 ## 7. DSH 接管（Codex 继任者 preset）
 
-- **DeepSeek Harness（DSH）agent 已全面接管本工作区的工程工作**，预设：`Codex-successor`（位于 `/root/.dsh/.agent-presets/Codex-successor/`，由 `standard` 复制而来）
+- **DeepSeek Harness（DSH）agent 已全面接管本工作区的工程工作**，预设：`claude-successor`（位于 `/root/.dsh/.agent-presets/claude-successor/`，由 `standard` 复制而来）
 - 该 preset 已移植：① 本记忆链（本文件 + `oplus13/AGENTS.md` + `oplus13/docs/agents/*` 技能配置）② mattpocock-skills 全部 25 个工程技能（位于 preset 的 `skills/`，全部模型可调用，含 ask-matt 路由、grill-with-docs/grill-me 对齐、to-spec/to-tickets、tdd、code-review、triage、wayfinder 等）
 - **记忆双向同步**：本文件链由 DSH 的 `dsh-agent-instructions` 自动读取（AGENTS.md/AGENTS.md 候选），DSH 会话开工前读、完工后把重要进展写回本文件链；Codex 与 DSH 共用同一套记忆与技能配置
 - **含创造模式特性**（2026-08-15）：两个 Cordis 技能（`cordis-plugin-development`、`editing-cordis-compositions`，在 preset `skills/` 内）+ 双平面创作规则——可创作/校验其他 preset，但绝不改动部署自带 shipped preset（升级会覆盖）
-- ⚠️ **tool-cordis 是进程单例**：其 Host Inspect Provider（Service/Event/Builtin/Tool）注册进进程级 `cordisInspect` 注册表，同一进程只允许一份。因此在 Codex-successor 中该行**默认 disabled**，使其可与 cordis preset 共存：**动态插件工具集（cordis_inspect/define/run/stop/undefine）在 cordis 预设会话中使用**；Codex-successor 保留两个 Cordis 技能与双平面创作规则，可用文件工具直接编辑 preset 组成。若日后彻底退役 cordis，移除该 disabled 标志即可启用 tool-cordis
+- ⚠️ **tool-cordis 是进程单例**：其 Host Inspect Provider（Service/Event/Builtin/Tool）注册进进程级 `cordisInspect` 注册表，同一进程只允许一份。因此在 claude-successor 中该行**默认 disabled**，使其可与 cordis preset 共存：**动态插件工具集（cordis_inspect/define/run/stop/undefine）在 cordis 预设会话中使用**；claude-successor 保留两个 Cordis 技能与双平面创作规则，可用文件工具直接编辑 preset 组成。若日后彻底退役 cordis，移除该 disabled 标志即可启用 tool-cordis
 - 技能配置（issue 追踪器 / triage 标签 / 领域文档）以 `oplus13/docs/agents/*` 为准，两个 agent 共用，改动需两边生效
-- Codex 仍可用（`Codex` 命令），但默认工作由 DSH 的 `Codex-successor` 预设会话承担
+- Codex 仍可用（`Codex` 命令），但默认工作由 DSH 的 `claude-successor` 预设会话承担
 
 ### 模型分工（2026-08-15 起生效）
 
-- **编码 = DeepSeek-V4-Pro**：`Codex-successor` 会话（部署默认模型已改为 `deepseek-v4-pro`），主 agent 负责全部代码编写与内核工程
+- **编码 = DeepSeek-V4-Pro**：`claude-successor` 会话（部署默认模型已改为 `deepseek-v4-pro`），主 agent 负责全部代码编写与内核工程
 - **审核 = DeepSeek-V4-Flash**：主 agent 用 `subagent_review` 工具后台委派 flash 子代理独立审核变更（重大变更合并/提交前执行）
 - **记忆优化 = DeepSeek-V4-Flash**：主 agent 用 `subagent_memory` 工具后台委派 flash 子代理把新事实写入本记忆链（重要工作完成或会话收尾时执行）
 - 记忆与技能不冲突：见 §4「记忆与技能的分工边界」——记忆只存事实与配置，技能流程以各 SKILL.md 为准
@@ -125,10 +125,10 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 ### dsh 命令与多端产品子代理（2026-08-28 起生效）
 
 - **全局 `dsh` 命令**：`/usr/local/bin/dsh` → `/home/wcoom/bin/dsh`（脚本在根仓库，git 管理）。`dsh` 一键启动 Web GUI（已在运行则直接开浏览器）；`dsh --bg` 后台启动（日志 `~/.dsh/logs/`）；`dsh stop` 一键停止全部 DSH 实例（SIGTERM 进程组优雅退出，10s 超时强杀）；其余参数透传 DSH CLI（如 `dsh --profile tui`）
-- **多端产品子代理**（rc.8 的 profile-bundle 机制）：web profile 已装 `@deepseek-ai/dsh-subagent-Codex` + `@deepseek-ai/dsh-subagent-codex`（link: 指向本地 checkout，与源码版本一致），bundle 层在 Host 平面注册提供方
-- **三个命名实例**（`/root/.dsh/profiles/web/cordis.patch.yml`，非交互权限模式）：`Codex`（acceptEdits 编码）、`codex`（approve-for-me 自动评审 + workspace-write）、`Codex-audit`（plan 只读审计）。Codex-successor preset 对应暴露 `subagent_claude_code` / `subagent_codex` / `subagent_claude_code_audit` 三个工具，`enableRunInBackground: true` 支持后台并行委派（配合 `job_output`/`job_kill` 做同时多端工作）
-- **继任者模式集成**：Codex-successor 的 persona 已内置「多端产品子代理」分工段落——编码委派 Codex/Codex、审计走 audit 实例、后台并行策略、与 spawn/fork 及 subagent_review 的分工边界、ABI/KMI 红线绝不委派（agent.cordis.yml 的 persona text 与 preset.yml 描述已同步，commit e68bf23）
-- **认证**：Codex 子代理走 `~/.Codex/settings.json` 原生设置（ANTHROPIC_AUTH_TOKEN + DeepSeek 中转 BASE_URL）；Codex 走 `~/.codex/auth.json` 原生登录
+- **多端产品子代理**（rc.8 的 profile-bundle 机制）：web profile 已装 `@deepseek-ai/dsh-subagent-claude-code` + `@deepseek-ai/dsh-subagent-codex`（link: 指向本地 checkout，与源码版本一致），bundle 层在 Host 平面注册提供方
+- **三个命名实例**（`/root/.dsh/profiles/web/cordis.patch.yml`，非交互权限模式）：`claude-code`（acceptEdits 编码）、`codex`（approve-for-me 自动评审 + workspace-write）、`claude-code-audit`（plan 只读审计）。claude-successor preset 对应暴露 `subagent_claude_code` / `subagent_codex` / `subagent_claude_code_audit` 三个工具，`enableRunInBackground: true` 支持后台并行委派（配合 `job_output`/`job_kill` 做同时多端工作）
+- **继任者模式集成**：claude-successor 的 persona 已内置「多端产品子代理」分工段落——编码委派 Claude Code/Codex、审计走 audit 实例、后台并行策略、与 spawn/fork 及 subagent_review 的分工边界、ABI/KMI 红线绝不委派（agent.cordis.yml 的 persona text 与 preset.yml 描述已同步，commit e68bf23）
+- **认证**：Claude Code 子代理走 `~/.claude/settings.json` 原生设置（ANTHROPIC_AUTH_TOKEN + DeepSeek 中转 BASE_URL）；Codex 走 `~/.codex/auth.json` 原生登录
 - **配置 git 仓库**：`/root/.dsh`（profile 配置、settings.yaml）与 `/root/.dsh/.agent-presets`（preset 组成）均为独立 git 仓库；sessions/storages/凭据已 gitignore。改配置先改对应文件再提交
 - **生效方式**：bundle 安装与 preset 工具行变更需重启——`dsh stop && dsh`，新会话即具备三个产品子代理工具
 

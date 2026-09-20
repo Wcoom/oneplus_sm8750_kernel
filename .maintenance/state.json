@@ -4,12 +4,12 @@
     "ack": {
       "remote": "https://android.googlesource.com/kernel/common",
       "branch": "android15-6.6",
-      "last_merged": "d645d30475a90d74210e3afe85e9a6ba748019b3",
-      "last_merged_date": "2026-09-09",
-      "note": "第七轮官方源增量合并，21 提交；按要求回退至 941a8c58f2f8d1093e1ec722057e55cbe960aa11 后以双父合并提交 574270a7d4613899504118109097bf9531c6bb98 合入，L0 零冲突；BBG gitlink 6e32d811ef5072c5454577915c118db5ba2b5c15 由本地 bundle 精确恢复"
+      "last_merged": "448c303366032107c46d39006c8127a5ca967a26",
+      "last_merged_date": "2026-09-20",
+      "note": "第八轮官方源增量合并，d645d30475a90..448c303366032 共 11 提交；合并提交 3ab6beb853043，唯一冲突为 android/abi_gki_aarch64_sunxi 的 L1 符号列表追加，未使用 -X ours/-X theirs；BBG gitlink 与本地定制红线保持"
     }
   },
-  "last_maintenance": "2026-09-09",
+  "last_maintenance": "2026-09-20",
   "local_commits": [
     "a0f59328855f9",
     "450f8996cf343",

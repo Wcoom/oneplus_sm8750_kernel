@@ -66,6 +66,7 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 - **ACK 月度维护**：按 `/home/wcoom/oplus13/ACK维护任务书.md` 执行（`.maintenance/state.json` 幂等断点续跑；红线：GKI ABI/KMI 不可破坏，禁止 `-X ours/-X theirs`）
 - **内核源码**：`/home/wcoom/oplus13/android_kernel_common_oneplus_sm8750`，分支 `6.6.118-13T`
   - 远程：`origin`（上游 whitewhale0612，只拉勿推）、`ack`（google googlesource 官方源）、`github`（个人仓库 Wcoom/oneplus_sm8750_kernel，SSH ed25519 推送）
+- ⚠️ **DDL 越界写重启（2026-09-11 定位，根因在 OEM vendor 模块）**：源码修复在 `op_mods` 提交 `a772844`；因当前缺少完整 OEM `kernel/oplus_cpu` 源码，暂不能安全重编 vendor_boot 中的永久模块。已用 `op_mods` 提交 `53674b4` 的 KernelSU `service.d` 脚本持久执行 `echo 0 > /proc/oplus_scheduler/sched_assist/sched_ddl_enabled`，设备当前值为 `0`。取证靠 qcom minidump（pstore console-ramoops 已损坏）；机制、证据与全部待办见 `/home/wcoom/oplus13/CLAUDE.md` 第 22/23 项；证据目录 `oplus13/.scratch/crash-20260911/`
 - **详细内核项目上下文**（五项定制、ABI 红线守点、ZRAM 配置注意事项等）见 `/home/wcoom/oplus13/CLAUDE.md`
 
 ### mihomo 工程速查（2026-08-29 起）

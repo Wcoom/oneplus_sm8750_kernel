@@ -19,17 +19,19 @@
 - **git 远程**: `origin` = 上游 whitewhale0612（只拉取，勿推送）；`ack` = `https://android.googlesource.com/kernel/common`（官方源）；`github` = 个人仓库 `Wcoom/oneplus_sm8750_kernel`（推送目标，SSH 认证）
 - **当前分支**: `6.6.118-13T`
 
-## 当前稳定基线（2026-09-09 更新）
+## 当前稳定基线（2026-09-11 更新）
 
-- **HEAD**: `e79471cd46638aa8749a0bb03d88dd308390f404`（维护记录提交；内核合并提交 `574270a7d4613899504118109097bf9531c6bb98` 的第一父提交为用户指定回退基线 `941a8c58f2f8d1093e1ec722057e55cbe960aa11`，第二父提交为官方 ACK `d645d30475a90d74210e3afe85e9a6ba748019b3`；按本轮回退结果恢复 BBG；已推送 `github` 并发布 `v6.6.118-13T-20260909`）
+- **HEAD**: `84708f314ec5c`（LXC「模块校验放行」；其上依次为 `bcf51b7db530e` 容器能力、`8aa156f94819e` defconfig 去重、`9caca32213f3e` wrapfd 修复；再往前是维护记录 `e79471cd46638` 与双父合并 `574270a7d4613899504118109097bf9531c6bb98`——其第一父提交为用户指定回退基线 `941a8c58f2f8d1093e1ec722057e55cbe960aa11`，第二父提交为官方 ACK `d645d30475a90d74210e3afe85e9a6ba748019b3`；按该轮回退结果恢复 BBG）
+- ✅ **上述 3 个 LXC 提交已推送 `github/6.6.118-13T`**（`9caca32213f3e..84708f314ec5c`），并已打 tag `v6.6.118-13T-20260911` + 发布 GitHub Release（**Latest**，资产 `AnyKernel3-20260911-1317.zip` 32,165,562 字节，SHA-256 `63aa4b85240a576dbdb870ed51e79a80499cc4b9c69ef597b0c7122b448e4443`）
 - **版本**: 固定名 `6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k`（SUBLEVEL 118；`CONFIG_LOCALVERSION` 写死 + `LOCALVERSION_AUTO` 关闭，不再随提交哈希变化）
-- **产物**: `out/arch/arm64/boot/Image` 39,262,720 字节，md5 `1941bbaa88628ffd9c8f04c3667e00c2`，SHA-256 `26777f41d73a0fd9fc3e6e15c40c34d71575478ca1acba70355f833667ea5549`（2026-09-09 构建，含 BBG 与最新 ACK）
+- **产物**: `out/arch/arm64/boot/Image` 39,262,720 字节，md5 `a5f5cd90bc0d339549313044f67291a1`（2026-09-11 13:17 构建，含 LXC 补丁）；打包 `AnyKernel3-20260911-1317.zip`
+- **真机状态（2026-09-11）**：已刷入 slot_a，内核 build `#47`，boot 分区内核段 md5 与本地 Image 一致；Wi-Fi/fq_guard/BBRv3/netns/userns/overlayfs/ntsync 验证全通过（详见第 22 项）
 - **构建脚本**（2026-08-30 修复）：`内核构建.sh` 自包含 `cd`（不依赖 cwd）+ `PAHOLE=/usr/bin/pahole`（原 6.6/prebuilts 路径随 6.6/ 删除失效；clang-19/bin/pahole 悬空链接已改指 /usr/bin/pahole v1.25）
 - **ccache**: 4.32G / 5G
 - `ahead origin 10755` 属正常现象（ACK 合并带入大量上游历史）
 - 推送认证：GitHub PAT 权限不足（403），已改用 ed25519 SSH key（`wcoom@wsl2`）
 
-**五项定制均已挂载并在 `out/.config` 中生效**（非仅 defconfig 声明；BBG 随本轮回退恢复）：
+**五项定制均已挂载并在 `out/.config` 中生效**（非仅 defconfig 声明；BBG 随 2026-09-09 回退恢复，2026-09-11 核对时确在运行）：
 
 | 定制 | 代码位置 | 配置项 |
 |---|---|---|
@@ -56,7 +58,7 @@
 > 2026-08-06 提交 `522eb9730e2bc` 移除 zram 1:2 与 watermark 100 两项本地调优，保留 swappiness=200（ACK 基线自带，勿当本地改动回退）。
 
 
-## 本地修改与维护记录（截至 2026-09-09；后续维护见第 21 项）
+## 本地修改与维护记录（截至 2026-09-11；后续维护见第 22 项）
 
 1. **fq_guard** (`net/sched/fq_guard.c`, commit `d4050a049` + 稳定性/低功耗优化, `CONFIG_NET_SCH_FQ_GUARD=y`)
    - 内核源码级守护：监听 NETDEV_UP/CHANGE/REGISTER，延迟后强制替换数据接口 root qdisc 为 fq
@@ -237,7 +239,41 @@
     - 红线通过：KABI 槽位、ghost_task×12、NTSYNC×97、SUBLEVEL 118、ZRAM=n、Crystal Hybridswap、FQ_GUARD、ReKernel-X、BBG 与命名空间配置均保持。
     - 增量构建通过，Image 39,262,720 字节，SHA-256 `26777f41d73a0fd9fc3e6e15c40c34d71575478ca1acba70355f833667ea5549`；打包 `AnyKernel3-20260909-2343.zip`（32,162,700 字节，SHA-256 `d421eb9face9c43463ed09d784a0c074d208d083ccc509425c50ee442dce141f`），已发布 GitHub Release `v6.6.118-13T-20260909`。
 
-> 2026-09-09 第七轮合并与产物记录见第 21 项；2026-08-28 第六轮的合并 + 维护记录及第五轮提交均属于既有历史。此前维护记录中的真机验证结论仍按各自日期有效。
+22. **DDL 越界写重启定位与 LXC 补丁重移植（2026-09-11）**（内核 `8aa156f94819e` + `bcf51b7db530e` + `84708f314ec5c`；`op_mods` `a772844`；已刷机验证）
+    - **当日异常重启 6 次**（dropbox SYSTEM_BOOT 时间戳 01:17 / 02:40 / 04:20 / 10:00 / 10:44 / 11:50）。⚠️ **pstore 的 `console-ramoops-0` 被 DDR 复位电位翻转损坏（乱码），不可用**；唯一干净的崩溃日志来源是 **qcom minidump**：`/data/persist_log/DCS/de/minidump/SYSTEM_LAST_KMSG@*@*@<时间>.dat.gz`，其中 `minidump.bin` 用 `strings -n 8 | grep -aE "^\[ *<时间戳>"` 可提取完整未损坏的 panic 文本（含寄存器与调用链）。设备上 `oplus_bsp_sched_assist.ko` **不在 vendor_dlkm/vendor 任意目录**（467 个模块文件里没有，`[permanent]`，疑来自 vendor_boot ramdisk），无法直接反汇编
+    - **真根因（已完整定位，非本地引入）**：OEM 模块内部命中 UBSAN 越界陷阱 → die → panic 重启。
+      - `Internal error: UBSAN: array index out of bounds: 00000000f2005512 [#1] PREEMPT SMP`；`pc : update_ddl_hit_history+0xf8/0x11c [oplus_bsp_sched_assist]`；`lr : oplus_replace_next_task_ddl+0x174/0x1d8`
+      - 调用链：`do_swap_page`/`kswapd` → `schedule` → `pick_next_task_fair` → `walt_cfs_replace_next_task_fair [sched_walt]` → `android_rvh_replace_next_task_fair_handler [sched_assist]` → `oplus_replace_next_task_ddl` → `update_ddl_hit_history`
+      - 两次崩溃线程/CPU 不同（`kswapd0`、`#APM_light-weig`）但 pc 完全相同
+      - 机制：vendor `sa_ddl.c` 的 `update_ddl_hit_history()` 用 `p->pid` 索引 `ddl_sdata[PID_MAX_DEFAULT]` 并 `memset` 24B + `strscpy_pad` 写入；`p = ots->task` 失效时 pid 异常 → 越界写 → 命中模块内固化的 `brk #0x5512`（`UBSAN_BRK_IMM=0x5500`、`MASK=0x00ff`，kind=0x12=18 即 `ubsan_out_of_bounds`）→ `arch/arm64/kernel/traps.c` 的 `ubsan_handler()` 无条件 `die()` → 因 `CONFIG_PANIC_ON_OOPS=y` 必重启。相关配置（UBSAN_TRAP/UBSAN_BOUNDS/PANIC_ON_OOPS）**均为 GKI 官方默认，非本地引入**
+    - **vendor 源码级修复已提交**（`op_mods` 独立仓库，HEAD 原 `d50b305` = PJZ110 16.0.9.401 抽取的 sched_assist 源码，新提交 `a772844`）：`update_ddl_hit_history()` 的 `if(p)` 改为 `if (p && p->pid > 0 && p->pid < PID_MAX_DEFAULT)`（异常输入只丢弃本次统计）；`oplus_replace_next_task_ddl()` 的 `IS_ERR_OR_NULL(ots)` 改为 `IS_ERR_OR_NULL(ots) || IS_ERR_OR_NULL(ots->task)`。⚠️ **需重编 `oplus_bsp_sched_assist.ko` 并部署才生效**，当前仅是源码留存——AnyKernel3 刷机链不换模块（`anykernel.sh` 里 `do.modules=0`）
+    - ⚠️ **被否的内核兜底方案（务必记住，勿重犯）**：`arch/arm64/kernel/traps.c` 的 `ubsan_handler()`「报告 + `arm64_skip_faulting_instruction` 跳过陷阱继续执行」**机制不成立**。clang 的 `-fsanitize-trap` 把 `brk` 放在函数末尾 out-of-line 冷块里（现场机器码 `Code: a94257f6 a8c47bfd d50323bf d65f03c0 (d42aa240)` = `ldp; ldp; autiasp; ret; brk #0x5512`），跳过 brk 后 PC 落在陷阱块之后，**可能直接进入下一个函数序幕** = 执行野代码；且该越界写本身仍会执行。补丁已回退，留存 `.scratch/crash-20260911/traps_ubsan_recover_REJECTED.patch`，结论见同目录 `README-审核结论.md`。**将来若仍要做内核侧兜底**：① 首选给 `android_rvh_replace_next_task_fair` 该 vendor hook 加开关；② 次选真正的 fall-through——从 brk 地址向前扫描条件分支（b.cond/cbz/cbnz/tbz/tbnz）找到目标为该 brk 的那条，令 `pc = 分支地址 + 4`，扫不到就维持 `die()`；③ **不要用 `panic_on_oops=0`**（崩溃在持 rq lock 的调度路径，die 会在原子上下文调度 → hang）
+    - **当前实际处理（持久化关闭 DDL）**：`echo 0 > /proc/oplus_scheduler/sched_assist/sched_ddl_enabled`（0666 可写；DDL 路径整体不被调用 → 既不 panic 也不执行越界写；已验证有效）。2026-09-20 已将 `op_mods/deploy/99-oplus-sched-ddl-guard.sh`（`op_mods` 提交 `53674b4`）部署到 `/data/adb/service.d/`，权限 `0755`，设备当前值为 `0`；每次启动会等待节点出现后自动重写。治本仍是用完整 OEM 源码重编已含 `a772844` 的 `oplus_bsp_sched_assist.ko`。
+    - **Droidspaces/LXC 补丁重移植**：先查证上游 `cctv18/oppo_oplus_realme_sm8750` workflow 容器段引用的 5 个补丁（`fix_sysvipc_kabi_6_7_8` / `fix_oplus_bsp_midas` / `ntsync_base` / `ntsync_compat_android15-6.6` / `evdi_drm`）**与本地 8-05 保存版逐字节相同**，且 9-09 回退 + ACK 第七轮后 Droidspaces 落地**依然完整**（sched.h KABI 槽位 1535-1536、pid.c ghost_task×12、ntsync.c/ntsync.h/ntsync_fixup.c、drivers/misc 注册、out/.config 11 项配置全生效）。新发现并移植了上游 `droidspaces_patch/Kernel_6.6.patch`（9.6KB，标题「添加lxc支持并修复KABI兼容性」，**workflow 未引用**），内核仓库 3 个新提交：
+      - `8aa156f94819e`：gki_defconfig 删除重复的 `CONFIG_NAMESPACES=y`（补丁 `echo >>` 追加行与第 43 行重复，触发 `override: reassigning` 告警；`out/.config` 不变）
+      - `bcf51b7db530e`：容器能力——overlayfs 放宽（case-insensitive 底层不再拒绝挂载，改强制 userxattr=true/index=false/redirect_mode=NOFOLLOW/xino=OFF/metacopy=false；`ovl_dentry_weird()` 去掉 DCACHE_OP_HASH|COMPARE；`ovl_init_fs_context()` 显式设 override_creds）、`net_ext` 承载 nftables pernet 状态、netdevice l3mdev_ops 移入 `ANDROID_KABI_USE(8,...)`、cgroup v1 noprefix 补 `subsys.name` 符号链接
+      - `84708f314ec5c`：模块校验放行（`info->sig_ok = true`、`check_version()` bad_version 分支 `return 0`→`return 1`）——**可单独 revert**
+      - 备份分支 `backup/pre-lxc-20260911` @ `9caca32213f3e`
+    - **KMI/CRC 实测结论（纠正了审核的部分判断）**：
+      - pahole 实测 `struct net` **布局不变**（新增的 `net_ext *ext` 落在 `bpf` 之后的 24 字节对齐空洞内，`xfrm@2944`、`sizeof=4160` 均未变）；`struct net_device` 在 `CONFIG_NET_L3_MASTER_DEV=n` 下走 `#else` 分支保留原 `ANDROID_KABI_RESERVE(8)`，布局也不变
+      - ⚠️ **但 `__GENKSYMS__` 的 CRC 按类型定义计算**，新增字段改变 `struct net` 定义 → 所有引用它的导出符号 CRC 变化。实测 dmesg `disagrees about version`：刷机前 `#42` 仅 **18 条**（tls/bluetooth/virtio_balloon 等，这些模块因此加载失败），刷机后 `#47` **3443 条**（tipc 87、qca_cld3_peach_v2 75、qca_cld3_peach 75、qca_cld3_kiwi_v2 74、bluetooth 59、ipam 56、mac80211 54、cfg80211 54、tls 53、nfc 52…），全靠 `check_version` 恒返回 1 才放行
+      - **实测驱动仍正常工作**：Wi-Fi 在 149 条 CRC 不匹配下连接成功（`魏5G`，11ac，RSSI -53，650Mbps，IP 192.168.1.142）
+      - **教训：CRC 不匹配 ≠ 布局不匹配；但 `CONFIG_MODVERSIONS` 事实上被关闭，将来真不兼容的模块也会被静默加载**
+    - **刷机结果（已验证）**：构建产物 `out/arch/arm64/boot/Image` 39,262,720 字节、md5 `a5f5cd90bc0d339549313044f67291a1`（13:17）；打包 `AnyKernel3-20260911-1317.zip`，经 `anykernel.sh` 刷入 slot_a 并重启：boot 分区内核段 md5 与本地 Image **完全一致**，build 号 `#42` → **`#47`**，boot_completed=1。验证通过项：关键模块全在（rmnet_core/cnss2/qca_cld3_peach_v2/oplus_bsp_sched_assist/sched_walt/kernelsu，共 670 模块）；Wi-Fi 连接成功；**fq_guard 生效**（`cnss_pci ... wlan0: fq_guard: root qdisc forced to fq (17 tx queues)`）；`/proc/bbr_version`=3；`unshare -n`（netns）与 `unshare -U`（userns，max_user_namespaces=41088）均通；overlayfs 挂载/读 lower/写 upper/umount 全通过；`/dev/ntsync` 0666
+    - **证据与脚本**：`oplus13/.scratch/crash-20260911/`（minidump 解出的 SYSTEM_LAST_KMSG、console-ramoops 原始件、两轮独立审核结论、被否补丁）；刷机/验证脚本 `flash_and_verify.sh`（含 Windows adb 引号处理注意事项）
+    - ⚠️ **踩坑与运维要点**：
+      - **WSL 构建内存**：本次改动触及 `include/net/net_namespace.h` 核心头 → vmlinux + BTF 全量重生成，`pahole` 曾占 6.7GB RSS，把 7.9GB 物理内存 + 4GB swap 打满、触发 OOM kill（`Out of memory: Killed process ... pahole`），表现为构建长时间无进展。诊断：`ps -eo pid,etime,pcpu,rss,comm | grep pahole` + `cat /proc/<pid>/stack`（可见 `folio_wait_bit_common → do_swap_page` 的 swap 抖动栈）+ `vmstat 1`（si/so 上万）。内存充足时同一构建约 1 分钟即过。**改核心头前先确认可用内存**
+      - **`pkill -f "<模式>"` 会匹配自身命令行导致 shell 自杀**（本次又踩一次：`pkill -f "make -j8"` 杀掉自己的 bash）。必须用 `pkill -x make` 或 `pkill -f "make [-]j8"` 这类不自匹配写法
+      - **Windows adb 引号重组**：`adb.exe shell "su -c '...'"` 里嵌套引号会被拆散（实测 `dmesg | grep "x y"` 变成多个参数、`lsmod | grep -cE "^(a|b)"` 报 `syntax error: unexpected '('`）。可靠做法：脚本 `base64 -w0` 后经 `adb shell "echo <b64> | base64 -d > /data/local/tmp/x.sh"` 传输，再 `su -c 'sh /data/local/tmp/x.sh'` 执行
+    - **本次待办**：① ✅ DDL 关闭已持久化（KernelSU `service.d`，`op_mods` 提交 `53674b4`）；长期治本仍待拿到完整 OEM 源码，重编并部署含 `a772844` 边界检查的 `oplus_bsp_sched_assist.ko`，以恢复 DDL 功能。② ✅ **已完成**——内核改动已推送 `github/6.6.118-13T`（`9caca32213f3e..84708f314ec5c`），tag `v6.6.118-13T-20260911` 已推送并获得 GitHub Release（**Latest**，标题「2026-09-11｜6.6.118-13T：移植 LXC 容器支持补丁」，资产 `AnyKernel3-20260911-1317.zip` 32,165,562 字节，SHA-256 `63aa4b85240a576dbdb870ed51e79a80499cc4b9c69ef597b0c7122b448e4443`）。③ LXC 补丁涉及的 KMI 脆弱性：**一旦将来启用 `CONFIG_NF_TABLES=y`，`nft`(16B) 会从 `struct net` 中部移除，届时是真 KMI 破坏**，启用前必须 `pahole -C net out/vmlinux` 复核并评估厂商模块兼容性。④ 审核提出的 overlayfs 残留缺陷（上游原有行为，未修）：降级写在逐项解析的 `ovl_mount_dir_check()` 中，后续显式 `index=on`/`metacopy=on`/`xino=on`/`redirect_dir=on` 会覆盖它；`kernfs_create_link()` 返回值未检查；`net/core/net_namespace.c` 在 KEYS=y + NF_TABLES=n 下有 unused label（仅告警）
+
+23. **2026-09-20 第八轮 ACK 合并与 DDL 保护**（内核合并 `3ab6beb853043`，维护记录 `301e1f9058227`；`op_mods` `53674b4`）
+    - 官方 ACK 从 `d645d30475a90d74210e3afe85e9a6ba748019b3` 更新到 `448c303366032107c46d39006c8127a5ca967a26`，共 11 个提交；备份分支 `backup/pre-ack-20260920`。
+    - 唯一冲突为 `android/abi_gki_aarch64_sunxi` 的 L1 符号追加；红线通过：Droidspaces KABI、`ghost_task` 12 行、NTSYNC×97、`SUBLEVEL=118`、`CONFIG_ZRAM=n`、BBG/FQ_GUARD/ReKernel-X 与命名空间配置均保留；未使用 `-X ours/-X theirs`。
+    - 构建 exit 0：Image 39,262,720 字节，SHA-256 `913729fd15323980adb210bcb9f49e1fc949adc0d92433803e05934503fe9233`；刷机包 `AnyKernel3-20260920-2334.zip`，SHA-256 `401ed0bd85db609b4269988b13df12033c40f26db299303ab617af8030fc0164`，ZIP 内 Image 哈希一致；未自动刷机。
+    - DroidSpaces panic 保护已部署到当前设备：`/data/adb/service.d/99-oplus-sched-ddl-guard.sh` 权限 `0755`、设备端 SHA-256 与仓库一致、`sched_ddl_enabled=0`；本次未重启，启动以来无新的 UBSAN/Oops/panic。
+
+> 2026-09-20 第 23 项记录第八轮 ACK 合并、构建/打包校验与 DDL 持久化保护；2026-09-11 第 22 项记录 DDL 越界写重启定位与 LXC 补丁重移植（含刷机验证 `#47`）；此前维护记录中的真机验证结论仍按各自日期有效。
 
 > 2026-08-06 已清洗全部远程提交正文中的 Claude Code `Co-Authored-By` trailer 并重写历史：3 个定制提交与 3 个合并提交 hash 变更（ReKernel-X `3eb91d7cace`、BBG `cc7887d802`、Droidspaces `605e6859e4`、ACK 两轮 `be9610f4683`/`4860642a0474`、whitewhale 同步 `656ece04bd3`），上游 ack/origin 历史 hash 不变；已强制推送到 `github`。
 

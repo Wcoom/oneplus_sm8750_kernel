@@ -78,6 +78,7 @@
 - 合并提交: `3ab6beb853043`；唯一冲突为 L1 `android/abi_gki_aarch64_sunxi`，保留本地条目并追加 ACK 的 11 个 Type-C/USB-PD/console 符号；无未解决文件，未使用 `-X ours/-X theirs`
 - 红线校验: KABI 槽位保留 / `ghost_task` 12 行 / NTSYNC×97 / `SUBLEVEL=118` / `CONFIG_ZRAM=n` / BBG / FQ_GUARD / REKERNEL_X / 命名空间与 SYSVIPC 均通过；`git diff --check` 通过
 - 构建: `bash /home/wcoom/内核构建.sh` exit 0；版本 `6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k`；Image 39,262,720 字节；SHA-256 `913729fd15323980adb210bcb9f49e1fc949adc0d92433803e05934503fe9233`；BTF 阶段仅有既存重复类型警告
+- 打包: `AnyKernel3-20260920-2334.zip`，32,164,308 字节；SHA-256 `401ed0bd85db609b4269988b13df12033c40f26db299303ab617af8030fc0164`；ZIP 内 Image SHA-256 与构建产物一致
 - 真机 panic 根因: vendor 永久模块 `oplus_bsp_sched_assist` 的 `update_ddl_hit_history()` 以失效 task 的 pid 越界访问 `ddl_sdata[PID_MAX_DEFAULT]`，触发 UBSAN→panic；`op_mods` 源码修复为 `a772844`
 - 立即保护: `op_mods` 提交 `53674b4` 新增 KernelSU `service.d/99-oplus-sched-ddl-guard.sh`；已部署到设备并执行，`sched_ddl_enabled=0`，设备启动后无新的 UBSAN/Oops/panic 标记；因缺少完整 OEM `kernel/oplus_cpu` 源码，暂未重编永久 vendor 模块
 

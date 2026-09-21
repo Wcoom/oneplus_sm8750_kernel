@@ -31,15 +31,26 @@ ZIP_NAME="AnyKernel3-$(date -r "$SOURCE_FILE" +%Y%m%d-%H%M).zip"
 echo "内核版本: $KVER"
 echo "输出文件: $ZIP_NAME"
 
-# 替换目标路径中的 Image 文件
-cp -f "$SOURCE_FILE" "$TARGET_DIR/Image"
+# Android GKI 的 Image 内可能包含内核自身编译进来的 empty_root.dtb。
+# 这不是可以单独替换的外置 DTB；若把完整 Image 命名为 Image，AnyKernel
+# 会把它复制到 split_img/kernel，同时保留原 boot 镜像的 kernel_dtb，最终
+# 形成“新 Image + 旧尾块”的错误启动镜像。使用 *-dtb 命名可以触发
+# AnyKernel 清理旧 kernel_dtb，再将完整 Image 原样重打包。
+rm -f "$TARGET_DIR/Image" "$TARGET_DIR/Image-dtb"
+cp -f "$SOURCE_FILE" "$TARGET_DIR/Image-dtb"
+
+# 生成前检查产物确实是 ARM64 Linux Image，而不是空文件或误拿压缩镜像。
+if ! grep -a -q -m1 "Linux version " "$SOURCE_FILE"; then
+    echo "错误: Image 中未找到 Linux 版本标识，拒绝打包: $SOURCE_FILE"
+    exit 1
+fi
 
 cd "$TARGET_DIR"
 
 # 同名文件先删除，避免 zip 增量更新残留旧内容
 rm -f "$ZIP_NAME"
 
-zip -r "$ZIP_NAME" META-INF tools anykernel.sh Image LICENSE .gitignore \
+zip -r "$ZIP_NAME" META-INF tools anykernel.sh Image-dtb LICENSE .gitignore \
     Zram_WebUI-v0.1-21-f3ff59f-release.zip
 
 echo "打包完成: $TARGET_DIR/$ZIP_NAME"

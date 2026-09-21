@@ -23,7 +23,7 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 | `内核构建.sh` | 内核构建脚本（clang-19 + ccache 伪装，增量编译） |
 | `dabao.sh` | AnyKernel3 刷机包打包脚本 |
 | `android-ndk-r25c/` | Android NDK |
-| `CC-Switch 3.19.1` | CC-Switch（Codex/Claude Code 配置切换工具），已安装（dpkg ii）；安装包 deb 已于 2026-08-30 清理删除 |
+| `CC-Switch 3.20.3` | CC-Switch（Codex/Claude Code 配置切换工具），已安装（dpkg ii；2026-09-21 由 3.19.1 升级到最新版 3.20.3，`/usr/bin/cc-switch` sha256 与官方 Linux x86_64 deb 资产一致，数据库已迁移 v16→v18）；安装包 deb 不保留 |
 | `mattpocock-skills/` | mattpocock/skills 仓库本地副本（**仅作参考/自定义**，不参与加载；技能已通过 Claude Code 插件提供，见 §4） |
 
 ## 3. Claude Code 运行环境

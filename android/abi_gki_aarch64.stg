@@ -413362,6 +413362,15 @@ elf_symbol {
   full_name: "l2tp_session_inc_refcount"
 }
 elf_symbol {
+  id: 0x76818244
+  name: "l2tp_session_put"
+  is_defined: true
+  symbol_type: FUNCTION
+  crc: 0x6c0b4bff
+  type_id: 0x154220a5
+  full_name: "l2tp_session_put"
+}
+elf_symbol {
   id: 0x8bf0dadd
   name: "l2tp_session_register"
   is_defined: true
@@ -413450,6 +413459,15 @@ elf_symbol {
   crc: 0x0ecdfc70
   type_id: 0x197597d7
   full_name: "l2tp_tunnel_inc_refcount"
+}
+elf_symbol {
+  id: 0x28af6ad1
+  name: "l2tp_tunnel_put"
+  is_defined: true
+  symbol_type: FUNCTION
+  crc: 0xe1078308
+  type_id: 0x197597d7
+  full_name: "l2tp_tunnel_put"
 }
 elf_symbol {
   id: 0x8066cf3a
@@ -453791,6 +453809,7 @@ interface {
   symbol_id: 0x1d4f252f
   symbol_id: 0xd944403c
   symbol_id: 0x12bc1d26
+  symbol_id: 0x76818244
   symbol_id: 0x8bf0dadd
   symbol_id: 0x16020414
   symbol_id: 0x19b323fa
@@ -453801,6 +453820,7 @@ interface {
   symbol_id: 0x2b8f7fee
   symbol_id: 0x8244eaf7
   symbol_id: 0x7169705b
+  symbol_id: 0x28af6ad1
   symbol_id: 0x8066cf3a
   symbol_id: 0x20069858
   symbol_id: 0x709f7fc8

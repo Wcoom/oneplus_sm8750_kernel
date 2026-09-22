@@ -91,3 +91,11 @@
 - BBG 构建依赖: 目标树的 `Baseband-guard` gitlink 与 `security/baseband-guard` 符号链接均保持，使用 `/home/wcoom/oplus13/Baseband-guard-backup-20260902.bundle` 恢复精确提交 `6e32d811ef5072c5454577915c118db5ba2b5c15`
 - 构建: `bash /home/wcoom/内核构建.sh` 增量构建成功，版本 `6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k`；Image 39,262,720 字节；SHA-256 `26777f41d73a0fd9fc3e6e15c40c34d71575478ca1acba70355f833667ea5549`；`strings out/vmlinux | grep -c ntsync` 为 97
 - 打包: `AnyKernel3-20260909-2343.zip`，32,162,700 字节，SHA-256 `d421eb9face9c43463ed09d784a0c074d208d083ccc509425c50ee442dce141f`；包内 Image SHA-256 与构建输出一致
+
+=== 2026-09-23 第九轮 ACK 增量合并 ===
+- ACK fetch: 448c303366032107c46d39006c8127a5ca967a26 -> 700526826edfa1bcd25d5b8090a793d9b53f8e94，3 个提交；备份分支 backup/pre-ack-20260923
+- 合并提交: 9a0664240ae5（第一父 301e1f905822，第二父 700526826edf）；L0 零冲突（android/abi_gki_aarch64.stg 自动合并仅 +20 行，android/abi_gki_aarch64_siengine 仅 +2 行），未使用 -X ours/-X theirs
+- ACK 提交: 700526826edf ANDROID: ABI: Update symbol list for Siengine；b339b4a00587 UPSTREAM: x86/mm: Fix check/use ordering in switch_mm_irqs_off()；d4e462b6d557 ANDROID: KVM: arm64: iommu: Reject identity domain in kvm_iommu_free_domain
+- 红线校验: KABI 槽位（sched.h 1535/1536）保留 / ghost_task 12 行 / NTSYNC×97 / SUBLEVEL=118 / CONFIG_ZRAM=n / BBG / FQ_GUARD / REKERNEL_X / 命名空间与 SYSVIPC 均通过；git diff --check 通过；vendor hook 目录无本地改删；BBG gitlink 6e32d811 保持
+- 构建: bash /home/wcoom/桌面/内核构建.sh exit 0；版本 6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k；Image 39,131,648 字节；SHA-256 31908e677667b600e828ef5dc7a165137770e0931af6f38a3b390dc5fc65a789
+- 打包: AnyKernel3-20260923-0228.zip，25,999,984 字节；SHA-256 2f32c4ef1444f2208b73c0bd2fd13f230165f5053f4a1e184cf50995fca514a7；ZIP 内 Image SHA-256 与构建产物一致

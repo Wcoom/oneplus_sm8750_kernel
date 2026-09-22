@@ -4,19 +4,19 @@ echo "删除前一次构建信息"
 # make clean&&rm -rf out/*
 # ================= 1. 基础变量配置 =================
 export USE_CCACHE=1
-export CCACHE_DIR="/home/wcoom/oplus13/.ccache"
+export CCACHE_DIR="/home/wcoom/桌面/oplus13/.ccache"
 export CCACHE_MAXSIZE="5G"
 export CCACHE_HARDLINK="true"
 # 【编译速度优化】关闭 ccache 日志:避免每次编译产生数 GB 日志 IO
 # export CCACHE_LOGFILE="$HOME/ccache_debug.log"
 
 export KBUILD_BUILD_TIMESTAMP="Mon May 12 09:09:59 UTC 2025"
-# AFDO 优化已取消（原: export AFDO_PROFILE="/home/wcoom/oplus13/android_kernel_common_oneplus_sm8750/android/gki/aarch64/afdo/kernel.afdo"）
+# AFDO 优化已取消（原: export AFDO_PROFILE="/home/wcoom/桌面/oplus13/android_kernel_common_oneplus_sm8750/android/gki/aarch64/afdo/kernel.afdo"）
 
 # ================= 2. 关键：正确配置 PATH =================
 
 # 第一步：先将真实的 Clang-19 加入 PATH
-export PATH="/home/wcoom/oplus13/clang-19/bin:$PATH"
+export PATH="/home/wcoom/桌面/oplus13/clang-19/bin:$PATH"
 
 # 第二步：准备 ccache 伪装目录
 mkdir -p $HOME/.ccache_bin
@@ -59,7 +59,7 @@ export JOBS=8
 export LOCALVERSION=""
 
 # 进入内核源码目录（脚本自包含，不依赖调用方 cwd）
-cd /home/wcoom/oplus13/android_kernel_common_oneplus_sm8750 || exit 1
+cd /home/wcoom/桌面/oplus13/android_kernel_common_oneplus_sm8750 || exit 1
 
 # 执行 Make
 # 注意：这里去掉了 CC="ccache clang"，因为 PATH 已经搞定了

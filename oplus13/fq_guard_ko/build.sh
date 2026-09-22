@@ -10,12 +10,12 @@
 #     若 insmod 报 version magic / symbol version 不符再另行处理)。
 set -e
 
-KERNEL_ROOT="/home/wcoom/oplus13/android_kernel_common_oneplus_sm8750"
+KERNEL_ROOT="/home/wcoom/桌面/oplus13/android_kernel_common_oneplus_sm8750"
 KO_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUT="$KERNEL_ROOT/out"
 TARGET_RELEASE="6.6.118-android15-8-gf4dc45704e54-abogki20260808-4k"
 
-export PATH="/home/wcoom/oplus13/clang-19/bin:$PATH"
+export PATH="/home/wcoom/桌面/oplus13/clang-19/bin:$PATH"
 export KBUILD_BUILD_TIMESTAMP="Mon May 12 09:09:59 UTC 2025"
 
 UTS="$OUT/include/generated/utsrelease.h"

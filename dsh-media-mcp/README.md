@@ -19,10 +19,10 @@ DSH 的 LLM 适配器（`dsh-llm-pi-ai`）只走对话协议（`openai-completio
     serverName: media
     transport: stdio
     command: node
-    args: ['/home/wcoom/dsh-media-mcp/server.mjs']
-    cwd: /home/wcoom
+    args: ['/home/wcoom/桌面/dsh-media-mcp/server.mjs']
+    cwd: /home/wcoom/桌面
     env:
-      FASTAI_MEDIA_OUT: /home/wcoom/media-out
+      FASTAI_MEDIA_OUT: /home/wcoom/桌面/media-out
     # 关键：视频生成以分钟计（实测 4 秒视频约 8 分钟），
     # 默认的 60 秒 toolCallTimeoutMs 会在任务完成前掐断调用。
     toolCallTimeoutMs: 1500000
@@ -34,7 +34,7 @@ DSH 的 LLM 适配器（`dsh-llm-pi-ai`）只走对话协议（`openai-completio
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \
   '{"jsonrpc":"2.0","method":"tools/list"}' \
-  | node /home/wcoom/dsh-media-mcp/server.mjs
+  | node /home/wcoom/桌面/dsh-media-mcp/server.mjs
 ```
 
 ## 凭据

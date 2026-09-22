@@ -4,10 +4,10 @@
 
 ## 构建与打包
 
-- **构建脚本**: `/home/wcoom/内核构建.sh`（clang-19 + ccache 伪装，增量编译，禁止运行 `make clean` 除非明确要求；内含 `export LOCALVERSION=""` 以抑制 setlocalversion 追加 `+`）
-- **工具链**: `/home/wcoom/oplus13/clang-19/`
-- **gki内核源码目录**: `/home/wcoom/oplus13/android_kernel_common_oneplus_sm8750`
-- **打包**: `/home/wcoom/dabao.sh` 将 `out/arch/arm64/boot/Image` 复制进 `AnyKernel3-6.6.112-NOKSU-OnePlus8Elite/` 并打 zip
+- **构建脚本**: `/home/wcoom/桌面/内核构建.sh`（clang-19 + ccache 伪装，增量编译，禁止运行 `make clean` 除非明确要求；内含 `export LOCALVERSION=""` 以抑制 setlocalversion 追加 `+`）
+- **工具链**: `/home/wcoom/桌面/oplus13/clang-19/`
+- **gki内核源码目录**: `/home/wcoom/桌面/oplus13/android_kernel_common_oneplus_sm8750`
+- **打包**: `/home/wcoom/桌面/dabao.sh` 将 `out/arch/arm64/boot/Image` 复制进 `AnyKernel3-6.6.112-NOKSU-OnePlus8Elite/` 并打 zip
   - 命名规则：`AnyKernel3-<Image镜像时间>.zip`（`date -r $IMAGE +%Y%m%d-%H%M`，如 `AnyKernel3-20260811-1231.zip`；2026-08-11 起弃用提交哈希）
 - **刷机到实体机（WSL 调用 Windows 侧 ADB）**：使用 `/mnt/d/刷机/platform-tools/adb.exe -s 5d6d4090 ...`（2026-08-30 核实实际路径，旧记录 `/mnt/c/WINDOWS/system32` 已失效）；Windows 端设备直连，WSL 无 USB 直通。
   - 设备：OnePlus 13 PJZ110，序列号 `5d6d4090`，Android 16，KernelSU root（`ksud 3.2.5-63-ga33dbca3`，LKM 不受 boot kernel 替换影响）
@@ -58,7 +58,7 @@
 > 2026-08-06 提交 `522eb9730e2bc` 移除 zram 1:2 与 watermark 100 两项本地调优，保留 swappiness=200（ACK 基线自带，勿当本地改动回退）。
 
 
-## 本地修改与维护记录（截至 2026-09-11；后续维护见第 22 项）
+## 本地修改与维护记录（截至 2026-09-23；后续维护见第 24 项）
 
 1. **fq_guard** (`net/sched/fq_guard.c`, commit `d4050a049` + 稳定性/低功耗优化, `CONFIG_NET_SCH_FQ_GUARD=y`)
    - 内核源码级守护：监听 NETDEV_UP/CHANGE/REGISTER，延迟后强制替换数据接口 root qdisc 为 fq
@@ -140,7 +140,7 @@
     - **C3 fq_guard 正式接口**（`37ed9c5138e66`）：`sch_api.c` 导出 `qdisc_create_by_kind()`（`EXPORT_SYMBOL_GPL`，原型入 `include/net/pkt_sched.h:110`），`qdisc_create` 恢复 static wrapper（nla_strscpy 转发）；fq_guard 删除 extern hack 改正式调用 + IS_ERR 检查；notifier 不再重置 `rechecks_left`（recheck 所有权收敛到 fqg_work，**修掉 retry_burst 计数在事件驱动下永不复位的缺陷**）；Kconfig help 更新为事件驱动 + 有限复查语义
     - **C4 温度偏移单一入口**（`ab5924867424c`）：`include/linux/temp_offset_sysctl.h` 提供 `apply_temperature_offset(zone_type, raw, unit)`（battery 排除 `strncasecmp` 7/4 前缀内聚其中，`TEMP_OFFSET_MILLI_C/DECI_C` 枚举）；thermal_helpers（m℃）与 power_supply_core（0.1℃）两调用点各剩一行
     - **C5+C6 BBG 锁安全**（`751e0e1c77022`，gitlink 指向嵌套 repo `Baseband-guard` 的 `6e32d81`）：`bbg_check_blockdev_access()` 收敛 S_ISBLK→write_op→trusted 判定为单一入口（三个 hook 复用，前置链不变）；`allow_has/allow_add` 改 irqsave 自旋锁 + 内部 `allow_has_locked()` 防自死锁；可睡眠的 `blkdev_get_no_open` 解析保持在锁外
-    - **C8 脚本清理（无内核提交）**：`verify_kernel.sh` 179→104 行（删 zram 1:2 / watermark 100 过期段）、`bpf.sh` 变量化 `KERNEL_ROOT/DEFCONFIG`、删除仓库根旧版 `dabao.sh`（519B 硬编码残留）——三脚本均在 `/home/wcoom/oplus13/`，**不属内核 git 仓库**，无提交内容
+    - **C8 脚本清理（无内核提交）**：`verify_kernel.sh` 179→104 行（删 zram 1:2 / watermark 100 过期段）、`bpf.sh` 变量化 `KERNEL_ROOT/DEFCONFIG`、删除仓库根旧版 `dabao.sh`（519B 硬编码残留）——三脚本均在 `/home/wcoom/桌面/oplus13/`，**不属内核 git 仓库**，无提交内容
     - 验证：编译退出码 0、`OBJCOPY arch/arm64/boot/Image` 39,258,624 字节、error 0、13 个改动文件全部重编译（fq_guard/sch_api/ntsync_fixup/rkx_kprobe/baseband_guard/temp_offset_sysctl 等）；打包 `AnyKernel3-20260811-1523.zip`（31M）；**已真机验证**（2026-08-11：开机正常、`/proc/sys/kernel/temperature_offset_celsius` 可写生效、Droidspaces 容器可用）
 
 11. **第二轮架构深化（crystal_hybridswap 重点，5 提交，2026-08-16，`674cf5a571c45`~`8f42d16655f2f`）**
@@ -192,7 +192,7 @@
     - **背景**：上午 Codex 会话改 BBG 放行 vendor_dlkm（`fd3fd39`+`c1048de`）被回退；用户要求重做且"有根据不要猜测、不放行整个 super"
     - **真机取证链**：① vendor_dlkm_b=dm-18（super 动态分区，无 bd_meta_info，仅加 allowlist 无效）② BBG deny 日志实锤：`deny write dev=8:14 path=/dev/block/sda14 comm=lpadd_auto`（fopbatt 模块 `lpadd_auto --replace super vendor_dlkm_b` 刷写被拦，写 super 不在 allowlist）③ dm-linear 的 BLKROSET ioctl 转发到底层设备，dm 自身 ro=1 清不掉（`blockdev --setrw` 无效）④ 直写 dm-18 被 ro 拒
     - **内核修改**（子仓库 `eba53b9` + 主仓库 `1268a1a`，gitlink 一致）：allowlist 追加 `vendor_dlkm`；`blkdev_helper.c` 新增 `is_allowed_dm_partition_dev()`（dm_get_md/dm_copy_name_and_uuid 解析 dm 名→同一 allowlist，IS_BUILTIN(CONFIG_BLK_DEV_DM) 保护）；判定接入 `reverse_allow_match_and_cache` 单一入口。**不放行 super**
-    - **模块侧改造**（fopbatt 电池工具包 8.2.14-beta，`/home/wcoom/fopbatt-bbg-fix/`，根仓库 b92af23）：`kot_run_lpadd_once` 改为 dm 镜像直写——`dmctl table` 读映射 → `dmctl create vendor_dlkm_<非当前slot>`（同名映射、ro=0、BBG allowlist 放行）→ `dd bs=4M conv=fsync` 直写 → `dmctl delete`；重启后 init 重建分区生效。**不写 super 分区表**
+    - **模块侧改造**（fopbatt 电池工具包 8.2.14-beta，`/home/wcoom/桌面/fopbatt-bbg-fix/`，根仓库 b92af23）：`kot_run_lpadd_once` 改为 dm 镜像直写——`dmctl table` 读映射 → `dmctl create vendor_dlkm_<非当前slot>`（同名映射、ro=0、BBG allowlist 放行）→ `dd bs=4M conv=fsync` 直写 → `dmctl delete`；重启后 init 重建分区生效。**不写 super 分区表**
     - **验证（真机全通）**：镜像设备写往返与 dm-18 逐字节一致（erofs superblock 恢复）；完整模块安装流程（ksud install）"vendor_dlkm 写入成功"、BBG deny=0；重启后 boot_completed=1、oplus_chg_v2.ko 从新分区加载运行、/data/opbatt 完整
     - **教训**：BBG 判定是 dev_t 级，动态分区刷写必须经 dm 名称解析；lpadd_auto 类工具写 super 与 BBG 保护意图冲突，模块侧绕行是正解
 
@@ -273,7 +273,13 @@
     - 构建 exit 0：Image 39,262,720 字节，SHA-256 `913729fd15323980adb210bcb9f49e1fc949adc0d92433803e05934503fe9233`；刷机包 `AnyKernel3-20260920-2334.zip`，SHA-256 `401ed0bd85db609b4269988b13df12033c40f26db299303ab617af8030fc0164`，ZIP 内 Image 哈希一致；未自动刷机。
     - DroidSpaces panic 保护已部署到当前设备：`/data/adb/service.d/99-oplus-sched-ddl-guard.sh` 权限 `0755`、设备端 SHA-256 与仓库一致、`sched_ddl_enabled=0`；本次未重启，启动以来无新的 UBSAN/Oops/panic。
 
-> 2026-09-20 第 23 项记录第八轮 ACK 合并、构建/打包校验与 DDL 持久化保护；2026-09-11 第 22 项记录 DDL 越界写重启定位与 LXC 补丁重移植（含刷机验证 `#47`）；此前维护记录中的真机验证结论仍按各自日期有效。
+24. **2026-09-23 第九轮 ACK 合并**（内核合并 9a0664240ae5，维护记录 d1b7b6d3e399）
+    - 官方 ACK 从 448c303366032107c46d39006c8127a5ca967a26 更新到 700526826edfa1bcd25d5b8090a793d9b53f8e94，共 3 个提交（Siengine ABI 符号、x86/mm switch_mm_irqs_off 顺序修复、KVM arm64 iommu identity domain 校验）；备份分支 backup/pre-ack-20260923。
+    - L0 零冲突：android/abi_gki_aarch64.stg 自动合并仅 +20 行、android/abi_gki_aarch64_siengine 仅 +2 行；未使用 -X ours/-X theirs。红线通过：Droidspaces KABI（sched.h 1535/1536）、ghost_task 12 行、NTSYNC×97、SUBLEVEL=118、CONFIG_ZRAM=n、BBG/FQ_GUARD/ReKernel-X 与命名空间配置均保留，vendor hooks 无改删。
+    - 构建 exit 0：Image 39,131,648 字节，SHA-256 31908e677667b600e828ef5dc7a165137770e0931af6f38a3b390dc5fc65a789；刷机包 AnyKernel3-20260923-0228.zip，SHA-256 2f32c4ef1444f2208b73c0bd2fd13f230165f5053f4a1e184cf50995fca514a7，ZIP 内 Image 哈希一致；本次未自动刷机。
+    - 环境说明：迁移到 Ubuntu 26.04 后按本任务书完成首轮维护；项目/工具链位于 /home/wcoom/桌面/oplus13，推送经 SSH 到 github/6.6.118-13T（301e1f905822..d1b7b6d3e399）。
+
+> 2026-09-23 第 24 项记录第九轮 ACK 合并（3 提交）与构建/打包校验；2026-09-20 第 23 项记录第八轮 ACK 合并、构建/打包校验与 DDL 持久化保护；2026-09-11 第 22 项记录 DDL 越界写重启定位与 LXC 补丁重移植（含刷机验证 `#47`）；此前维护记录中的真机验证结论仍按各自日期有效。
 
 > 2026-08-06 已清洗全部远程提交正文中的 Claude Code `Co-Authored-By` trailer 并重写历史：3 个定制提交与 3 个合并提交 hash 变更（ReKernel-X `3eb91d7cace`、BBG `cc7887d802`、Droidspaces `605e6859e4`、ACK 两轮 `be9610f4683`/`4860642a0474`、whitewhale 同步 `656ece04bd3`），上游 ack/origin 历史 hash 不变；已强制推送到 `github`。
 
@@ -315,4 +321,4 @@ Issue 与 spec 以 markdown 文件存放在 `.scratch/<feature>/`（本地追踪
 ### Domain docs
 
 单上下文：根目录 `CONTEXT.md` + `docs/adr/`。See `docs/agents/domain.md`.
-- `CONTEXT.md` 已于 2026-08 由 grill-with-docs 会话创建（首批定案术语：泛化压榨/纯体感、配置层/源码层、稳定优先、KMI 红线、刻意配置），经 `git add -f` 纳入 `/home/wcoom` 根仓库（提交 `5b4cb5e`）；`docs/adr/` 已有 ADR-0001（源码层准入：允许原创内核改动），词汇表增补体感锚点/浸泡期/源码层准入（根仓库提交 `d420b45`）
+- `CONTEXT.md` 已于 2026-08 由 grill-with-docs 会话创建（首批定案术语：泛化压榨/纯体感、配置层/源码层、稳定优先、KMI 红线、刻意配置），经 `git add -f` 纳入 `/home/wcoom/桌面` 根仓库（提交 `5b4cb5e`）；`docs/adr/` 已有 ADR-0001（源码层准入：允许原创内核改动），词汇表增补体感锚点/浸泡期/源码层准入（根仓库提交 `d420b45`）

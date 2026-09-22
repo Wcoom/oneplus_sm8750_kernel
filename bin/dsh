@@ -11,7 +11,7 @@
 # 依赖仓库相对路径，故必须先 cd 到仓库目录再执行。
 set -euo pipefail
 
-HARNESS_DIR="/home/wcoom/deepseek-harness"
+HARNESS_DIR="/home/wcoom/桌面/deepseek-harness"
 WEB_URL="http://127.0.0.1:3080"
 LOG_DIR="${HOME}/.dsh/logs"
 

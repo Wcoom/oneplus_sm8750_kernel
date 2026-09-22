@@ -1,4 +1,4 @@
-# /home/wcoom 工作区记忆（CLAUDE.md）
+# /home/wcoom/桌面 工作区记忆（CLAUDE.md）
 
 > 本文件是 Claude Code 会话启动时**自动读取**的工作区持久记忆（项目级 `./CLAUDE.md`）。
 > 目的：让每个新会话快速恢复上下文 —— 目录结构、Claude Code 运行环境与操作惯例、内核工程工作流。
@@ -31,7 +31,7 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 - **本体**：`/root/.local/bin/claude`（native 安装，v2.1.233；`claude --version` 可查）
 - **Go 工具链**：`/usr/local/go/bin/go`（go1.24.6，2026-08 安装）；本机外网受限，Go 模块必须用 `GOPROXY=https://goproxy.cn,direct`；pddump 项目的 Linux/Windows 构建与测试均依赖此工具链
 - **用户级配置**：`/root/.claude/settings.json`；全局状态：`/root/.claude.json`
-- **项目级权限白名单**：`/home/wcoom/oplus13/.claude/settings.local.json`（已授权 `Bash(git *)`、`Bash(curl *)`、`Bash(gh *)`、`Bash(python3 *)` 等，免确认执行）
+- **项目级权限白名单**：`/home/wcoom/桌面/oplus13/.claude/settings.local.json`（已授权 `Bash(git *)`、`Bash(curl *)`、`Bash(gh *)`、`Bash(python3 *)` 等，免确认执行）
 - **API 路由**：DeepSeek 中转（`ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`，key 在 settings.json 的 `ANTHROPIC_AUTH_TOKEN`）
 - **模型映射**：`haiku → deepseek-flash`；`sonnet/opus → deepseek-v4-pro[1M]`；`CLAUDE_CODE_EFFORT_LEVEL=max`；自动压缩窗口 786432（2026-09-10 起默认与 haiku 映射由旧名 `deepseek-v4-flash` 改为现行名 `deepseek-flash`，见 §7「模型名与官方文档对齐」）
 - **默认语言**：简体中文（全局偏好，见 `/root/.claude/CLAUDE.md`）
@@ -39,7 +39,7 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 ## 4. Skills 插件：mattpocock-skills（已引入并启用）
 
 - **状态**：`mattpocock-skills@claude-plugins-official` **v1.2.3 已安装且 enabled**（`claude plugins list` 确认）
-- **来源**：https://github.com/mattpocock/skills（本地副本：`/home/wcoom/mattpocock-skills/`）
+- **来源**：https://github.com/mattpocock/skills（本地副本：`/home/wcoom/桌面/mattpocock-skills/`）
 - **安装位置**：`/root/.claude/plugins/cache/claude-plugins-official/mattpocock-skills/1.2.3/`（官方 marketplace 托管，自动随上游更新）
 - **25 个技能**（`claude plugin details mattpocock-skills` 可查清单）：
   - **入口/路由器**：`ask-matt`（先问它，按任务路由到具体技能）
@@ -61,13 +61,13 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 
 ## 5. 常用操作速查（内核工程）
 
-- **构建内核**：`bash /home/wcoom/内核构建.sh`（增量编译，**禁止随意 `make clean`**；ccache 位于 `oplus13/.ccache`，容量 5G）
-- **打包刷机包**：`bash /home/wcoom/dabao.sh` → `AnyKernel3-<Image时间戳>.zip`（如 `AnyKernel3-20260811-1523.zip`）
-- **ACK 月度维护**：按 `/home/wcoom/oplus13/ACK维护任务书.md` 执行（`.maintenance/state.json` 幂等断点续跑；红线：GKI ABI/KMI 不可破坏，禁止 `-X ours/-X theirs`）
-- **内核源码**：`/home/wcoom/oplus13/android_kernel_common_oneplus_sm8750`，分支 `6.6.118-13T`
+- **构建内核**：`bash /home/wcoom/桌面/内核构建.sh`（增量编译，**禁止随意 `make clean`**；ccache 位于 `oplus13/.ccache`，容量 5G）
+- **打包刷机包**：`bash /home/wcoom/桌面/dabao.sh` → `AnyKernel3-<Image时间戳>.zip`（如 `AnyKernel3-20260811-1523.zip`）
+- **ACK 月度维护**：按 `/home/wcoom/桌面/oplus13/ACK维护任务书.md` 执行（`.maintenance/state.json` 幂等断点续跑；红线：GKI ABI/KMI 不可破坏，禁止 `-X ours/-X theirs`）
+- **内核源码**：`/home/wcoom/桌面/oplus13/android_kernel_common_oneplus_sm8750`，分支 `6.6.118-13T`
   - 远程：`origin`（上游 whitewhale0612，只拉勿推）、`ack`（google googlesource 官方源）、`github`（个人仓库 Wcoom/oneplus_sm8750_kernel，SSH ed25519 推送）
-- ⚠️ **DDL 越界写重启（2026-09-11 定位，根因在 OEM vendor 模块）**：源码修复在 `op_mods` 提交 `a772844`；因当前缺少完整 OEM `kernel/oplus_cpu` 源码，暂不能安全重编 vendor_boot 中的永久模块。已用 `op_mods` 提交 `53674b4` 的 KernelSU `service.d` 脚本持久执行 `echo 0 > /proc/oplus_scheduler/sched_assist/sched_ddl_enabled`，设备当前值为 `0`。取证靠 qcom minidump（pstore console-ramoops 已损坏）；机制、证据与全部待办见 `/home/wcoom/oplus13/CLAUDE.md` 第 22/23 项；证据目录 `oplus13/.scratch/crash-20260911/`
-- **详细内核项目上下文**（五项定制、ABI 红线守点、ZRAM 配置注意事项等）见 `/home/wcoom/oplus13/CLAUDE.md`
+- ⚠️ **DDL 越界写重启（2026-09-11 定位，根因在 OEM vendor 模块）**：源码修复在 `op_mods` 提交 `a772844`；因当前缺少完整 OEM `kernel/oplus_cpu` 源码，暂不能安全重编 vendor_boot 中的永久模块。已用 `op_mods` 提交 `53674b4` 的 KernelSU `service.d` 脚本持久执行 `echo 0 > /proc/oplus_scheduler/sched_assist/sched_ddl_enabled`，设备当前值为 `0`。取证靠 qcom minidump（pstore console-ramoops 已损坏）；机制、证据与全部待办见 `/home/wcoom/桌面/oplus13/CLAUDE.md` 第 22/23 项；证据目录 `oplus13/.scratch/crash-20260911/`
+- **详细内核项目上下文**（五项定制、ABI 红线守点、ZRAM 配置注意事项等）见 `/home/wcoom/桌面/oplus13/CLAUDE.md`
 
 ### mihomo 工程速查（2026-08-29 起）
 
@@ -87,7 +87,7 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 - 不入库：构建产物（out/、*.zip、Image）、ccache、密钥（遵守 .gitignore；内核仓库 `.maintenance/` 需 `git add -f`）
 - 破坏性命令（`push --force`、`reset --hard`、`clean -fd`、`branch -D`、`checkout .` 等）执行前必须向用户说明并获得确认
 - 里程碑打 tag；大轮合并前建备份分支；ABI/KMI 相关提交先经 `subagent_review` 审核
-- **工作区根仓库**：`/home/wcoom` 已 `git init`（2026-08-15），管理根目录脚本与记忆文档（`内核构建.sh`、`dabao.sh`、`CLAUDE.md` 等），`.gitignore` 排除各子项目与构建产物；子项目各有自己的仓库（内核、harness、mattpocock-skills）
+- **工作区根仓库**：`/home/wcoom/桌面` 已 `git init`（2026-08-15），管理根目录脚本与记忆文档（`内核构建.sh`、`dabao.sh`、`CLAUDE.md` 等），`.gitignore` 排除各子项目与构建产物；子项目各有自己的仓库（内核、harness、mattpocock-skills）
 
 ## 7. DSH 接管（Claude 继任者 preset）
 
@@ -125,7 +125,7 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 
 ### dsh 命令与多端产品子代理（2026-08-28 起生效）
 
-- **全局 `dsh` 命令**：`/usr/local/bin/dsh` → `/home/wcoom/bin/dsh`（脚本在根仓库，git 管理）。`dsh` 一键启动 Web GUI（已在运行则直接开浏览器）；`dsh --bg` 后台启动（日志 `~/.dsh/logs/`）；`dsh stop` 一键停止全部 DSH 实例（SIGTERM 进程组优雅退出，10s 超时强杀）；其余参数透传 DSH CLI（如 `dsh --profile tui`）
+- **全局 `dsh` 命令**：`/usr/local/bin/dsh` → `/home/wcoom/桌面/bin/dsh`（脚本在根仓库，git 管理）。`dsh` 一键启动 Web GUI（已在运行则直接开浏览器）；`dsh --bg` 后台启动（日志 `~/.dsh/logs/`）；`dsh stop` 一键停止全部 DSH 实例（SIGTERM 进程组优雅退出，10s 超时强杀）；其余参数透传 DSH CLI（如 `dsh --profile tui`）
 - **多端产品子代理**（rc.8 的 profile-bundle 机制）：web profile 已装 `@deepseek-ai/dsh-subagent-claude-code` + `@deepseek-ai/dsh-subagent-codex`（link: 指向本地 checkout，与源码版本一致），bundle 层在 Host 平面注册提供方
 - **三个命名实例**（`/root/.dsh/profiles/web/cordis.patch.yml`，非交互权限模式）：`claude-code`（acceptEdits 编码）、`codex`（approve-for-me 自动评审 + workspace-write）、`claude-code-audit`（plan 只读审计）。claude-successor preset 对应暴露 `subagent_claude_code` / `subagent_codex` / `subagent_claude_code_audit` 三个工具，`enableRunInBackground: true` 支持后台并行委派（配合 `job_output`/`job_kill` 做同时多端工作）
 - **继任者模式集成**：claude-successor 的 persona 已内置「多端产品子代理」分工段落——编码委派 Claude Code/Codex、审计走 audit 实例、后台并行策略、与 spawn/fork 及 subagent_review 的分工边界、ABI/KMI 红线绝不委派（agent.cordis.yml 的 persona text 与 preset.yml 描述已同步，commit e68bf23）
@@ -156,10 +156,10 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 ### 生成类模型接入（图像 / 视频，2026-09-11 起生效）
 
 - **背景**：中转 `/v1/models` 从 13 个涨到 24 个，新增的 `seedance-2.0/2.5-*`、`veo3.1-time`、`wan-3.0-time`、`minimax-h3-time` 都是生成类模型而非对话模型：实测在 `/v1/responses` 上返回 500，所以**不能**塞进 `llm-pi-ai` 的 models 列表（只会让模型选择器多出必然失败的项）
-- **方案**：新增零依赖 stdio MCP 服务器 `/home/wcoom/dsh-media-mcp/server.mjs`（提交 `1d17b0d`，文档见同目录 README.md），经 `@deepseek-ai/dsh-mcp-client` 挂载，暴露 `mcp__media__generate_image` 与 `mcp__media__generate_video` 两个工具；挂载行在 `/root/.dsh/profiles/web/cordis.patch.yml`（提交 `d4f5c72`）
+- **方案**：新增零依赖 stdio MCP 服务器 `/home/wcoom/桌面/dsh-media-mcp/server.mjs`（提交 `1d17b0d`，文档见同目录 README.md），经 `@deepseek-ai/dsh-mcp-client` 挂载，暴露 `mcp__media__generate_image` 与 `mcp__media__generate_video` 两个工具；挂载行在 `/root/.dsh/profiles/web/cordis.patch.yml`（提交 `d4f5c72`）
 - ⚠️ **patch 层的语法坑**：`- id: <name>` 是**按 id 覆盖已有行**，新增行必须写成 `- insert:` 列表；写成前者会报 `patch: entry "..." not found`
 - ⚠️ **必配项**：`toolCallTimeoutMs: 1500000`（25 分钟）。视频是异步任务，实测 4 秒片约 8 分钟，mcp-client 默认的 60 秒会在任务完成前掐断调用
-- **凭据**：服务器优先读环境变量 `FASTAI_API_KEY`，否则读 DSH 凭据库 `/root/.dsh/.credentials.yaml` 的 `FASTAI_OPENAI_API_KEY`；配置与仓库里都不含密钥；产物默认落 `/home/wcoom/media-out`（已在根仓库 .gitignore 忽略）
+- **凭据**：服务器优先读环境变量 `FASTAI_API_KEY`，否则读 DSH 凭据库 `/root/.dsh/.credentials.yaml` 的 `FASTAI_OPENAI_API_KEY`；配置与仓库里都不含密钥；产物默认落 `/home/wcoom/桌面/media-out`（已在根仓库 .gitignore 忽略）
 - **中转生成协议（实测）**：图像走 `POST /v1/images/generations`（OpenAI 兼容，一次性返回 `data[].url`，`gpt-image-2` 十几秒出 1024×1024；缺 prompt 时它返回 500 而不是 400）；视频走 Sora 风格异步任务——`POST /v1/videos` 返回 202 + `{id, status, progress}`，轮询 `GET /v1/videos/<id>`，终态对象带 `video_url` / `result_url` / `download_url`（火山 VOD 签名链接，约 24 小时有效）；**`GET /v1/videos/<id>/content` 不可用**（404 `Videos API is not supported for this platform`）；`GET /v1/videos` 无列表端点（404），任务只能按 id 查
 - **模型可用性**：`gpt-image-2` 可用（默认）、`seedance-2.0-pro-token` 可用（默认，4 秒片约 8.7 万 tokens）、`veo3.1-time` 可建任务；`seedance-2.0-time`、`seedance-2.0-token`、`seedance-2.5-token`、`wan-3.0-time`、`minimax-h3-time` 在中转侧报 400 `MEDIA_COUNT_UNAVAILABLE`（它自己没有可用账号）
 - **网络注意**：该中转会偶发中断连接（表现为 `fetch failed`，重试即好），服务器已对网络层失败自动重试 2 次；`node fetch` 直连正常，无需代理

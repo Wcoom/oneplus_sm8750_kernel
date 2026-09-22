@@ -4,9 +4,9 @@
 
 set -e
 
-KERNEL_DIR="/home/wcoom/oplus13/android_kernel_common_oneplus_sm8750"
+KERNEL_DIR="/home/wcoom/桌面/oplus13/android_kernel_common_oneplus_sm8750"
 SOURCE_FILE="$KERNEL_DIR/out/arch/arm64/boot/Image"
-TARGET_DIR="/home/wcoom/oplus13/AnyKernel3-6.6.112-NOKSU-OnePlus8Elite"
+TARGET_DIR="/home/wcoom/桌面/oplus13/AnyKernel3-6.6.112-NOKSU-OnePlus8Elite"
 
 if [ ! -f "$SOURCE_FILE" ]; then
     echo "错误: 未找到 Image，请先编译内核: $SOURCE_FILE"

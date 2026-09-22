@@ -40,7 +40,7 @@
 ## 2. 仓库拓扑与远程配置（已配置完毕，核对即可）
 
 ```bash
-cd /home/wcoom/oplus13/android_kernel_common_oneplus_sm8750
+cd /home/wcoom/桌面/oplus13/android_kernel_common_oneplus_sm8750
 
 git remote -v    # 维护相关三个：
 # ack     https://android.googlesource.com/kernel/common     （官方源，勿用 GitHub 镜像）
@@ -70,7 +70,7 @@ curl -s "https://android.googlesource.com/kernel/common/+log/refs/heads/android1
 ### 4.1 准备检查
 
 ```bash
-cd /home/wcoom/oplus13/android_kernel_common_oneplus_sm8750
+cd /home/wcoom/桌面/oplus13/android_kernel_common_oneplus_sm8750
 git branch --show-current                      # 必须 6.6.118-13T
 git status --short                             # 必须干净，禁止带脏合并
 test -f .maintenance/state.json || echo "!! 缺状态文件"
@@ -132,13 +132,13 @@ grep -n "^SUBLEVEL" Makefile                                             # 应�
 ### 4.6 构建验证
 
 ```bash
-bash /home/wcoom/内核构建.sh     # clang-19 + ccache 伪装，增量编译，勿加 make clean
+bash /home/wcoom/桌面/内核构建.sh     # clang-19 + ccache 伪装，增量编译，勿加 make clean
 ```
 
 编译后核验：
 
 ```bash
-cd /home/wcoom/oplus13/android_kernel_common_oneplus_sm8750
+cd /home/wcoom/桌面/oplus13/android_kernel_common_oneplus_sm8750
 strings out/arch/arm64/boot/Image | grep -m1 "6\.6\."      # 版本号（应 6.6.118-4k-g<sha>）
 strings out/vmlinux | grep -c ntsync                        # 当前应为 97（含 ntsync_fixup）
 grep -E "FQ_GUARD|REKERNEL_X|NTSYNC|^CONFIG_BBG|SYSVIPC" out/.config
@@ -154,10 +154,10 @@ grep -E "FQ_GUARD|REKERNEL_X|NTSYNC|^CONFIG_BBG|SYSVIPC" out/.config
 git add -f .maintenance/           # ⚠️ 必须 -f
 git commit -m "月度维护 YYYY-MM：ACK 合并 <n> 提交"
 git push github 6.6.118-13T        # 回退场景用 --force-with-lease
-bash /home/wcoom/dabao.sh          # 打包刷机包
+bash /home/wcoom/桌面/dabao.sh          # 打包刷机包
 ```
 
-**收尾必做**：更新 `/home/wcoom/oplus13/CLAUDE.md`（本次维护记录）。
+**收尾必做**：更新 `/home/wcoom/桌面/oplus13/CLAUDE.md`（本次维护记录）。
 
 ### 4.8 月度报告模板
 

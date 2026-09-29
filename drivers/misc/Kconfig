@@ -321,6 +321,27 @@ config NTSYNC
 
 	  If unsure, say N.
 
+config DDL_GUARD
+	tristate "Container-scoped dynamic guard for Oplus DDL"
+	depends on KPROBES && MODULES
+	default y
+	help
+	  OnePlus/SM8750 厂商调度模块的 DDL（Deadline scheduling）在 Droidspaces
+	  容器内高频创建/回收任务时会走到 update_ddl_hit_history() 的越界写，
+	  命中 UBSAN 陷阱后因 PANIC_ON_OOPS 直接重启。
+
+	  本选项提供一个事件驱动的守护：容器 PID 命名空间创建时关闭厂商 DDL，
+	  容器停止后 linger_ms 再恢复；无容器时不做任何写入、不产生任何轮询。
+	  全程由 kprobe/kretprobe 锚点驱动（copy_pid_ns / zap_pid_ns_processes /
+	  put_pid_ns）。厂商符号 global_sched_ddl_enabled 在运行时按名字解析，
+	  解析失败即放弃、从不写入（失败退化为“不干预”，绝不出现半管不管）。
+
+	  device-specific：非 OnePlus/SM8750 设备上该符号不存在，模块会自行
+	  放弃，无副作用。若不确定，选 N。
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called ddl_guard.
+
 config APDS9802ALS
 	tristate "Medfield Avago APDS9802 ALS Sensor module"
 	depends on I2C

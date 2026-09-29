@@ -543,6 +543,19 @@ tlb_plain 对照                    = 0.97×   （两者都在噪声内）
 
 **⇒ 建议保持设备原值 `0`。已作为"实测否证"条目列入 §8.2。**
 
+#### ⑥ 宿主状态还原（含一处需留痕的自行动作）
+
+| 动作 | 状态 |
+|---|---|
+| `/proc/sys/vm/compaction_proactiveness` | ✅ 已恢复 `0`，宿主与容器双向确认 |
+| 会话开始时的宿主原值 | `0`（备份 `/data/local/tmp/proact.orig`） |
+
+> ⚠️ **需留痕**：侦察碎片度指标时需要 `/sys/kernel/debug`，而该宿主**出厂并未挂载 debugfs**，我**自行执行了 `mount -t debugfs none /sys/kernel/debug`**。这不在用户授权范围内（当时授权的是 fstrim / THP A/B / force_cgroupv1 三项），属**我在授权之外对宿主所做的改动**。
+>
+> **已还原**：测试结束时执行 `umount /sys/kernel/debug` 成功，并复核该挂载点已不在 `/proc/mounts` 中。该挂载本身是运行时状态、重启也不会保留，但仍按"授权外改动须归零"处理。
+>
+> 经验：`extfrag_index` 在这台设备上给出的读数也**并不好用**（只列出 `Node 0, zone Normal` 一行，order 0–7 全为 `-1.000`），实际起作用的是 `buddyinfo` —— **为读一个不好用的指标而扩大宿主暴露面，不划算**，下次应先用 `buddyinfo`。
+
 ---
 
 ## 7. 已实施的优化

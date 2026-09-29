@@ -867,3 +867,62 @@ CONFIG_NETFILTER_XT_TARGET_LOG=y
 CONFIG_NETFILTER_XT_MATCH_RECENT=y
 CONFIG_NTSYNC=y
 CONFIG_DDL_GUARD=y
+
+# --- nftables 家族（Droidspaces 官方文档 Kernel-Configuration.md 要求）---
+# 用途：Ubuntu 26.04 的 ufw / nft / iptables-nft 默认后端就是 nf_tables，
+# 缺任何一项都会让对应的规则集加载返回 EOPNOTSUPP。
+# 全部写 =y：本机只刷 Image、不带 modules，=m 在设备上无法加载。
+# 两处刻意不启用，且都必须是“不启用”：
+#   ① CONFIG_NFT_FLOW_OFFLOAD —— 依赖的 NETFILTER_INGRESS 未开启，
+#      且硬件流卸载对手机无实际用途。
+#   ② CONFIG_NF_TABLES_BRIDGE —— 它会 select NETFILTER_FAMILY_BRIDGE，
+#      而该项在 include/net/netns/netfilter.h 里给 struct netns_nf 增加
+#      hooks_bridge[NF_INET_NUMHOOKS]（5×8=40 字节）。struct netns_nf 在
+#      include/net/net_namespace.h:152 是按值内嵌进 struct net 的，一旦
+#      开启，struct net 里 nf 之后的所有字段（ct / gen / ext / xfrm /
+#      net_cookie / smc …）偏移整体后移 40 字节，与 OEM 预编译 vendor
+#      模块编译时的布局不一致 —— 属于真正的 kABI 破坏，会开机失败。
+#      （对照：CONFIG_NF_TABLES 本身是安全的，因为 net_namespace.h:167
+#        用的是 struct net_ext *ext 指针间接层，布局零变化。）
+#      桥族 nftables 只服务于 L2 网桥防火墙（docker/libvirt 的 bridge），
+#      本容器走 host 网络命名空间用不到；ufw/iptables-nft 用 inet 族。
+#      这与“文档里 BRIDGE_NETFILTER 一项同样不启用”的既有裁决一致。
+# 地址族（inet 会 select IPv4+IPv6，此处仍显式写出以便审阅）
+CONFIG_NF_TABLES=y
+CONFIG_NF_TABLES_INET=y
+CONFIG_NF_TABLES_IPV4=y
+CONFIG_NF_TABLES_IPV6=y
+CONFIG_NF_TABLES_ARP=y
+CONFIG_NF_TABLES_NETDEV=y
+# CONFIG_NF_TABLES_BRIDGE is not set
+# 表达式
+CONFIG_NFT_CT=y
+CONFIG_NFT_LOG=y
+CONFIG_NFT_LIMIT=y
+CONFIG_NFT_NUMGEN=y
+CONFIG_NFT_QUEUE=y
+CONFIG_NFT_QUOTA=y
+CONFIG_NFT_CONNLIMIT=y
+CONFIG_NFT_SYNPROXY=y
+CONFIG_NFT_TUNNEL=y
+CONFIG_NFT_XFRM=y
+CONFIG_NFT_SOCKET=y
+CONFIG_NFT_TPROXY=y
+CONFIG_NFT_OSF=y
+CONFIG_NFT_HASH=y
+CONFIG_NFT_NAT=y
+CONFIG_NFT_MASQ=y
+CONFIG_NFT_REDIR=y
+CONFIG_NFT_REJECT=y
+CONFIG_NFT_REJECT_NETDEV=y
+CONFIG_NFT_COMPAT=y
+CONFIG_NFT_DUP_IPV4=y
+CONFIG_NFT_DUP_IPV6=y
+CONFIG_NFT_DUP_NETDEV=y
+CONFIG_NFT_FWD_NETDEV=y
+CONFIG_NFT_FIB_IPV4=y
+CONFIG_NFT_FIB_IPV6=y
+CONFIG_NFT_FIB_INET=y
+CONFIG_NFT_FIB_NETDEV=y
+# CONFIG_NFT_BRIDGE_META / CONFIG_NFT_BRIDGE_REJECT 属桥族，随
+# CONFIG_NF_TABLES_BRIDGE 一并停用（原因见上）。

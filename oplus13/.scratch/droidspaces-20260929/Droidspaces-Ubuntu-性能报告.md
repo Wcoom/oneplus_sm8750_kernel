@@ -1883,6 +1883,270 @@ Android 的 **LMKD 依据 `/apps` 的压力来决定杀哪个应用**。
 ⚠️ 注意这一项**与已裁决的第 2 项相邻但不同** —— `--rootfs=PATH` 改的是**容器根文件系统**
 （改变隔离模型，已裁决不动），而这里改的只是**产物目录**，不影响隔离模型。
 
+---
+
+### 11.L Droidspaces 官方文档 `Kernel-Configuration.md` 全量核对与 nftables 落地（2026-09-30）
+
+**触发**：用户要求「根据官方文档，开启所有文档内列出的配置」，中途追加「文档内的 kabi 补丁检查内核如果没有打，请补上补丁」。
+
+**证据链**：文档已存档 `raw/r6-droidspaces-kernel-configuration.md`（373 行，12183 字节，
+`raw.githubusercontent.com` 经 WSL 代理 `127.0.0.1:7897` 取得）；4 个候选 kABI 补丁存档
+`raw/r6-kabi-patches/`；配置快照 `raw/r3-out-config-加nftables前-20260930.txt`（改动前）、
+`raw/r5-out-config-撤桥族-20260930.txt`（最终）。
+
+#### 11.L.1 文档实际是两条互斥路径，不是一个清单
+
+| 路径 | 章节 | 内容 |
+|---|---|---|
+| **non-GKI** | Step 1「Mandatory configuration」+ Step 2「Firewall support (UFW/Fail2ban) - optional」 | 去重后 **71 项** CONFIG |
+| **GKI** | Step 1「Apply the mandatory kABI patches」+ Step 2「Edit `gki_defconfig`」 | **kABI 补丁 + 16 项** CONFIG |
+
+⚠️ GKI 段有两条**明文禁令**，是本轮全部判断的前提：
+
+> 「**Do not** enable anything beyond the GKI configuration below. These specific options
+> are kABI-safe only in combination with the Step 1 patch.」（第 226–228 行）
+
+> 「Do not use separate fragment files here. Edit `arch/arm64/configs/gki_defconfig`
+> directly.」（第 222 行）
+
+⇒ 文档只承诺**它自己那 16 项**在打补丁后 kABI 安全，**这个承诺不外推到 71 项非 GKI 清单**。
+
+#### 11.L.2 kABI 补丁核查：**已打，且正是文档推荐的那一个**
+
+文档要求 below-6.12 应用 `001.GKI-below-6.12-fix_sysvipc_kabi_*.patch`，并提示
+「Start with `6_7_8`；若开机失败再试 `1_2_3` 或 `3_4_5`」。本内核实测：
+
+| 证据 | 位置 | 内容 |
+|---|---|---|
+| 原始字段已注释 | `include/linux/sched.h:1080-1081` | `// struct sysv_sem sysvsem;` / `// struct sysv_shm sysvshm;` |
+| 迁移到 KABI 槽位 | `include/linux/sched.h:1535-1536` | `ANDROID_KABI_USE(6, struct sysv_sem sysvsem);` + `_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(7); ANDROID_KABI_RESERVE(8), struct sysv_shm sysvshm);` |
+| 机制已启用 | `out/.config` | `CONFIG_ANDROID_KABI_RESERVE=y` |
+
+- **为什么必须是 `6_7_8` 而不是 `1_2_3`**：槽位 1、2 **已被 ACK 自己占用**
+  （`ANDROID_KABI_USE(1, struct task_dma_buf_info *dmabuf_info)`、`ANDROID_KABI_USE(2, struct { unsigned user_dumpable:1; })`
+  —— `sched.h:1524-1528`）。套用 `1_2_3` 会**覆盖 ACK 现有字段**，文档把它列为"先试项"是因为它不知道各家树里哪些槽位已被占用。
+  ⇒ **本内核的槽位占用情况决定了唯一正确解就是 `6_7_8`，而它已经打上了。**
+- **引入来源**：本内核 git 提交 **`605e6859e48e Droidspaces: 启用 Droidspaces 容器`**。
+- **`002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch` 不需要**：文档明写仅适用 5.10 及以下（第 204–207 行），本内核 6.6.118。
+
+✅ **结论：kABI 补丁一项不缺，无需任何动作。**
+
+#### 11.L.3 GK2（`gki_defconfig`）16 项：**15 项已满足，第 16 项是文档笔误**
+
+| # | 文档所列符号 | `out/.config` 现状 |
+|---|---|---|
+| 1 | `CONFIG_SYSVIPC` | `=y` |
+| 2 | `CONFIG_POSIX_MQUEUE` | `=y` |
+| 3 | `CONFIG_IPC_NS` | `=y` |
+| 4 | `CONFIG_PID_NS` | `=y` |
+| 5 | `CONFIG_DEVTMPFS` | `=y` |
+| 6 | `CONFIG_NETFILTER_XT_MATCH_ADDRTYPE` | `=y` |
+| 7 | `CONFIG_USER_NS` | `=y` |
+| 8 | `CONFIG_NETFILTER_XT_TARGET_REJECT` | ⚠️ **该符号在 Linux 6.6 不存在** |
+| 9 | `CONFIG_NETFILTER_XT_TARGET_LOG` | `=y` |
+| 10 | `CONFIG_NETFILTER_XT_MATCH_RECENT` | `=y` |
+| 11 | `CONFIG_IP_SET` | `=y` |
+| 12 | `CONFIG_IP_SET_HASH_IP` | `=y` |
+| 13 | `CONFIG_IP_SET_HASH_NET` | `=y` |
+| 14 | `CONFIG_NETFILTER_XT_SET` | `=y` |
+| 15 | `CONFIG_TMPFS_POSIX_ACL` | `=y` |
+| 16 | `CONFIG_TMPFS_XATTR` | `=y` |
+
+⚠️ **第 8 项是文档的符号名错误（C-17）**：Linux 从未有 `CONFIG_NETFILTER_XT_TARGET_REJECT`。
+文档想表达的 `xt_REJECT` 目标，在 6.6 里的真实符号是 **`CONFIG_IP_NF_TARGET_REJECT`**
+（`net/ipv4/netfilter/Kconfig:183`），**本内核已是 `=y`**。
+⇒ **按语义核对，GKI 段 16/16 全部满足，`gki_defconfig` 无需为此段做任何改动。**
+
+#### 11.L.4 全量核对：71 项非 GKI 清单里，真正缺的只有 5 项
+
+| 分类 | 数量 | 明细 |
+|---|---|---|
+| 已 `=y`（基线即满足） | ~60 | 含 namespace 全家族、cgroup 全家族、xtables 常用 match/target、`IP_SET*` |
+| **Linux 6.6 已移除**（文档遗留项） | 4 | `IP_NF_TARGET_ULOG`、`NF_CONNTRACK_IPV4`、`NF_NAT_IPV4`、`NF_CONNTRACK_NETLINK` |
+| 全树不存在（等同文档要求的 `=n`） | 1 | `ANDROID_PARANOID_NETWORK` |
+| **真正缺失** | **5** | `CGROUP_PIDS`、`CGROUP_DEVICE`、`BRIDGE_NETFILTER`、**`NF_TABLES` 及家族**、`FW_LOADER_COMPRESS` |
+
+> ⚠️ **口径提示**：这 5 项**含 `NF_TABLES` 及家族**（已在 11.L.5~11.L.8 落地），
+> 故本轮之后待决的只剩 **4 项**。后续引用"缺 5 项"时勿重复计入 `NF_TABLES`。
+> 4 项中 `FW_LOADER_COMPRESS` 已在 11.L.10 落地，另 3 项经 ABI 基线证否、维持不启用。
+
+#### 11.L.5 用户裁决：只补 `NF_TABLES` 及家族
+
+**动机**：Ubuntu 26.04 的 `ufw` / `nft` / `iptables-nft` **默认后端就是 nf_tables**，
+缺任何一项都会让对应规则集加载返回 `EOPNOTSUPP`。这是"容器内日常操作能不能跑"的
+**功能完整性**问题，不是性能项。
+
+**用户明确不改的 4 项**（与本轮全部结论一并留档）：`CGROUP_PIDS`、`CGROUP_DEVICE`、
+`BRIDGE_NETFILTER`、`FW_LOADER_COMPRESS`。
+
+> **后续变更（见 11.L.10）**：`FW_LOADER_COMPRESS` 已于同日经 ABI 核查后启用（零布局变化）；
+> 另 3 项经 ACK ABI 基线证否，用户裁决**继续维持不启用**。
+
+全部写 `=y` 而非 `=m`：**本机只刷 Image、不带 modules**，`=m` 在设备上无法加载。
+
+#### 11.L.6 ⚠️ 本轮最关键的技术判断：ABI 安全必须逐个门控点验，不能采信"文档说安全"
+
+文档对非 GKI 清单**没有**任何 kABI 承诺，而 nftables 家族恰恰来自那份清单。
+故本轮**没有**直接抄清单就编译，而是对新增的每一个符号做了**穷举式门控点核查**：
+`grep` 该符号在 `include/` 与 `arch/arm64/include/` 中的**全部** `#if` 出现点，
+逐一判定它是**代码门控**（安全）还是**结构体成员门控**（需进一步判定）。
+
+核查结果分成两类，**结论相反**：
+
+**✅ 安全的一类（3 个）**
+
+| 门控点 | 依赖配置 | 为何安全 |
+|---|---|---|
+| `struct net.ext`（`net_namespace.h:167`） | `NF_TABLES` | `ext` 是 **`struct net_ext *` 指针**；`netns_nftables` 单独分配（`net_ext` 定义在 `net_namespace.h:57-63`）。**开 `NF_TABLES` 只让 `struct net_ext` 由不完全类型变为完整类型，指针大小不变 ⇒ `struct net` 布局零变化。** 这个间接层正是 ACK 为"nftables 可自由开关"设计的 |
+| `struct net.netns_ft ft`（`net_namespace.h:156`） | `NF_FLOW_TABLE` | 核查确认它**仍是 `n`**（`# CONFIG_NF_FLOW_TABLE is not set`）⇒ 该成员不出现 |
+| `struct sk_buff.nf_trace:1`（`skbuff.h:972`） | `NETFILTER_XT_TARGET_TRACE \|\| NF_TABLES` | 是 `\|\|` 条件：**`NETFILTER_XT_TARGET_TRACE` 改动前后都是 `=y`** ⇒ 该比特位**本来就在**，`NF_TABLES` 开了也不变 |
+
+**🔴 危险的一类（1 个，已撤销）**
+
+| 门控点 | 依赖配置 | 后果 |
+|---|---|---|
+| `struct netns_nf.hooks_bridge[NF_INET_NUMHOOKS]`（`include/net/netns/netfilter.h:28-30`） | `NETFILTER_FAMILY_BRIDGE` | **`struct netns_nf` 在 `net_namespace.h:152` 是按值内嵌进 `struct net` 的**（不是指针）。该成员为 5×8 = **40 字节**，一旦启用，`struct net` 中 `nf` 之后的**全部字段**（`ct` / `wext_nlevents` / `gen` / `bpf` / `ext` / `xfrm` / `net_cookie` / `ipvs` / `mpls` / `can` / `xdp` / `mctp` / `smc` …）**偏移整体后移 40 字节** |
+
+`NETFILTER_FAMILY_BRIDGE` 的 select 者全树只有三个：
+`BRIDGE_NETFILTER`（基线 `is not set`）、`BRIDGE_NF_EBTABLES`（依赖 `BRIDGE`，未开）、
+以及本次开启的 `NF_TABLES_BRIDGE`。**基线该符号在 `.config` 中根本不出现（= 关闭）**，
+而 `struct net` 是 OEM 预编译 vendor 模块（wifi/GPU/相机）大量解引用的核心结构
+⇒ **这是一次真实的 kABI 破坏，属于"会开机失败"的那一类，与本轮 §10 的判据同源。**
+
+**⇒ 处理：从改动中撤销 `CONFIG_NF_TABLES_BRIDGE`，并连带撤销其下属的
+`CONFIG_NFT_BRIDGE_META` / `CONFIG_NFT_BRIDGE_REJECT`**（这两项在 Kconfig 里位于
+`if NF_TABLES_BRIDGE` 内），在 `gki_defconfig` 中写成显式 `# CONFIG_NF_TABLES_BRIDGE is not set`
+并附机制说明，避免后续会话"补全"它。**功能上无损失**：桥族 nftables 只服务于
+**L2 网桥防火墙**（docker/libvirt 的 bridge），本容器走 host 网络命名空间用不到；
+`ufw`/`iptables-nft` 用的是 **inet 族**。这也与用户已裁决的 `BRIDGE_NETFILTER` 不动**方向一致**。
+
+**另外两处曾亮红灯、复核后排除的**
+
+| 门控点 | 依赖配置 | 排除理由 |
+|---|---|---|
+| `struct nf_ct_ext.offset[NF_CT_EXT_NUM]`（`nf_conntrack_extend.h`） | `NETFILTER_SYNPROXY` → `NF_CT_EXT_SYNPROXY` | 该结构**堆分配**、偏移由 `nf_ct_extend_register()` 运行时填写；`struct nf_conn` 内只有 `struct nf_ct_ext *ext` **指针** |
+| `struct tcp_request_sock_ops`（`include/net/tcp.h:2257`） | `SYN_COOKIES`（被 `NFT_SYNPROXY` select） | 该表**无 `EXPORT_SYMBOL`**，消费者全是内建代码（`net/ipv4/tcp_ipv4.c`、`net/ipv4/syncookies.c`、`net/ipv6/tcp_ipv6.c`、`net/mptcp/subflow.c`），随同头文件一起重编；另核 `struct tcp_sock` 内**无** `SYN_COOKIES` 成员 |
+
+#### 11.L.7 最终 ABI 面：**零结构体布局变更**
+
+| GKI 布局敏感点 | 改动前 | 改动后 | 判定 |
+|---|---|---|---|
+| `struct netns_nf`（内嵌进 `struct net`） | 基线布局 | **同基线** | ✅ 零变化 |
+| `struct net.netns_ft ft` | 无该成员 | 无该成员 | ✅ 零变化 |
+| `struct net.ext` | `struct net_ext *` | `struct net_ext *` | ✅ 指针，零变化 |
+| `struct sk_buff.nf_trace:1` | 存在（`XT_TARGET_TRACE=y`） | 存在 | ✅ 零变化 |
+| `struct netns_nf.hooks_arp` | 存在（`FAMILY_ARP=y`） | 存在 | ✅ 零变化 |
+| `struct nf_ct_ext` | 堆分配 | 堆分配（`NF_CT_EXT_NUM` +1） | ✅ 运行时算偏移 |
+| `struct tcp_sock` | — | 未受影响 | ✅ 零变化 |
+
+`out/.config` 相对改动前的**完整差异 48 行**（`raw/r3` → `raw/r5` 逐行 `diff` 可复现），
+全部落在 nftables 家族内部（42 项 `n→y`）加 2 项"由隐藏转为显式 `is not set`"
+（`NETFILTER_NETLINK_HOOK`、`NF_FLOW_TABLE`，取值未变）。
+
+#### 11.L.8 落地：`gki_defconfig` 追加 34 条（非 fragment）
+
+严格按文档第 222 行要求**直接编辑 `arch/arm64/configs/gki_defconfig`，未使用 fragment 文件**，
+追加位置在既有 Droidspaces 段之后，含：地址族 **6 项**（`NF_TABLES` / `_INET` / `_IPV4` /
+`_IPV6` / `_ARP` / `_NETDEV`）+ 表达式与目标 **28 项**（`NFT_CT` / `NFT_NAT` / `NFT_MASQ` /
+`NFT_REDIR` / `NFT_REJECT` / `NFT_SYNPROXY` / `NFT_TPROXY` / `NFT_FIB_*` / `NFT_DUP_*` /
+`NFT_COMPAT` …），并显式钉死 `# CONFIG_NF_TABLES_BRIDGE is not set`（含 11.L.6 的机制说明）。
+
+`git diff --stat` 实测：**+59 / −0**（34 条 `CONFIG_*=y` + 25 行注释，**零删除、无格式噪音**）。
+另外 8 项由 kconfig 自动 `select` 而来，不在 defconfig 里显式写出：
+`NETFILTER_SYNPROXY`、`NETFILTER_NETLINK_OSF`、`NF_DUP_NETDEV`、`NFT_FIB`、`NFT_REJECT_IPV4`、
+`NFT_REJECT_IPV6`、`NFT_REJECT_INET`、`SYN_COOKIES`。
+⇒ **34（显式）+ 8（自动）= 42**，即 11.L.7 表格里 `.config` 的 42 项 `n→y`。
+
+- ⚠️ **与文档 GKI 段禁令的关系（如实记录）**：文档明令 GKI 不要超出它那 16 项。
+  本轮按用户明确裁决**有意越界**——但 ABI 面已用 11.L.6/11.L.7 的逐点核查证明为零变更，
+  且这一核查方式正是文档禁令背后的**真实判据**（文档禁的是"未经核查的越界"，
+  而不是"越界"本身）。**若后续与上游/文档同步时被要求回退，回退点即 `gki_defconfig`
+  末尾这一个 +59/−0 的 hunk。**
+
+#### 11.L.9 方法论沉淀（可直接复用的判据）
+
+1. **判断一个 CONFIG 是否 kABI 安全，唯一可靠方法是 `grep` 该符号在 `include/` 中的全部 `#if` 门控点，逐一判定三类中的哪一类**：
+   - **代码门控**（函数体/inline）→ 安全；
+   - **结构体成员门控** → 继续第 2 步；
+   - 只出现在 `.c` 里 → 安全。
+2. **结构体成员门控再看两点**：① 该结构体是被**按值内嵌**进某个共享结构体（`struct net` / `struct task_struct` / `struct sk_buff` …），还是只经**指针**引用？② 它有没有**指针间接层**（如 `net_ext`）？按值内嵌 + 无间接层 = **真实 ABI 变更**。
+3. **"文档说 kABI 安全"只对文档自己列出的那一份清单成立**，绝不外推到文档里的其他清单，更不外推到"同类配置应该也安全"。
+4. 本轮两次亮红灯、两次复核排除（`nf_ct_ext`、`tcp_request_sock_ops`）说明：**必须看到原文才能定性** —— 只靠符号名或"看起来像结构体"的直觉会误判。
+5. **ABI 存疑时不要停留在推理——仓库里就有可查证的硬证据**（见 11.L.10）：`android/abi_gki_aarch64.stg` 是随仓库提交的官方 ABI 基线，逐字段记录结构体 `bytesize` / 成员 `offset`，`android/abi_gki_aarch64.stg.allowed_breaks` 是豁免名单。**先查这两个文件，再下结论。**
+
+#### 11.L.10 剩余 4 项的处置：1 项落地，3 项经 ABI 基线证否并维持不启用（2026-09-30）
+
+**缘起**：用户要求把"缺的 5 项"一并补上。先修正口径 —— 11.L.4 表格里的 **5 项含
+`NF_TABLES` 及家族**，该项已在 11.L.5~11.L.8 落地；因此本轮实际待决的是 **4 项**：
+`BRIDGE_NETFILTER`、`CGROUP_DEVICE`、`CGROUP_PIDS`、`FW_LOADER_COMPRESS`。
+
+**决定性新证据**：把 ABI 判断从"我的推理"升级为"仓库自带的硬数据"。
+`android/abi_gki_aarch64.stg`（8.0 MB，随仓库提交）是 ACK 的官方 ABI 基线，格式为
+`struct_union { name / bytesize / member{name, type_id, offset} … }`。实测查得：
+
+| 基线记录 | 值 | 含义 |
+|---|---|---|
+| `struct netns_nf` | `bytesize: 224` | 该尺寸**不含** `hooks_bridge` |
+| 成员名 `hooks_arp` | 1 次 | ARP 钩子**在**基线里 |
+| 成员名 `hooks_bridge` | **0 次** | 桥钩子**不在**基线里 |
+| `struct net` 成员 `nf` | `offset: 19072` | `nf` 在 `struct net` 中的精确偏移已固化 |
+| `struct css_set` | `bytesize: 424` | 对应 `CGROUP_SUBSYS_COUNT = 7` |
+| `struct cgroup_root` / `cgroup_subsys` | 6272 / 248 | 同类记录 |
+| `allowed_breaks` 中 `netns_nf` / `hooks_bridge` / `css_set` | **各 0 次** | **均无豁免** |
+
+⇒ `BRIDGE_NETFILTER` 的判定**不再是推断**：开启后 `netns_nf` 变 264 字节，
+而基线把 `struct net.nf` 的偏移钉死在 19072，`nf` 之后的 `ct` / `nf_conntrack_event_cb` /
+`gen` / `ext` / `xfrm` / `net_cookie` / `smc` 等**全部成员偏移整体后移 40 字节**。
+上游对此有显式决定：`a9d650605519 ANDROID: gki_defconfig: disable BRIDGE_NETFILTER`。
+
+**cgroup 两项的机制（同类，程度较轻）**：`include/linux/cgroup-defs.h:62-65` 中
+`CGROUP_SUBSYS_COUNT` 是 `enum cgroup_subsys_id` 的末值，由 `include/linux/cgroup_subsys.h`
+按 `IS_ENABLED()` 逐项累加（`devices` 在第 32 行、`pids` 在第 56 行）。它给 **4 个定长数组**
+定尺寸：`cgroup-defs.h:237` `css_set.subsys[]`、`:277` `css_set.e_cset_node[]`、
+`:518` `cgroup.subsys[]`、`:535` `cgroup.e_csets[]`。当前生效 **7 个**子系统
+（`CPUSETS`/`CGROUP_SCHED`/`CGROUP_CPUACCT`/`BLK_CGROUP`/`MEMCG`/`CGROUP_FREEZER`/`CGROUP_NET_PRIO`），
+每多一个子系统 `css_set` 与 `cgroup` 各增长 `8+16=24` 字节。ABI 基线记的是 `css_set = 424`
+（恰为 7 个），`allowed_breaks` 无 `css_set` 豁免。另有一层语义风险：`devices` 插在第 5 位，
+会让 `freezer` / `net_prio` 的子系统序号后移，任何按编译期枚举值索引 `css->subsys[]`
+的模块会取到错误项。实际运行时风险**低于** `BRIDGE_NETFILTER`（这两个结构体对模块基本不透明），
+但仍属基线偏离。
+
+**`FW_LOADER_COMPRESS` 落地（4 项中唯一 ABI 干净者）**：全树门控点仅
+`drivers/base/firmware_loader/main.c` 的 310/369/374/468/989/994 六处，**全部是函数体级 `#ifdef`，
+不涉及任何结构体成员** ⇒ 零布局变化。代价约为零：两个解压器的依赖在本仓库已是 `=y`
+（`CONFIG_XZ_DEC=y`、`CONFIG_ZSTD_DECOMPRESS=y`、`CONFIG_FW_LOADER_PAGED_BUF=y`），
+不新增任何解压器代码。语义上是"原始固件读取失败后的回退路径"，正常设备走不到。
+已按 `=y` 追加 4 行（含 1 行说明），`CONFIG_FW_LOADER_COMPRESS_ZSTD` 无 `default` 故必须显式声明。
+
+**用户裁决（2026-09-30）**：其余 3 项 **维持不启用**。理由除上表的基线证据外，还有一条
+事实性依据：**容器当前已能正常运行**（本报告全部 benchmark 即在其上测得），
+这 3 项缺的是文档 Requirements 检查的绿灯，**不是"容器起不来"**。文档自身也把这 3 项
+排除在 GKI 章节之外（只出现在 non-GKI 清单）。若日后确需，须重开该决策并准备回滚
+（重刷可用 Image），`gki_defconfig` 中已写明此约束。
+
+**构建与打包实证**：
+
+- `make gki_defconfig` 退出码 0，无新增警告（仅存量 `PID_NS` 重复赋值警告，与本轮无关）。
+- `out/.config` 实测：`CONFIG_FW_LOADER_COMPRESS{,_XZ,_ZSTD}=y`；
+  `BRIDGE_NETFILTER` / `CGROUP_DEVICE` / `CGROUP_PIDS` 三项仍为 `is not set`。
+- 编译 `targets=1110 errors=0`，产出 `out/arch/arm64/boot/Image`（39598592 字节）。
+- **配置确实编入的三重证据**（不能只看时间戳）：
+  ① `out/include/generated/autoconf.h` 含 `#define CONFIG_FW_LOADER_COMPRESS 1`（含 `_XZ`/`_ZSTD`）；
+  ② `out/drivers/base/firmware_loader/main.o` 经 `llvm-nm` 读得**本地函数** `fw_decompress_xz`、
+     `fw_decompress_zstd`，并新增对 `xz_dec_init/run/end`、`zstd_decompress_dctx`、
+     `zstd_get_frame_header`、`zstd_init_dctx`、`zstd_is_error`、`zstd_dctx_workspace_bound` 的**未定义引用**；
+  ③ `out/vmlinux` 中上述两个函数已解析为 `.text` 符号（`ffffffc080a28190 t fw_decompress_xz`）。
+- ⚠️ **`Image` 字节数与上一轮完全相同（39598592）**，这是对齐填充吸收所致：新增代码约 2 KB，
+  落在节内既有的页对齐余量中，未突破下一页边界。**不要用"Image 大小没变"反推"配置没生效"** ——
+  该结论必须由上面 ①②③ 的符号级证据支撑。
+- 打包：`bash dabao.sh` → `AnyKernel3-20260930-0314.zip`（25 MB，`Image-dtb` 已换为本轮产物）。
+- ⚠️ **本轮未能刷机**：WSL 内 `/mnt/` 为空（Windows 盘未挂载），
+  `/mnt/d/刷机/platform-tools/adb.exe` 不可达，需用户在 Windows 侧刷入或先挂载 D 盘。
+
+**踩坑留档**：`nm`（binutils）读不了本仓库的 `aarch64` 目标文件，报
+`file format not recognized`，须改用 `$HOME/桌面/oplus13/clang-19/bin/llvm-nm`。
+另 `strings` 默认最小长度 4，`.xz` 仅 3 字符会被静默丢弃，查小字面量须加 `-n 3`。
+
 ## 附录 A：诊断与基准脚本清单
 
 | 文件（设备 `/data/local/tmp/`） | 内容 | 状态 |

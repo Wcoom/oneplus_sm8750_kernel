@@ -1,0 +1,161 @@
+================================================================================
+Droidspaces §11.L.10 ABI 基线取证 — 2026-09-30
+目的：判定 CONFIG_BRIDGE_NETFILTER / CGROUP_DEVICE / CGROUP_PIDS / FW_LOADER_COMPRESS
+      是否可安全加入 gki_defconfig。结论：仅 FW_LOADER_COMPRESS 安全。
+内核树：/home/wcoom/桌面/oplus13/android_kernel_common_oneplus_sm8750
+================================================================================
+
+【0】基线文件（随仓库提交的 ACK 官方 ABI 基线）
+-rwxrwxr-x 1 wcoom wcoom 8019571 Sep 23 02:26 /home/wcoom/桌面/oplus13/android_kernel_common_oneplus_sm8750/android/abi_gki_aarch64.stg
+-rw-rw-r-- 1 wcoom wcoom   22231 Sep 23 01:15 /home/wcoom/桌面/oplus13/android_kernel_common_oneplus_sm8750/android/abi_gki_aarch64.stg.allowed_breaks
+格式示例（文件首 4 行 + 一个 struct_union 记录）：
+version: 0x00000002
+
+【1】struct netns_nf 在基线中的 bytesize 与成员
+定位行号: 262336
+struct_union {
+  id: 0x856ef6c4
+  kind: STRUCT
+  name: "netns_nf"
+  definition {
+    bytesize: 224
+    member_id: 0xbffd168e
+    member_id: 0x5f33aa63
+    member_id: 0x788992a7
+    member_id: 0xa1b27de9
+    member_id: 0x0f375eeb
+    member_id: 0x28df8f7a
+    member_id: 0x76fb30d4
+    member_id: 0x1b4fab6d
+    member_id: 0x2d081217
+  }
+
+【2】成员名命中数（关键判据：hooks_bridge 为 0 次 ⇒ 基线在 BRIDGE=n 下生成）
+  hooks_bridge           : 0 次
+  hooks_arp              : 1 次
+  hooks_ipv4             : 1 次
+  hooks_ipv6             : 1 次
+  nf_loggers             : 1 次
+  defrag_ipv4_users      : 1 次
+
+【3】struct net 成员 nf 的 type_id 与 offset（决定性证据）
+143639:  type_id: 0x856ef6c4
+262334:  id: 0x856ef6c4
+  ↑ 143639 行的上下文（该 member 名为 nf，指向 netns_nf）：
+  type_id: 0xe276adef
+  offset: 32
+}
+member {
+  id: 0xd02f5916
+  name: "nf"
+  type_id: 0x856ef6c4
+  offset: 19072
+}
+member {
+  id: 0xad249668
+
+【4】struct css_set / cgroup_root / cgroup_subsys 的 bytesize
+--- struct css_set (第 238527 行) ---
+struct_union {
+  id: 0x1c488e9b
+  kind: STRUCT
+  name: "css_set"
+  definition {
+    bytesize: 424
+--- struct cgroup_root (第 236935 行) ---
+struct_union {
+  id: 0xfb056e34
+  kind: STRUCT
+  name: "cgroup_root"
+  definition {
+    bytesize: 6272
+--- struct cgroup_subsys (第 236969 行) ---
+struct_union {
+  id: 0x00571446
+  kind: STRUCT
+  name: "cgroup_subsys"
+  definition {
+    bytesize: 248
+
+【5】allowed_breaks 豁免名单命中数（全为 0 = 无豁免）
+  netns_nf       : 0 次
+  hooks_bridge   : 0 次
+  css_set        : 0 次
+
+【6】上游显式决定：Google 关闭 BRIDGE_NETFILTER
+a466a46809ab ANDROID: update gki_defconfig for 5.6-rc3
+a9d650605519 ANDROID: gki_defconfig: disable BRIDGE_NETFILTER
+
+【7】CGROUP_SUBSYS_COUNT 机制
+--- include/linux/cgroup-defs.h:62-65（enum 末值由 cgroup_subsys.h 累加得出）---
+enum cgroup_subsys_id {
+#include <linux/cgroup_subsys.h>
+	CGROUP_SUBSYS_COUNT,
+};
+--- include/linux/cgroup-defs.h 中 4 个被定尺寸的数组 ---
+45:#define CSS_COUNTERS_SIZE (CGROUP_SUBSYS_COUNT * sizeof(atomic_t))
+64:	CGROUP_SUBSYS_COUNT,
+237:	struct cgroup_subsys_state *subsys[CGROUP_SUBSYS_COUNT];
+277:	struct list_head e_cset_node[CGROUP_SUBSYS_COUNT];
+518:	struct cgroup_subsys_state __rcu *subsys[CGROUP_SUBSYS_COUNT];
+535:	struct list_head e_csets[CGROUP_SUBSYS_COUNT];
+653:	ANDROID_BACKPORT_USE_ARRAY(1, CGROUP_SUBSYS_COUNT * sizeof(atomic_t), struct rcu_head rcu);
+868:#define CGROUP_SUBSYS_COUNT 0
+--- include/linux/cgroup_subsys.h 的两个门控行 ---
+32:#if IS_ENABLED(CONFIG_CGROUP_DEVICE)
+56:#if IS_ENABLED(CONFIG_CGROUP_PIDS)
+
+【8】当前 out/.config 中生效的子系统（决定 CGROUP_SUBSYS_COUNT 现值）
+  CPUSETS              CONFIG_CPUSETS=y
+  CGROUP_SCHED         CONFIG_CGROUP_SCHED=y
+  CGROUP_CPUACCT       CONFIG_CGROUP_CPUACCT=y
+  BLK_CGROUP           CONFIG_BLK_CGROUP=y
+  MEMCG                CONFIG_MEMCG=y
+  CGROUP_DEVICE        # CONFIG_CGROUP_DEVICE is not set
+  CGROUP_FREEZER       CONFIG_CGROUP_FREEZER=y
+  CGROUP_NET_CLASSID   # CONFIG_CGROUP_NET_CLASSID is not set
+  CGROUP_PERF          # CONFIG_CGROUP_PERF is not set
+  CGROUP_NET_PRIO      CONFIG_CGROUP_NET_PRIO=y
+  CGROUP_HUGETLB       （无此符号）
+  CGROUP_PIDS          # CONFIG_CGROUP_PIDS is not set
+  CGROUP_RDMA          # CONFIG_CGROUP_RDMA is not set
+  CGROUP_MISC          # CONFIG_CGROUP_MISC is not set
+  CGROUP_DEBUG         # CONFIG_CGROUP_DEBUG is not set
+  ⇒ 生效 7 个 ⇒ CGROUP_SUBSYS_COUNT = 7（与基线 css_set=424 一致）
+
+【9】FW_LOADER_COMPRESS 的全树门控点（全是函数体级 ⇒ 零布局变化）
+drivers/base/firmware_loader/main.c:310:#ifdef CONFIG_FW_LOADER_COMPRESS_ZSTD
+drivers/base/firmware_loader/main.c:369:#endif /* CONFIG_FW_LOADER_COMPRESS_ZSTD */
+drivers/base/firmware_loader/main.c:374:#ifdef CONFIG_FW_LOADER_COMPRESS_XZ
+drivers/base/firmware_loader/main.c:468:#endif /* CONFIG_FW_LOADER_COMPRESS_XZ */
+drivers/base/firmware_loader/main.c:989:#ifdef CONFIG_FW_LOADER_COMPRESS_ZSTD
+drivers/base/firmware_loader/main.c:994:#ifdef CONFIG_FW_LOADER_COMPRESS_XZ
+
+【10】编译期三重取证（证明配置确实编入）
+--- ① out/include/generated/autoconf.h ---
+#define CONFIG_FW_LOADER_COMPRESS 1
+#define CONFIG_FW_LOADER_COMPRESS_XZ 1
+#define CONFIG_FW_LOADER_COMPRESS_ZSTD 1
+--- ② llvm-nm 读 out/drivers/base/firmware_loader/main.o ---
+---------------- t fw_decompress_xz
+---------------- t fw_decompress_zstd
+                 U xz_dec_end
+                 U xz_dec_init
+                 U xz_dec_run
+                 U zstd_dctx_workspace_bound
+                 U zstd_decompress_dctx
+                 U zstd_get_frame_header
+                 U zstd_init_dctx
+                 U zstd_is_error
+--- ③ llvm-nm 读 out/vmlinux（链接期证据）---
+ffffffc080a28190 t fw_decompress_xz
+ffffffc080a28038 t fw_decompress_zstd
+
+【11】构建结果
+Image: 39598592 字节  Sep 30 03:14
+构建日志错误数: 0
+刷机包: 26202857 字节  /home/wcoom/桌面/oplus13/AnyKernel3-6.6.112-NOKSU-OnePlus8Elite/AnyKernel3-20260930-0314.zip
+
+【12】工具踩坑留档
+  - binutils 的 nm 读不了本仓库 aarch64 目标文件（file format not recognized），须用 clang-19/bin/llvm-nm
+  - strings 默认最小长度 4，".xz" 仅 3 字符会被静默丢弃，须加 -n 3

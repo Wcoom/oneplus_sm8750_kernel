@@ -1,0 +1,394 @@
+
+########## 1. 系统信息 ##########
+[uname -a]
+Linux ubuntu 6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k #3 SMP PREEMPT Mon May 12 09:09:59 UTC 2025 aarch64 GNU/Linux
+[uname -r]
+6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k
+[uname -m]
+aarch64
+[os-release]
+PRETTY_NAME="Ubuntu 26.04.1 LTS"
+NAME="Ubuntu"
+VERSION_ID="26.04"
+VERSION="26.04.1 LTS (Resolute Raccoon)"
+VERSION_CODENAME=resolute
+ID=ubuntu
+[getconf LONG_BIT]
+64
+[nproc]
+8
+[hostname]
+ubuntu
+[uptime]
+ 15:28:06 up 2 min,  0 users,  load average: 14.80, 13.99, 12.92
+
+########## 2. 容器形态判定 ##########
+[PID 1]
+systemd
+Name:	systemd
+[PID 1 cmdline]
+/sbin/init systemd.unified_cgroup_hierarchy=1 
+[self cgroup]
+5:freezer:/
+4:memory:/..
+3:cpuset:/..
+2:cpu:/..
+1:blkio:/
+0::/init.scope/ds-enter-55540
+[PID1 ns]
+total 0
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 cgroup -> cgroup:[4026536076]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 ipc -> ipc:[4026536075]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 mnt -> mnt:[4026536079]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 net -> net:[4026531840]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 pid -> pid:[4026536078]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 pid_for_children -> pid:[4026536078]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 time -> time:[4026531834]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 time_for_children -> time:[4026531834]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:25 user -> user:[4026531837]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 uts -> uts:[4026536074]
+[self ns]
+total 0
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 cgroup -> cgroup:[4026536076]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 ipc -> ipc:[4026536075]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 mnt -> mnt:[4026536079]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 net -> net:[4026531840]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 pid -> pid:[4026536078]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 pid_for_children -> pid:[4026536078]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 time -> time:[4026531834]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 time_for_children -> time:[4026531834]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 user -> user:[4026531837]
+lrwxrwxrwx+ 1 root root 0 Sep 29 15:28 uts -> uts:[4026536074]
+[mountinfo 前 12 行]
+19797 19389 7:400 / / rw,noatime,nodiratime shared:93 - ext4 /dev/block/loop50 rw,seclabel,nodelalloc,errors=remount-ro,init_itable=0
+19798 19797 0:5 / /dev rw,nosuid,noexec,relatime shared:94 - devtmpfs devtmpfs rw,seclabel,size=5259408k,nr_inodes=1314852,mode=755
+19799 19797 0:486 / /proc rw,nosuid,nodev,noexec,relatime shared:96 - proc proc rw
+19800 19797 0:23 / /sys rw,nosuid,nodev,noexec,relatime shared:97 - sysfs sysfs rw,seclabel
+19801 19800 0:487 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime shared:98 - tmpfs none rw,seclabel,size=16384k,mode=755
+19802 19801 0:38 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime shared:99 - cgroup2 cgroup2 rw,memory_recursiveprot
+19803 19797 0:488 / /run rw,nosuid,nodev,relatime shared:100 - tmpfs tmpfs rw,seclabel,mode=755
+19804 19797 0:489 / /tmp rw,nosuid,nodev,relatime shared:101 - tmpfs tmpfs rw,seclabel
+19805 19798 0:21 /0 /dev/console rw,relatime shared:95 - devpts devpts rw,seclabel,mode=600,ptmxmode=000
+19806 19797 0:325 /0 /storage/emulated/0 rw,nosuid,nodev,noexec,noatime shared:102 - fuse /dev/fuse rw,lazytime,user_id=0,group_id=0,allow_other
+19807 19797 253:61 / /mnt/data rw,nosuid,nodev,noatime shared:103 - f2fs /dev/block/dm-61 rw,lazytime,seclabel,background_gc=on,gc_merge,discard,discard_unit=block,user_xattr,inline_xattr,acl,inline_data,inline_dentry,flush_merge,barrier,extent_cache,mode=adaptive,active_logs=6,reserve_root=32768,reserve_node=0,resuid=0,resgid=1065,inlinecrypt,alloc_mode=default,checkpoint_merge,fsync_mode=nobarrier,atgc,memory=normal,errors=panic,lookup_mode=perf
+19808 19807 253:61 /data /mnt/data/user/0 rw,nosuid,nodev,noatime shared:104 - f2fs /dev/block/dm-61 rw,lazytime,seclabel,background_gc=on,gc_merge,discard,discard_unit=block,user_xattr,inline_xattr,acl,inline_data,inline_dentry,flush_merge,barrier,extent_cache,mode=adaptive,active_logs=6,reserve_root=32768,reserve_node=0,resuid=0,resgid=1065,inlinecrypt,alloc_mode=default,checkpoint_merge,fsync_mode=nobarrier,atgc,memory=normal,errors=panic,lookup_mode=perf
+[文件系统类型统计]
+      9 tmpfs
+      8 ext4
+      3 devpts
+      2 f2fs
+      1 tracefs
+      1 sysfs
+      1 proc
+      1 mqueue
+      1 fusectl
+      1 fuse
+      1 devtmpfs
+      1 debugfs
+      1 configfs
+      1 cgroup2
+[PRoot/ptrace 迹象]
+[systemd-detect-virt]
+container-other
+[systemd-detect-virt --container]
+container-other
+[systemd 版本]
+systemd 259 (259.5-0ubuntu3.4)
+
+########## 3. CPU topology ##########
+[online]
+0-7
+[possible]
+0-7
+cpu0 core=0 pkg=0 cluster=0
+cpu1 core=1 pkg=0 cluster=0
+cpu2 core=2 pkg=0 cluster=0
+cpu3 core=3 pkg=0 cluster=0
+cpu4 core=4 pkg=0 cluster=0
+cpu5 core=5 pkg=0 cluster=0
+cpu6 core=0 pkg=0 cluster=1
+cpu7 core=1 pkg=0 cluster=1
+[cpu_capacity]
+cpu0=792 cpu1=792 cpu2=792 cpu3=792 cpu4=792 cpu5=792 cpu6=1024 cpu7=1024 
+[cpufreq policy 布局]
+/sys/devices/system/cpu/cpufreq/policy0
+/sys/devices/system/cpu/cpufreq/policy6
+--- policy0: cpus=0 1 2 3 4 5 gov=walt min=556800 max=2918400 hwmax=3532800 cur=2227200
+    avail_gov=scx walt conservative powersave performance schedutil 
+    avail_freq=384000 556800 748800 960000 1152000 1363200 1555200 1785600 1996800 2227200 2400000 2745600 2918400 3072000 3321600 3532800 
+--- policy6: cpus=6 7 gov=walt min=1017600 max=3072000 hwmax=4320000 cur=1017600
+    avail_gov=scx walt conservative powersave performance schedutil 
+    avail_freq=1017600 1209600 1401600 1689600 1958400 2246400 2438400 2649600 2841600 3072000 3283200 3513600 3801600 4089600 4204800 4320000 
+
+########## 4. cgroup ##########
+[cgroup 挂载]
+none on /sys/fs/cgroup type tmpfs (rw,nosuid,nodev,noexec,relatime,seclabel,size=16384k,mode=755)
+cgroup2 on /sys/fs/cgroup type cgroup2 (rw,nosuid,nodev,noexec,relatime,memory_recursiveprot)
+[cgroup.controllers (根)]
+[cgroup.subtree_control (根)]
+[cgroup v2 根下条目]
+cgroup.controllers
+cgroup.events
+cgroup.freeze
+cgroup.kill
+cgroup.max.depth
+cgroup.max.descendants
+cgroup.procs
+cgroup.stat
+cgroup.stat.local
+cgroup.subtree_control
+cgroup.threads
+cgroup.type
+cpu.stat
+cpu.stat.local
+dev-mqueue.mount
+init.scope
+sys-fs-fuse-connections.mount
+sys-kernel-config.mount
+sys-kernel-debug.mount
+sys-kernel-tracing.mount
+system.slice
+user.slice
+[cpu.max / cpu.weight]
+[uclamp]
+[上游 cpuset]
+
+########## 5. 内存 ##########
+[free -h]
+               total        used        free      shared  buff/cache   available
+Mem:            10Gi       8.1Gi       221Mi       115Mi       2.6Gi       2.7Gi
+Swap:          9.5Gi       5.9Gi       3.6Gi
+[meminfo 关键项]
+MemTotal:       11317852 kB
+MemFree:          226640 kB
+MemAvailable:    2819400 kB
+Buffers:            5132 kB
+Cached:          2463000 kB
+SwapTotal:       9961468 kB
+SwapFree:        3776816 kB
+Dirty:              1340 kB
+Writeback:             0 kB
+AnonPages:       2280100 kB
+Mapped:          1511736 kB
+Slab:             939120 kB
+SReclaimable:     243932 kB
+KernelStack:      151632 kB
+PageTables:       230264 kB
+SecPageTables:         0 kB
+WritebackTmp:          0 kB
+CommitLimit:    15620392 kB
+Committed_AS:   381114208 kB
+ShmemPmdMapped:        0 kB
+FilePmdMapped:         0 kB
+[MGLRU enabled]
+0x0001
+[MGLRU min_ttl]
+0
+[PSI cpu]
+some avg10=8.85 avg60=8.83 avg300=10.09 total=249704711
+full avg10=0.00 avg60=0.00 avg300=0.00 total=0
+[PSI memory]
+some avg10=0.00 avg60=0.10 avg300=0.32 total=26706603
+full avg10=0.00 avg60=0.07 avg300=0.25 total=17826623
+[PSI io]
+some avg10=0.00 avg60=0.05 avg300=0.10 total=9901844
+full avg10=0.00 avg60=0.01 avg300=0.02 total=4954179
+[vmstat 快照]
+ r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st gu
+ 0  2 6184652 224616   5132 2707144 32309 100535 288232 120995 104319   13  8 10 82  0  0  0
+ 1  0 6184652 222512   5136 2707868    0    0   108     0 4042 5413 10  5 85  0  0  0
+
+########## 6. swap / zram ##########
+[swapon --show]
+NAME             TYPE      SIZE USED  PRIO
+/dev/block/zram0 partition 9.5G 5.9G 32758
+[/proc/swaps]
+Filename				Type		Size		Used		Priority
+/dev/block/zram0                        partition	9961468		6184652		32758
+[zramctl]
+NAME       ALGORITHM DISKSIZE  DATA COMPR TOTAL STREAMS MOUNTPOINT
+/dev/zram0 zstdn         9.5G  5.9G  1.7G  1.7G         
+--- zram0: disksize=10200547328 algo=lzo lzo-rle lz4 lz4kd lz4kds deflate zstd [zstdn] 
+[zram mm_stat]
+/sys/block/zram0/mm_stat: 6331297792 1783192645 1830129664        0 1912008704    54933   225210    33045    62029
+
+########## 7. VM sysctl ##########
+vm.swappiness = 200
+vm.watermark_scale_factor = 62
+vm.watermark_boost_factor = 0
+vm.dirty_ratio = 20
+vm.dirty_background_ratio = 5
+vm.dirty_bytes = 0
+vm.dirty_background_bytes = 0
+vm.vfs_cache_pressure = 50
+vm.page-cluster = 0
+vm.min_free_kbytes = 23168
+vm.extra_free_kbytes = 
+vm.overcommit_memory = 1
+vm.max_map_count = 1048576
+
+########## 8. 限制 ##########
+[ulimit -a]
+time(seconds)        unlimited
+file(blocks)         unlimited
+data(kbytes)         unlimited
+stack(kbytes)        8192
+coredump(blocks)     0
+memory(kbytes)       unlimited
+locked memory(kbytes) 64
+process              41089
+nofiles              32768
+vmemory(kbytes)      unlimited
+locks                unlimited
+rtprio               0
+[/proc/sys/kernel/pid_max]
+4194304
+[threads-max]
+82178
+[file-max]
+9223372036854775807
+[file-nr]
+51360	0	9223372036854775807
+[cgroup pids.max]
+[cgroup memory.max]
+
+########## 9. thermal ##########
+[/sys/class/thermal zones]
+thermal_zone0 type=pm8550-bcl-vbat temp=0
+thermal_zone1 type=pm8550-bcl-lvl0 temp=0
+thermal_zone10 type=pmih010x-ibat-lvl1 temp=0
+thermal_zone11 type=cpu-0-1-1 temp=41900
+thermal_zone12 type=pmih010x-bcl-lvl0 temp=0
+thermal_zone13 type=cpu-0-2-0 temp=41100
+thermal_zone14 type=pmih010x-bcl-lvl1 temp=0
+thermal_zone15 type=cpu-0-2-1 temp=40700
+thermal_zone16 type=pmih010x-bcl-lvl2 temp=0
+thermal_zone17 type=cpu-0-3-0 temp=39900
+thermal_zone18 type=cpu-0-3-1 temp=39900
+thermal_zone19 type=cpu-0-4-0 temp=41100
+thermal_zone2 type=pm8550-bcl-lvl1 temp=0
+thermal_zone20 type=cpu-0-4-1 temp=41900
+thermal_zone21 type=cpu-0-5-0 temp=40700
+thermal_zone22 type=cpu-0-5-1 temp=40300
+thermal_zone23 type=cpuss-0-0 temp=41500
+thermal_zone24 type=cpuss-0-1 temp=41100
+thermal_zone25 type=aoss-1 temp=38000
+thermal_zone26 type=cpu-1-0-0 temp=38800
+[thermal pressure]
+(无 /proc/pressure/thermal)
+[cpu cooling devices]
+/sys/class/thermal/cooling_device0/type
+/sys/class/thermal/cooling_device1/type
+/sys/class/thermal/cooling_device10/type
+/sys/class/thermal/cooling_device11/type
+/sys/class/thermal/cooling_device12/type
+[sched 调优节点抽样]
+address_bits
+aud_dev
+boot_adsp
+btf
+camera
+camera_extension_control
+cgroup
+cnss
+config
+cpu_byteorder
+debug
+dload
+dma_heap
+dmabuf
+fscaps
+gpu
+iommu_groups
+ipclite
+irq
+kp_freeze_detect
+
+########## 10. 存储 ##########
+[df -hT]
+Filesystem        Type   Size  Used Avail Use% Mounted on
+/dev/block/loop50 ext4    40G  4.1G   36G  11% /
+tmpfs             tmpfs  5.4G  9.5M  5.4G   1% /run
+tmpfs             tmpfs  5.4G     0  5.4G   0% /tmp
+/dev/fuse         fuse   220G  139G   82G  63% /storage/emulated/0
+/dev/block/dm-61  f2fs   220G  139G   82G  63% /mnt/data
+/dev/block/sdf3   ext4   208M  172M   19M  91% /mnt/data/persist_log/cache/factory
+none              tmpfs  1.0M  8.0K 1016K   1% /run/droidspaces/vproc
+tmpfs             tmpfs  5.4G     0  5.4G   0% /dev/shm
+none              tmpfs  1.0M     0  1.0M   0% /run/credentials/systemd-journald.service
+none              tmpfs  1.0M     0  1.0M   0% /run/credentials/console-getty.service
+[findmnt / ]
+/dev/block/loop50 ext4 rw,noatime,nodiratime,seclabel,nodelalloc,errors=remount-ro,init_itable=0
+[/etc/fstab]
+[挂载点概览]
+/ ext4 /dev/block/loop50
+/dev devtmpfs devtmpfs
+/proc proc proc
+/sys sysfs sysfs
+/sys/fs/cgroup tmpfs none
+/sys/fs/cgroup cgroup2 cgroup2
+/run tmpfs tmpfs
+/tmp tmpfs tmpfs
+/dev/console devpts devpts[/0]
+/storage/emulated/0 fuse /dev/fuse[/0]
+/mnt/data f2fs /dev/block/dm-61
+/mnt/data/user/0 f2fs /dev/block/dm-61[/data]
+/mnt/data/persist_log/oplusreserve/media/log/shutdown ext4 /dev/block/sdf3[/media/log/shutdown]
+/mnt/data/persist_log/oplusreserve/media/log/hang_oplus ext4 /dev/block/sdf3[/media/log/hang_oplus]
+/mnt/data/persist_log/cache/factory ext4 /dev/block/sdf3[/factory]
+/mnt/data/persist_log/oplus_fsck_fulldiskscanuserdata ext4 /dev/block/sdf3[/oplus_fsck_fulldiskscanuserdata]
+/mnt/data/persist_log/criticallog ext4 /dev/block/sdf3[/media/log/criticalLog]
+/mnt/data/persist_log/oplusreserve/media/log/minidumpbackup ext4 /dev/block/sdf3[/media/log/minidump]
+/mnt/data/persist_log/storage/op2storagelog ext4 /dev/block/sdf3[/media/log/vold]
+/dev/pts devpts devpts
+/dev/ptmx devpts devpts[/ptmx]
+/run/droidspaces/vproc tmpfs none
+/proc/uptime tmpfs none[/uptime]
+/proc/loadavg tmpfs none[/loadavg]
+/dev/shm tmpfs tmpfs
+[lsblk]
+NAME                 MAJ:MIN RM   SIZE RO TYPE     MOUNTPOINTS
+loop0                  7:0    0  54.5M  1 loop     
+loop1                  7:8    0   6.1M  1 loop     
+loop2                  7:16   0  20.5M  1 loop     
+loop3                  7:24   0   620K  1 loop     
+loop4                  7:32   0   160K  1 loop     
+loop5                  7:40   0   856K  1 loop     
+loop6                  7:48   0  21.4M  1 loop     
+loop7                  7:56   0   5.3M  1 loop     
+loop8                  7:64   0     2M  1 loop     
+loop9                  7:72   0  12.1M  1 loop     
+loop10                 7:80   0  29.5M  1 loop     
+loop11                 7:88   0   272K  1 loop     
+loop12                 7:96   0   3.1M  1 loop     
+loop13                 7:104  0   144K  1 loop     
+loop14                 7:112  0   6.7M  1 loop     
+loop15                 7:120  0     3M  1 loop     
+loop16                 7:128  0   3.1M  1 loop     
+loop17                 7:136  0    88K  1 loop     
+loop18                 7:144  0   444K  1 loop     
+[/dev 块设备]
+brw-------+  1 root root            253,   0 Feb 20  1970 dm-0
+brw-------+  1 root root            253,   1 Feb 20  1970 dm-1
+brw-------+  1 root root            253,  10 Feb 20  1970 dm-10
+brw-------+  1 root root            253,  11 Feb 20  1970 dm-11
+brw-------+  1 root root            253,  12 Feb 20  1970 dm-12
+brw-------+  1 root root            253,  13 Feb 20  1970 dm-13
+brw-------+  1 root root            253,  14 Feb 20  1970 dm-14
+brw-------+  1 root root            253,  15 Feb 20  1970 dm-15
+brw-------+  1 root root            253,  16 Feb 20  1970 dm-16
+brw-------+  1 root root            253,  17 Feb 20  1970 dm-17
+brw-------+  1 root root            253,  18 Feb 20  1970 dm-18
+brw-------+  1 root root            253,  19 Feb 20  1970 dm-19
+brw-------+  1 root root            253,   2 Feb 20  1970 dm-2
+brw-------+  1 root root            253,  20 Feb 20  1970 dm-20
+brw-------+  1 root root            253,  21 Feb 20  1970 dm-21
+[某块设备 queue 参数]
+loop0: sched=[none] mq-deadline kyber bfq  ra=128 nr=63
+loop1: sched=[none] mq-deadline kyber bfq  ra=128 nr=63
+loop2: sched=[none] mq-deadline kyber bfq  ra=128 nr=63
+loop3: sched=[none] mq-deadline kyber bfq  ra=128 nr=63
+loop4: sched=[none] mq-deadline kyber bfq  ra=128 nr=63
+loop5: sched=[none] mq-deadline kyber bfq  ra=128 nr=63
+
+########## 诊断结束 ##########

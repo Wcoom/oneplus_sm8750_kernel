@@ -1,0 +1,47 @@
+##### 调度器与扩展 #####
+CONFIG_ENERGY_MODEL=y
+CONFIG_SCHED_DEBUG=y
+[sched_ext sysfs]
+ls: cannot access '/sys/kernel/sched_ext/': No such file or directory
+[scx 二进制]
+(无)
+##### 内存压缩/IO 关键项 #####
+CONFIG_BLK_DEV_NVME=y
+CONFIG_MMC=y
+CONFIG_MMC_BLOCK=y
+CONFIG_MMC_BLOCK_MINORS=8
+CONFIG_MMC_CRYPTO=y
+CONFIG_MMC_SDHCI=y
+CONFIG_MMC_SDHCI_IO_ACCESSORS=y
+CONFIG_MMC_SDHCI_PLTFM=y
+CONFIG_SCSI_UFSHCD=y
+CONFIG_SCSI_UFS_BSG=y
+CONFIG_SCSI_UFS_CRYPTO=y
+CONFIG_SCSI_UFSHCD_PCI=y
+CONFIG_SCSI_UFSHCD_PLATFORM=y
+CONFIG_SCSI_UFS_DWC_TC_PLATFORM=y
+CONFIG_SCSI_UFS_HISI=y
+CONFIG_SCSI_UFS_VARIABLE_SG_ENTRY_SIZE=y
+CONFIG_CRYPTO_ZSTD=y
+CONFIG_LZ4_COMPRESS=y
+CONFIG_LZ4HC_COMPRESS=y
+CONFIG_LZ4_DECOMPRESS=y
+##### uclamp 实际可用性 #####
+[sched_util_clamp_min]
+1024
+[sched_util_clamp_max]
+1024
+[sched_util_clamp_min_rt_default]
+0
+##### 各核当前负载快照 #####
+13.02 13.61 13.40 1/9695 0
+
+cpu  216544 7468 201995 2006220 1164 30548 2938 172 0 0
+##### zram 全量 #####
+disksize=10200547328
+mem_limit=
+mm_stat=6380855296 1788230059 1834549248        0 1912008704    56473   255313    32028    65548
+io_stat=       0        0 0  2339495
+##### 稀疏镜像可回收量 #####
+宿主 rootfs.img: 42949672960 bytes 虚拟
+实际占用 blocks: 25399096 x 512 = 13004337152 bytes

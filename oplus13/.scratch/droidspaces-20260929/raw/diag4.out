@@ -1,0 +1,112 @@
+
+##### PATH 来源 #####
+[/root/.profile]
+# ~/.profile: executed by Bourne-compatible login shells.
+
+if [ "$BASH" ]; then
+  if [ -f ~/.bashrc ]; then
+    . ~/.bashrc
+  fi
+fi
+
+PATH="$HOME/.local/bin:$PATH"
+export PATH
+[/root/.bashrc 中 PATH 相关]
+102:export BUN_INSTALL="$HOME/.bun"
+103:export PATH="$BUN_INSTALL/bin:$PATH"
+106:export PATH="$HOME/.local/bin:$PATH"
+[/etc/environment]
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
+[/etc/profile.d 列表]
+01-locale-fix.sh
+70-systemd-shell-extra.sh
+80-systemd-osc-context.sh
+droidspaces_env.sh
+gawk.csh
+gawk.sh
+[/etc/profile.d/*.sh 里的 PATH]
+/etc/profile.d/gawk.sh:2:	unset AWKPATH
+/etc/profile.d/gawk.sh:3:	export AWKPATH=`gawk 'BEGIN {print ENVIRON["AWKPATH"]}'`
+/etc/profile.d/gawk.sh:7:	[ -z "$AWKPATH" ] && AWKPATH=`gawk 'BEGIN {print ENVIRON["AWKPATH"]}'`
+/etc/profile.d/gawk.sh:8:	export AWKPATH="$*:$AWKPATH"
+/etc/profile.d/gawk.sh:12:	[ -z "$AWKPATH" ] && AWKPATH=`gawk 'BEGIN {print ENVIRON["AWKPATH"]}'`
+/etc/profile.d/gawk.sh:13:	export AWKPATH="$AWKPATH:$*"
+/etc/profile.d/gawk.sh:17:	unset AWKLIBPATH
+/etc/profile.d/gawk.sh:18:	export AWKLIBPATH=`gawk 'BEGIN {print ENVIRON["AWKLIBPATH"]}'`
+/etc/profile.d/gawk.sh:22:	[ -z "$AWKLIBPATH" ] && \
+/etc/profile.d/gawk.sh:23:		AWKLIBPATH=`gawk 'BEGIN {print ENVIRON["AWKLIBPATH"]}'`
+
+##### /root/.codex 明细 #####
+1.7G	/root/.codex/packages
+104M	/root/.codex/sessions
+41M	/root/.codex/logs_2.sqlite
+34M	/root/.codex/thread_history_1.sqlite
+29M	/root/.codex/cache
+27M	/root/.codex/plugins
+22M	/root/.codex/logs_2.sqlite-wal
+4.3M	/root/.codex/state_5.sqlite-wal
+4.0M	/root/.codex/thread_history_1.sqlite-wal
+668K	/root/.codex/skills
+348K	/root/.codex/models_cache.json
+252K	/root/.codex/state_5.sqlite
+76K	/root/.codex/queue_1.sqlite-wal
+60K	/root/.codex/goals_1.sqlite-wal
+44K	/root/.codex/memories_1.sqlite
+[文件数]
+5853
+
+##### 基准测试工具可用性 #####
+openssl      /usr/bin/openssl
+fio          （无）
+dd           /usr/bin/dd
+bc           （无）
+time         /usr/bin/time
+hyperfine    （无）
+sysbench     （无）
+stress-ng    （无）
+hdparm       /usr/sbin/hdparm
+[openssl 版本]
+OpenSSL 3.5.5 27 Jan 2026 (Library: OpenSSL 3.5.5 27 Jan 2026)
+
+##### THP / KSM 可读写性 #####
+THP enabled = always madvise [never]
+total 0
+drwxr-xr-x+  8 root root 0 Sep 29 15:23 .
+drwxr-xr-x+ 38 root root 0 Feb 20  1970 ..
+drwxr-xr-x+  3 root root 0 Sep 29 15:34 damon
+drwxr-xr-x+  2 root root 0 Sep 29 15:33 lru_gen
+drwxr-xr-x+  2 root root 0 Sep 29 15:23 pgsize_migration
+drwxr-xr-x+  2 root root 0 Sep 29 15:34 swap
+drwxr-xr-x+ 11 root root 0 Sep 29 15:23 transparent_hugepage
+drwxr-xr-x+  2 root root 0 Sep 29 15:34 uksm
+[ksm 目录]
+ls: cannot access '/sys/kernel/mm/ksm/': No such file or directory
+
+##### 镜像稀疏实况 #####
+[df /]
+/dev/block/loop50   40G  4.1G   36G  11% /
+[df -i /]
+/dev/block/loop50 2621440 59021 2562419    3% /
+[stat rootfs.img 实际占用]
+42949672960 bytes size, 25398064 blocks x 512
+
+##### 各挂载点写性能快速探测（一次性 64MB 顺序写，随后删除） #####
+  /tmp : 0.04s (64MB 顺序写+fsync)
+  / : 0.15s (64MB 顺序写+fsync)
+  /mnt/data : 0.07s (64MB 顺序写+fsync)
+  /dev/shm : 0.03s (64MB 顺序写+fsync)
+
+##### CPU 快速探测 #####
+[单核 openssl sha256 1s]
+type             16 bytes     64 bytes    256 bytes   1024 bytes   8192 bytes  16384 bytes
+sha256          125109.83k   379472.55k   996709.11k  1598004.75k  1750936.57k  1992062.71k
+[8 并行 sha256]
+done
+[gcc 编译吞吐：编译一个中等 C 文件 10 次]
+/mnt/data/local/tmp/diag4.sh: 46: bc: not found
+  10 次 gcc -O2 编译耗时: s
+[运行 5 次]
+/mnt/data/local/tmp/diag4.sh: 48: bc: not found
+  5 次运行耗时: s
+
+##### 结束 #####

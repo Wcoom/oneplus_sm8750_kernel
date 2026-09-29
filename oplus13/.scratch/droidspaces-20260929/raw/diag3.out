@@ -1,0 +1,271 @@
+
+########## A. 环境变量与 PATH ##########
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/run/current-system/sw/bin
+HOME=/root
+SHELL=
+USER=root UID=0
+[env 全量]
+container=droidspaces
+HOME=/root
+LANG=en_US.UTF-8
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/run/current-system/sw/bin
+PWD=/
+TERM=xterm-256color
+
+########## B. /root 占用 2.5G 明细 ##########
+2.1G	/root/.codex
+220M	/root/.local
+96M	/root/.cache
+79M	/root/.bun
+49M	/root/.claude
+33M	/root/code
+512K	/root/backup
+104K	/root/.config
+48K	/root/droidshell-src.tar.gz
+48K	/root/.claude.json
+4.0K	/root/droidshell-debug.keystore
+4.0K	/root/.ssh
+4.0K	/root/.profile
+4.0K	/root/.gitconfig
+4.0K	/root/.bashrc
+4.0K	/root/.bash_history
+
+########## C. 工具链实位搜索（含非 PATH 位置） ##########
+[存在] /usr/local/bin
+codex
+---
+[存在] /usr/local/lib
+python3.14
+---
+[存在] /opt
+---
+[存在] /root/.local/bin
+claude
+claude-go
+claude-native
+codex
+---
+[存在] /root/.bun/bin
+bun
+bunx
+---
+[find 搜索可执行文件（限深度）]
+/root/.bun/bin/bun
+[node_modules 全局树]
+
+########## D. THP / KSM / MGLRU 运行时状态 ##########
+[THP enabled]
+always madvise [never]
+[THP defrag]
+always defer defer+madvise madvise [never]
+[THP shmem_enabled]
+always within_size advise [never] deny force
+[THP hpage_pmd_size]
+2097152
+[KSM run]
+[KSM pages_to_scan]
+[KSM sleep_millisecs]
+[KSM full_scans]
+[MGLRU enabled=0x0x0001]
+[MGLRU min_ttl_ms]
+0
+[MGLRU max_seq / 代际]
+  enabled = 0x0001 
+  min_ttl_ms = 0 
+[compaction]
+  /proc/sys/vm/compaction_proactiveness = 0
+  /proc/sys/vm/extfrag_threshold = 500
+[其他 vm 可调]
+  vm.zone_reclaim_mode                   = 
+  vm.laptop_mode                         = 0
+  vm.stat_interval                       = 1
+  vm.numa_balancing                      = 
+  vm.dirty_writeback_centisecs           = 500
+  vm.dirty_expire_centisecs              = 200
+  vm.percpu_pagelist_high_fraction       = 0
+  vm.min_slab_ratio                      = 
+  vm.admin_reserve_kbytes                = 0
+  vm.user_reserve_kbytes                 = 0
+
+########## E. CPU 限频溯源 ##########
+[各 policy 频率上限]
+--- policy0: cpus=0 1 2 3 4 5
+    scaling_max=2918400 cpuinfo_max=3532800
+    scaling_min=556800 cpuinfo_min=384000
+    cur=1152000 gov=walt
+    boost=
+--- policy6: cpus=6 7
+    scaling_max=3072000 cpuinfo_max=4320000
+    scaling_min=1017600 cpuinfo_min=1017600
+    cur=1017600 gov=walt
+    boost=
+[thermal cooling device 状态]
+  cooling_device0 type=cpu-hotplug0 cur=0 max=1
+  cooling_device1 type=cpu-hotplug1 cur=0 max=1
+  cooling_device10 type=pause-cpu0 cur=0 max=1
+  cooling_device12 type=pause-cpu1 cur=0 max=1
+  cooling_device14 type=pause-cpu2 cur=0 max=1
+  cooling_device17 type=pause-cpu3 cur=0 max=1
+  cooling_device19 type=pause-cpu4 cur=0 max=1
+  cooling_device2 type=cpu-hotplug2 cur=0 max=1
+  cooling_device21 type=pause-cpu5 cur=0 max=1
+  cooling_device23 type=pause-cpu6 cur=0 max=1
+  cooling_device26 type=pause-cpu7 cur=0 max=1
+  cooling_device3 type=cpu-hotplug4 cur=0 max=1
+  cooling_device30 type=cpu-cluster0 cur=0 max=15
+  cooling_device32 type=cpu-cluster1 cur=0 max=15
+  cooling_device4 type=cpu-hotplug5 cur=0 max=1
+  cooling_device5 type=cpu-hotplug3 cur=0 max=1
+  cooling_device6 type=cpu-hotplug6 cur=0 max=1
+  cooling_device7 type=cpu-hotplug7 cur=0 max=1
+  cooling_device8 type=cpufreq-cpu0 cur=0 max=15
+  cooling_device9 type=cpufreq-cpu6 cur=0 max=15
+[cpu 压力 stall 计数]
+[schedstat 每核]
+domain1 ff 6339 6331 4 48731 8 0 7 244 5506 5506 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 41044 0 0
+cpu5 41267 0 4038396 1197212 2005444 733579 550114533824 591380991435 2727094
+domain0 3f 7259 2302 4338 10351652 676 17 0 2302 8772 8277 56 4342344 2719 4 0 8277 0 0 0 0 0 0 0 0 16 6 10 0 0 0 0 0 0 1233083 0 0
+domain1 ff 6004 5995 3 235929 14 0 0 145 5672 5672 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 38782 0 0
+cpu6 24886 0 573397 87995 348253 120178 221708871439 467674278419 442551
+domain0 c0 3720 2938 764 1925599 34 2 0 2903 5473 4714 61 12240503 4469 1 0 4714 0 0 0 0 0 0 0 0 13 0 13 0 0 0 0 0 0 36347 0 0
+domain1 ff 2691 2621 63 30265 18 0 815 1536 1473 1386 7 1406554 369 0 78 439 0 0 0 0 0 0 0 0 59 49 10 0 0 0 0 0 0 191728 0 0
+cpu7 21782 0 542396 71153 406126 157639 198616944234 444779940257 434521
+domain0 c0 3808 3062 714 2047330 48 0 1 3001 4809 4076 60 10425376 4439 1 0 4075 0 0 0 0 0 0 0 0 14 0 14 0 0 0 0 0 0 74351 0 0
+domain1 ff 2874 2862 6 4135 25 0 133 262 1266 1266 0 0 0 0 0 0 0 0 0 0 0 0 0 0 6 3 3 0 0 0 0 0 0 174136 0 0
+
+########## F. 内存水位与回收压力 ##########
+[vmstat 采样 5 次]
+procs -----------memory---------- ---swap-- -----io---- -system-- -------cpu-------
+ r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st gu
+ 0  0 6110024 276968  29732 2698972 11065 33553 100407 40534 38068   13  8 10 82  0  0  0
+ 1  0 6110024 274680  29732 2699276    0    0     0   120 3556 4781 10  4 86  0  0  0
+ 2  0 6109768 260944  29732 2699392  128    0   268   816 6590 10728 13  6 81  0  0  0
+ 0  0 6109768 266896  29732 2699108    0    0     0     0 7451 12309 14 10 77  0  0  0
+ 2  0 6109768 261444  29740 2707044   12    0  8092   440 7898 12245 13  9 78  0  0  0
+[pgsteal / pgscan 累计]
+nr_free_pages 38762
+nr_zone_inactive_anon 230022
+nr_zone_active_anon 413774
+nr_zone_inactive_file 392416
+nr_zone_active_file 177443
+nr_zone_unevictable 24543
+nr_zone_write_pending 610
+nr_mlock 24200
+nr_bounce 0
+nr_zspages 444015
+nr_free_cma 0
+nr_inactive_anon 17450
+nr_active_anon 230022
+nr_inactive_file 413774
+nr_active_file 392416
+nr_unevictable 177443
+nr_slab_reclaimable 24543
+nr_slab_unreclaimable 76784
+nr_isolated_anon 174752
+nr_isolated_file 0
+nr_anon_pages 78619
+nr_mapped 601382
+nr_file_pages 336589
+nr_dirty 638715
+nr_writeback 615
+[direct reclaim 计数]
+allocstall_dma32 0
+allocstall_normal 7141
+allocstall_movable 28559
+allocstall_nosplit 0
+allocstall_nomerge 0
+pgsteal_direct 1870207
+pgscan_direct 2984436
+pgscan_direct_throttle 2
+compact_stall 112
+compact_fail 108
+thp_fault_alloc 0
+thp_fault_fallback 0
+thp_fault_fallback_charge 0
+thp_collapse_alloc 0
+thp_collapse_alloc_failed 0
+[swap 活动]
+pswpin 1228305
+pswpout 3724449
+swap_ra 0
+swap_ra_hit 43
+
+########## G. 容器与宿主边界 ##########
+[/run/droidspaces/version]
+6.4.5[/run/droidspaces/mount]
+/mnt/Droidspaces/ubuntu[/run/droidspaces/name]
+ubuntu[container.config]
+# Droidspaces Container Configuration
+# Generated automatically - Changes may be overwritten
+
+name=ubuntu
+hostname=ubuntu
+rootfs_path=/data/local/Droidspaces/Containers/ubuntu/rootfs.img
+disable_ipv6=0
+enable_android_storage=1
+enable_termux_x11=0
+enable_virgl=0
+enable_pulseaudio=0
+enable_hw_access=1
+enable_gpu_mode=0
+selinux_permissive=0
+allow_userns=1
+volatile_mode=0
+force_cgroupv1=0
+block_nested_ns=0
+privileged=full
+foreground=0
+net_mode=host
+uuid=f73f472846110989f72f311eac5fa549
+bind_mounts=/data:/mnt/data
+run_at_boot=0
+use_sparse_image=1
+sparse_image_size_gb=40
+[/proc/1/environ]
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+TERM=xterm-256color
+HOME=/root
+container=droidspaces
+LANG=en_US.UTF-8
+
+########## H. 网络连通性（只读探测） ##########
+[ping 网关/外网]
+--- 1.1.1.1 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1001ms
+rtt min/avg/max/mdev = 146.987/174.150/201.314/27.163 ms
+[DNS 解析]
+198.18.0.27     github.com
+[HTTPS 探测]
+github.com -> HTTP 200, dns=0.017084s connect=0.017626s tls=0.453933s total=1.020354s
+[策略路由表]
+default via 10.16.176.106 dev rmnet_data3 table 1027 proto static mtu 1410 
+default dev dummy0 table 1002 proto static scope link 
+default via fe80::15cd:5ba5:94c4:59b7 dev rmnet_data3 table 1027 proto ra metric 1024 expires 63041sec hoplimit 255 pref medium
+2408:8571:bb05:3d8e::/64 dev rmnet_data2 table 1000000020 proto static metric 1024 pref medium
+default dev dummy0 table 1002 proto static metric 1024 pref medium
+2408:8571:bb05:3d8e::/64 dev rmnet_data2 table 1020 proto kernel metric 256 pref medium
+2408:8571:bb05:3d8e::/64 dev rmnet_data2 table 1020 proto static metric 1024 pref medium
+default via fe80::8b3:ed7:bfc7:4a1b dev rmnet_data2 table 1020 proto ra metric 1024 expires 65367sec mtu 1400 hoplimit 255 pref medium
+default via fe80::4185:f120:501e:eece dev rmnet_data1 table 1022 proto ra metric 1024 expires 63035sec hoplimit 255 pref medium
+
+########## I. 磁盘镜像与稀疏情况 ##########
+[rootfs.img 宿主侧 stat]
+size=42949672960 blocks=25398064 blksize=512
+[容器内已用]
+/dev/block/loop50   40G  4.1G   36G  11% /
+[宿主 /data 剩余]
+/dev/block/dm-61  220G  139G   82G  63% /mnt/data
+
+########## J. 应用侧存在性（无 PATH 依赖） ##########
+  命中 /usr/bin/gcc-15
+  命中 /bin/gcc-15
+  命中 /usr/bin/g++-15
+  命中 /bin/g++-15
+  命中 /usr/bin/python3.14
+  命中 /bin/python3.14
+[apt 相关包名]
+  curl 8.18.0-1ubuntu2.7
+  git 1:2.53.0-1ubuntu1
+  wget 1.25.0-2ubuntu4.4
+
+########## 第三阶段诊断结束 ##########

@@ -1,0 +1,531 @@
+
+########## A. 内核配置 ##########
+[来源] /proc/config.gz
+[内核版本行]
+# Linux/arm64 6.6.118 Kernel Configuration
+CONFIG_LOCALVERSION="-android15-8-gf4dc45704e54-abogki20260727-4k"
+[cgroup / ns]
+CONFIG_CGROUPS=y
+CONFIG_MEMCG=y
+CONFIG_MEMCG_KMEM=y
+CONFIG_BLK_CGROUP=y
+CONFIG_CGROUP_WRITEBACK=y
+CONFIG_CGROUP_SCHED=y
+CONFIG_CGROUP_FREEZER=y
+CONFIG_CGROUP_CPUACCT=y
+CONFIG_CGROUP_BPF=y
+CONFIG_NAMESPACES=y
+CONFIG_UTS_NS=y
+CONFIG_IPC_NS=y
+CONFIG_USER_NS=y
+CONFIG_PID_NS=y
+CONFIG_NET_NS=y
+CONFIG_BLK_CGROUP_RWSTAT=y
+CONFIG_BLK_CGROUP_IOCOST=y
+CONFIG_BLK_CGROUP_IOPRIO=y
+CONFIG_CGROUP_NET_PRIO=y
+[内存管理]
+CONFIG_SWAPPINESS=200
+CONFIG_PSI=y
+CONFIG_SWAP=y
+CONFIG_ZSMALLOC=y
+CONFIG_ZSMALLOC_CHAIN_SIZE=8
+CONFIG_COMPACTION=y
+CONFIG_KSM=y
+CONFIG_TRANSPARENT_HUGEPAGE=y
+CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=y
+CONFIG_LRU_GEN=y
+CONFIG_LRU_GEN_ENABLED=y
+CONFIG_DAMON=y
+CONFIG_DAMON_VADDR=y
+CONFIG_DAMON_SYSFS=y
+[调度]
+CONFIG_PREEMPT_BUILD=y
+CONFIG_PREEMPT=y
+CONFIG_PREEMPT_COUNT=y
+CONFIG_PREEMPTION=y
+CONFIG_PREEMPT_RCU=y
+CONFIG_UCLAMP_TASK=y
+CONFIG_UCLAMP_BUCKETS_COUNT=20
+CONFIG_FAIR_GROUP_SCHED=y
+CONFIG_UCLAMP_TASK_GROUP=y
+CONFIG_SCHED_MC=y
+CONFIG_NR_CPUS=32
+CONFIG_HZ_250=y
+CONFIG_HZ=250
+CONFIG_PREEMPT_NOTIFIERS=y
+[IO / 块层]
+CONFIG_BLK_CGROUP=y
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_AIO=y
+CONFIG_IO_URING=y
+CONFIG_BLK_RQ_ALLOC_TIME=y
+CONFIG_BLK_CGROUP_RWSTAT=y
+CONFIG_BLK_DEV_BSG_COMMON=y
+CONFIG_BLK_ICQ=y
+CONFIG_BLK_DEV_BSGLIB=y
+CONFIG_BLK_DEV_ZONED=y
+CONFIG_BLK_DEV_THROTTLING=y
+CONFIG_BLK_WBT=y
+CONFIG_BLK_CGROUP_IOCOST=y
+CONFIG_BLK_CGROUP_IOPRIO=y
+CONFIG_BLK_DEBUG_FS=y
+CONFIG_BLK_DEBUG_FS_ZONED=y
+CONFIG_BLK_INLINE_ENCRYPTION=y
+CONFIG_BLK_INLINE_ENCRYPTION_FALLBACK=y
+CONFIG_BLK_MQ_PCI=y
+CONFIG_BLK_MQ_VIRTIO=y
+CONFIG_BLK_PM=y
+CONFIG_BLK_MQ_STACKING=y
+CONFIG_MQ_IOSCHED_DEADLINE=y
+CONFIG_MQ_IOSCHED_KYBER=y
+CONFIG_IOSCHED_BFQ=y
+[文件系统/其他]
+CONFIG_BPF_SYSCALL=y
+CONFIG_KALLSYMS=y
+CONFIG_KALLSYMS_ALL=y
+CONFIG_KALLSYMS_BASE_RELATIVE=y
+CONFIG_MODULES_USE_ELF_RELA=y
+CONFIG_MODULES=y
+CONFIG_MODULES_TREE_LOOKUP=y
+CONFIG_NTSYNC=y
+CONFIG_FUSE_FS=y
+CONFIG_FUSE_BPF=y
+CONFIG_OVERLAY_FS=y
+CONFIG_OVERLAY_FS_REDIRECT_ALWAYS_FOLLOW=y
+CONFIG_TMPFS=y
+CONFIG_TMPFS_POSIX_ACL=y
+CONFIG_TMPFS_XATTR=y
+[安全]
+CONFIG_STACKPROTECTOR_PER_TASK=y
+CONFIG_STACKPROTECTOR=y
+CONFIG_STACKPROTECTOR_STRONG=y
+CONFIG_HARDENED_USERCOPY=y
+CONFIG_SECURITY_SELINUX=y
+CONFIG_SECURITY_SELINUX_DEVELOP=y
+CONFIG_SECURITY_SELINUX_AVC_STATS=y
+CONFIG_SECURITY_SELINUX_SIDTAB_HASH_BITS=9
+CONFIG_SECURITY_SELINUX_SID2STR_CACHE_SIZE=256
+CONFIG_SECURITY_SELINUX_AVC_HASH_BITS=9
+
+########## B. 工具链 ##########
+gcc        /usr/bin/gcc                     gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+g++        /usr/bin/g++                     g++ (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+clang      （未安装）
+clang++    （未安装）
+rustc      （未安装）
+cargo      （未安装）
+node       （未安装）
+npm        （未安装）
+pnpm       （未安装）
+yarn       （未安装）
+python3    /usr/bin/python3                 Python 3.14.4
+pip3       （未安装）
+go         /usr/bin/go                      flag provided but not defined: -version
+git        /usr/bin/git                     git version 2.53.0
+make       （未安装）
+ninja      （未安装）
+cmake      （未安装）
+ccache     （未安装）
+distcc     （未安装）
+sccache    （未安装）
+mold       （未安装）
+lld        （未安装）
+ld.gold    /usr/bin/ld.gold                 GNU gold (GNU Binutils for Ubuntu 2.44) 1.16
+gdb        （未安装）
+strace     /usr/bin/strace                  strace -- version 6.19
+perf       （未安装）
+iostat     （未安装）
+[nproc / 编译并行度默认值]
+nproc=8
+MAKEFLAGS=(未设置)
+npm_config_jobs=(未设置)
+CARGO_BUILD_JOBS=(未设置)
+
+########## C. 网络（shared netns = 宿主网络） ##########
+[ip addr]
+1: lo    inet 127.0.0.1/8 scope host lo\       valid_lft forever preferred_lft forever
+1: lo    inet6 ::1/128 scope host proto kernel_lo \       valid_lft forever preferred_lft forever
+2: dummy0    inet6 fe80::9ca4:3dff:fe39:d091/64 scope link proto kernel_ll \       valid_lft forever preferred_lft forever
+3: ifb0    inet6 fe80::4fc:6dff:fee2:854c/64 scope link proto kernel_ll \       valid_lft forever preferred_lft forever
+4: ifb1    inet6 fe80::c046:f4ff:fefa:b170/64 scope link proto kernel_ll \       valid_lft forever preferred_lft forever
+17: rmnet_ipa0    inet6 fe80::200:ff:fe00:0/64 scope link proto kernel_ll \       valid_lft forever preferred_lft forever
+19: ifb2    inet6 fe80::d8ca:bff:fe9d:c359/64 scope link proto kernel_ll \       valid_lft forever preferred_lft forever
+20: rmnet_data2    inet6 2408:8571:bb05:3d8e:3404:71ff:fe2b:ae69/64 scope global dynamic mngtmpaddr proto kernel_ra \       valid_lft forever preferred_lft forever
+20: rmnet_data2    inet6 fe80::3404:71ff:fe2b:ae69/64 scope link proto kernel_ll \       valid_lft forever preferred_lft forever
+21: rmnet_data0    inet6 fe80::c8fb:75ff:fe88:fc1a/64 scope link proto kernel_ll \       valid_lft forever preferred_lft forever
+22: rmnet_data1    inet6 240a:42eb:7412:1294:a806:cbff:fe31:7f0e/64 scope global dynamic mngtmpaddr proto kernel_ra \       valid_lft forever preferred_lft forever
+22: rmnet_data1    inet6 fe80::a806:cbff:fe31:7f0e/64 scope link proto kernel_ll \       valid_lft forever preferred_lft forever
+[默认路由]
+[resolv.conf]
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+[TCP sysctl]
+  net.core.rmem_max                          = 16777216
+  net.core.wmem_max                          = 8388608
+  net.core.rmem_default                      = 229376
+  net.core.wmem_default                      = 229376
+  net.ipv4.tcp_rmem                          = 524288	1048576	8808040
+  net.ipv4.tcp_wmem                          = 524288	1048576	6710886
+  net.ipv4.tcp_congestion_control            = bbr
+  net.core.somaxconn                         = 4096
+  net.ipv4.tcp_max_syn_backlog               = 1024
+  net.core.netdev_max_backlog                = 100000
+  net.ipv4.tcp_fastopen                      = 1
+  net.ipv4.tcp_slow_start_after_idle         = 1
+  net.ipv4.tcp_mtu_probing                   = 1
+  net.ipv4.ip_local_port_range               = 32768	60999
+  net.ipv4.tcp_tw_reuse                      = 2
+  net.core.bpf_jit_enable                    = 1
+[MTU]
+1: lo	mtu 65536
+2: dummy0	mtu 1500
+3: ifb0	mtu 1500
+4: ifb1	mtu 1500
+5: tunl0	mtu 1480
+6: gre0	mtu 1476
+7: gretap0	mtu 1462
+8: erspan0	mtu 1450
+
+########## D. I/O / 块设备详情 ##########
+--- loop50
+    scheduler=[[none] mq-deadline kyber bfq ]
+    nr_requests=128 read_ahead_kb=128
+    rotational=0 wbt_lat_usec= nomerges=0
+    max_sectors_kb=1280 max_hw_sectors_kb=1280
+    iostats=0 add_random=0
+    discard_max_bytes=4294966784 write_cache=write back
+--- dm-61
+    scheduler=[]
+    nr_requests= read_ahead_kb=512
+    rotational=0 wbt_lat_usec= nomerges=0
+    max_sectors_kb=512 max_hw_sectors_kb=1024
+    iostats=1 add_random=0
+    discard_max_bytes=134217728 write_cache=write back
+--- sda
+    scheduler=[[none] mq-deadline kyber bfq ]
+    nr_requests=63 read_ahead_kb=512
+    rotational=0 wbt_lat_usec= nomerges=0
+    max_sectors_kb=512 max_hw_sectors_kb=1024
+    iostats=0 add_random=0
+    discard_max_bytes=134217728 write_cache=write back
+--- sdf
+    scheduler=[[none] mq-deadline kyber bfq ]
+    nr_requests=63 read_ahead_kb=512
+    rotational=0 wbt_lat_usec= nomerges=0
+    max_sectors_kb=512 max_hw_sectors_kb=1024
+    iostats=0 add_random=0
+    discard_max_bytes=34359734272 write_cache=write back
+[/sys/block/loop50 直接确认]
+alignment_offset
+bdi
+capability
+dev
+discard_alignment
+[loop50 后端文件]
+/data/local/Droidspaces/Containers/ubuntu/rootfs.img
+[磁盘统计 iostat -x 1 2]
+
+########## E. CPU 亲和性与调度 ##########
+[self status 关键行]
+CapEff:	000001ffffffffff
+Seccomp:	0
+Seccomp_filters:	0
+Cpus_allowed:	ff
+Cpus_allowed_list:	0-7
+Mems_allowed:	1
+Mems_allowed_list:	0
+[任务亲和性]
+pid 1159's current affinity list: 0-7
+[sched_rt_runtime_us]
+1250000
+[sched_child_runs_first]
+0
+[per-cpu 频率现状]
+  cpu0 cur=2400000 min=556800 max=2918400
+  cpu3 cur=2400000 min=556800 max=2918400
+  cpu6 cur=3072000 min=1017600 max=3072000
+  cpu7 cur=3072000 min=1017600 max=3072000
+[cpu.shares / cpu.weight (上游 v1 视图)]
+(容器内无 v1 cpu 挂载)
+[cpuidle 状态 (cpu0)]
+driver
+state0
+state1
+
+########## F. Droidspaces vproc 机制（负载/uptime 来源） ##########
+[vproc 挂载内容]
+total 8
+drwxr-xr-x+ 2 root root  80 Sep 29 15:25 .
+drwxr-xr-x+ 3 root root 180 Sep 29 15:25 ..
+-rw-r--r--+ 1 root root  27 Sep 29 15:31 loadavg
+-rw-r--r--+ 1 root root  15 Sep 29 15:31 uptime
+[容器内 /proc/loadavg]
+13.48 13.75 13.05 3/9448 0
+[容器内 /proc/uptime]
+353.33 2818.85
+[vproc 里有无 loadavg 副本]
+/run/droidspaces
+/run/droidspaces/version
+/run/droidspaces/mount
+/run/droidspaces/name
+/run/droidspaces/container.config
+/run/droidspaces/f73f472846110989f72f311eac5fa549
+/run/droidspaces/resolv.conf
+/run/droidspaces/vproc
+/run/droidspaces/vproc/loadavg
+/run/droidspaces/vproc/uptime
+[/proc/uptime 挂载来源]
+none[/uptime] tmpfs rw,nosuid,nodev,relatime,seclabel,size=1024k,mode=755
+[宿主真实 uptime]
+353.33 2818.85
+
+[开机时长来源对比]
+353
+
+########## G. systemd 服务与进程 ##########
+[运行中的 unit]
+  console-getty.service    loaded active running Console Getty
+  cron.service             loaded active running Regular background program processing daemon
+  dbus.service             loaded active running D-Bus System Message Bus
+  systemd-journald.service loaded active running Journal Service
+  systemd-logind.service   loaded active running User Login Management
+  systemd-udevd.service    loaded active running Rule-based Manager for Device Events and Files
+[unit 总数]
+6
+[failed unit]
+● systemd-networkd-resolve-hook.socket loaded failed failed Network Management Resolve Hook Socket
+● systemd-networkd-varlink.socket      loaded failed failed Network Management Varlink Socket
+● systemd-networkd.socket              loaded failed failed Network Management Netlink Socket
+[进程总数]
+11
+[内存 TOP 12]
+USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root           1  0.3  0.1  26808 14668 ?        Ss   15:25   0:01 /sbin/init systemd.unified_cgroup_hierarchy=1
+root          74  0.1  0.0  33296  8840 ?        Ss   15:25   0:00 /usr/lib/systemd/systemd-udevd
+root          26  0.0  0.0  26232  7348 ?        S<s  15:25   0:00 /usr/lib/systemd/systemd-journald
+root          96  0.0  0.0  17568  6612 ?        Ss   15:25   0:00 /usr/lib/systemd/systemd-logind
+root        1158  2.7  0.0  33300  5696 ?        S    15:31   0:00 (udev-worker)
+root        1349  0.0  0.0  16684  5536 ?        S    15:31   0:00 head -13
+message+      92  0.0  0.0   7128  2824 ?        Ss   15:25   0:00 @dbus-daemon --system --address=systemd: --nofork --nopidfile --systemd-activation --syslog-only
+root        1348  0.0  0.0   5984  2796 ?        R    15:31   0:00 ps aux --sort=-rss
+root          91  0.0  0.0   4560  1860 ?        Ss   15:25   0:00 /usr/sbin/cron -f -P
+root         684  0.0  0.0   4760  1756 console  Ss+  15:25   0:00 /usr/sbin/agetty --noreset --noclear --issue-file=/etc/issue:/etc/issue.d:/run/issue.d:/usr/lib/issue.d --keep-baud 115200,57600,38400,9600 - xterm-256color
+root        1159  4.3  0.0   2668  1436 ?        S    15:31   0:00 /bin/sh /mnt/data/local/tmp/diag2.sh
+[CPU TOP 12]
+USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root        1159  4.3  0.0   2668  1436 ?        S    15:31   0:00 /bin/sh /mnt/data/local/tmp/diag2.sh
+root        1158  2.7  0.0  33300  5696 ?        S    15:31   0:00 (udev-worker)
+root           1  0.3  0.1  26808 14668 ?        Ss   15:25   0:01 /sbin/init systemd.unified_cgroup_hierarchy=1
+root          74  0.1  0.0  33296  8840 ?        Ss   15:25   0:00 /usr/lib/systemd/systemd-udevd
+message+      92  0.0  0.0   7128  2824 ?        Ss   15:25   0:00 @dbus-daemon --system --address=systemd: --nofork --nopidfile --systemd-activation --syslog-only
+root          96  0.0  0.0  17568  6612 ?        Ss   15:25   0:00 /usr/lib/systemd/systemd-logind
+root          26  0.0  0.0  26232  7348 ?        S<s  15:25   0:00 /usr/lib/systemd/systemd-journald
+root          91  0.0  0.0   4560  1860 ?        Ss   15:25   0:00 /usr/sbin/cron -f -P
+root         684  0.0  0.0   4760  1756 console  Ss+  15:25   0:00 /usr/sbin/agetty --noreset --noclear --issue-file=/etc/issue:/etc/issue.d:/run/issue.d:/usr/lib/issue.d --keep-baud 115200,57600,38400,9600 - xterm-256color
+root        1350  0.0  0.0   6696  2832 ?        R    15:31   0:00 ps aux --sort=-%cpu
+root        1351  0.0  0.0  17584  5024 ?        R    15:31   0:00 head -13
+
+########## H. 内存细节 ##########
+[/proc/meminfo 全量]
+MemTotal:       11317852 kB
+MemFree:          263112 kB
+MemAvailable:    2635140 kB
+Buffers:            9592 kB
+Cached:          2509776 kB
+SwapCached:       111564 kB
+Active:          3109480 kB
+Inactive:        1874712 kB
+Active(anon):    2216596 kB
+Inactive(anon):   384248 kB
+Active(file):     892884 kB
+Inactive(file):  1490464 kB
+Unevictable:       98164 kB
+Mlocked:           96792 kB
+SwapTotal:       9961468 kB
+SwapFree:        3976904 kB
+Dirty:               568 kB
+Writeback:             0 kB
+AnonPages:       2458264 kB
+Mapped:          1484784 kB
+Shmem:             63988 kB
+KReclaimable:     339624 kB
+Slab:             938992 kB
+SReclaimable:     242788 kB
+SUnreclaim:       696204 kB
+KernelStack:      151328 kB
+ShadowCallStack:       0 kB
+PageTables:       229184 kB
+SecPageTables:         0 kB
+KsmZeroPages:        70904 kB
+NFS_Unstable:          0 kB
+Bounce:                0 kB
+WritebackTmp:          0 kB
+CommitLimit:    15620392 kB
+Committed_AS:   377871872 kB
+VmallocTotal:   257687552 kB
+VmallocUsed:      508676 kB
+VmallocChunk:          0 kB
+Percpu:            11584 kB
+AnonHugePages:         0 kB
+ShmemHugePages:        0 kB
+ShmemPmdMapped:        0 kB
+FileHugePages:         0 kB
+FilePmdMapped:         0 kB
+CmaTotal:         655360 kB
+CmaFree:               0 kB
+IonTotalCache:     29396 kB
+IonTotalUsed:     446420 kB
+RsvPool:          568688 kB
+GPUTotalUsed:     268272 kB
+ZramCompr:             0 kB
+[slab top]
+slabinfo - version: 2.1
+# name            <active_objs> <num_objs> <objsize> <objperslab> <pagesperslab> : tunables <limit> <batchcount> <sharedfactor> : slabdata <active_slabs> <num_slabs> <sharedavail>
+pid_2                608    608    128   32    1 : tunables    0    0    0 : slabdata     19     19      0
+zspage            157501 167973     56   73    1 : tunables    0    0    0 : slabdata   2301   2301      0
+zs_handle         1440552 1556992      8  512    1 : tunables    0    0    0 : slabdata   3041   3041      0
+cam_req_mgr_timer    230    230     88   46    1 : tunables    0    0    0 : slabdata      5      5      0
+cmd_list_obj        1360   1360     24  170    1 : tunables    0    0    0 : slabdata      8      8      0
+adreno_dispatch_job   2048   2048     16  256    1 : tunables    0    0    0 : slabdata      8      8      0
+msm_cvp_smem         256    256    128   32    1 : tunables    0    0    0 : slabdata      8      8      0
+cvp_internal_buf     448    448     64   64    1 : tunables    0    0    0 : slabdata      7      7      0
+msm_cvp_frame         85     85   2600   12    8 : tunables    0    0    0 : slabdata      8      8      0
+cvp_session_msg       26     26    312   26    2 : tunables    0    0    0 : slabdata      1      1      0
+kgsl_iommu_addr_entry   3754   3774     40  102    1 : tunables    0    0    0 : slabdata     37     37      0
+IPA_RX_PKT_WRAPPER   3429   3432    104   39    1 : tunables    0    0    0 : slabdata     88     88      0
+IPA_TX_PKT_WRAPPER    351    351    104   39    1 : tunables    0    0    0 : slabdata      9      9      0
+IPA_RT_TBL           108    108    224   36    2 : tunables    0    0    0 : slabdata      3      3      0
+IPA_HDR_PROC_CTX_OFFSET      0      0     32  128    1 : tunables    0    0    0 : slabdata      0      0      0
+IPA_HDR_PROC_CTX       0      0     88   46    1 : tunables    0    0    0 : slabdata      0      0      0
+IPA_FNR_STATS        256    256     16  256    1 : tunables    0    0    0 : slabdata      1      1      0
+IPA_HDR_OFFSET       512    512     32  128    1 : tunables    0    0    0 : slabdata      4      4      0
+[buddyinfo]
+Node 0, zone   Normal  12667   8661   1455    290     27     18      5      2      1      0      0 
+[zoneinfo]
+Node 0, zone    DMA32
+  pages free     0
+        min      0
+        low      0
+        high     0
+        present  0
+        managed  0
+Node 0, zone   Normal
+  pages free     39969
+        min      5792
+        low      23334
+        high     40876
+        present  2925245
+        managed  2829463
+      nr_free_pages 39969
+      nr_zone_inactive_anon 96062
+      nr_zone_active_anon 553894
+      nr_zone_inactive_file 372617
+      nr_zone_active_file 223221
+      nr_zone_unevictable 24541
+      nr_zone_write_pending 143
+      nr_free_cma  0
+              high:  2916
+              high:  2916
+              high:  2916
+              high:  2916
+              high:  2916
+              high:  2916
+              high:  2916
+              high:  2916
+[vmstat -s 摘要]
+     11317852 K total memory
+      8683000 K used memory
+      3109752 K active memory
+      1874924 K inactive memory
+       262612 K free memory
+         9592 K buffer memory
+      2752860 K swap cache
+      9961468 K total swap
+      5984564 K used swap
+      3976904 K free swap
+       147076 non-nice user cpu ticks
+         6720 nice user cpu ticks
+       163433 system cpu ticks
+      1570145 idle cpu ticks
+          938 IO-wait cpu ticks
+        23635 IRQ cpu ticks
+         2375 softirq cpu ticks
+          135 stolen cpu ticks
+            0 non-nice guest cpu ticks
+            0 nice guest cpu ticks
+     42875589 K paged in
+     17720636 K paged out
+      1209765 pages swapped in
+      3666672 pages swapped out
+     16235824 interrupts
+[容器 cgroup 内存限制]
+  memory.max             = 
+  memory.high            = 
+  memory.current         = 
+  memory.swap.max        = 
+  memory.swap.current    = 
+  memory.stat            = 
+[memory.stat 关键项]
+
+########## I. 挂载参数与 tmpfs 容量 ##########
+[/tmp]
+tmpfs tmpfs rw,nosuid,nodev,relatime,seclabel  5.4G
+[/dev/shm]
+tmpfs tmpfs rw,nosuid,nodev,seclabel  5.4G
+[/run]
+tmpfs tmpfs rw,nosuid,nodev,relatime,seclabel,mode=755  5.4G
+[全部 tmpfs]
+/sys/fs/cgroup 0 rw,nosuid,nodev,noexec,relatime,seclabel,size=16384k,mode=755
+/run 5.4G rw,nosuid,nodev,relatime,seclabel,mode=755
+/tmp 5.4G rw,nosuid,nodev,relatime,seclabel
+/run/droidspaces/vproc 1M rw,nosuid,nodev,relatime,seclabel,size=1024k,mode=755
+/proc/uptime 1M rw,nosuid,nodev,relatime,seclabel,size=1024k,mode=755
+/proc/loadavg 1M rw,nosuid,nodev,relatime,seclabel,size=1024k,mode=755
+/dev/shm 5.4G rw,nosuid,nodev,seclabel
+/run/credentials/systemd-journald.service 1M ro,nosuid,nodev,noexec,relatime,nosymfollow,seclabel,size=1024k,nr_inodes=1024,mode=700,noswap
+/run/credentials/console-getty.service 1M ro,nosuid,nodev,noexec,relatime,nosymfollow,seclabel,size=1024k,nr_inodes=1024,mode=700,noswap
+
+########## J. 已安装包与磁盘占用 ##########
+[dpkg 包数]
+439
+[根目录占用 TOP]
+1.1G	/usr
+457M	/var
+4.0K	/opt
+2.5G	/root
+4.0K	/home
+0	/tmp
+[/usr 占用 TOP 10]
+491M	/usr/lib
+326M	/usr/share
+150M	/usr/bin
+105M	/usr/libexec
+28M	/usr/include
+23M	/usr/sbin
+100K	/usr/local
+4.0K	/usr/src
+4.0K	/usr/games
+[/var/log 大小]
+1016K	/var/log
+[journal 占用]
+Archived and active journals take up 8M in the file system.
+
+########## K. 时间与杂项 ##########
+[date]
+Tue Sep 29 15:31:36 UTC 2026
+[timedatectl]
+               Local time: Tue 2026-09-29 15:31:36 UTC
+           Universal time: Tue 2026-09-29 15:31:36 UTC
+                 RTC time: n/a
+                Time zone: Etc/UTC (UTC, +0000)
+System clock synchronized: no
+              NTP service: inactive
+          RTC in local TZ: no
+[locale]
+LANG=en_US.UTF-8
+LANGUAGE=
+LC_CTYPE="en_US.UTF-8"
+[swap 使用 TOP]
+
+########## 第二阶段诊断结束 ##########

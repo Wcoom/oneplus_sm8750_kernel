@@ -1,0 +1,43 @@
+===== BENCHMARK [before] 2026-09-29T15:37:36Z =====
+kernel: 6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k
+loadavg(宿主全局): 12.42 13.71 13.31 1/9489 0
+memfree_kb: 322428 memavail_kb: 2474980
+zram_used_kb: 6150464
+
+--- B1 单核 CPU 吞吐 (openssl sha256, 2s) ---
+B1_sha256_16k_kps=1704965.15k
+--- B2 8 核并行 CPU 吞吐 (8x openssl sha256, 2s) ---
+B2_8core_sum_16k_kps=11461079 (n=8)
+--- B3 进程创建吞吐 (1000x /bin/true) ---
+B3_fork_exec_1000_ms=923
+--- B4 顺序写+fsync 256MB ---
+B4_write256M_fsync_tmpfs_ms=131
+B4_write256M_fsync_rootfs_ext4_loop_ms=421
+B4_write256M_fsync_f2fs_direct_ms=958
+--- B5 小文件创建/删除 (2000 x 空文件) ---
+B5_create2000_f2fs_direct_ms=76  B5_delete2000_f2fs_direct_ms=38
+B5_create2000_tmpfs_ms=38  B5_delete2000_tmpfs_ms=14
+B5_create2000_rootfs_ext4_loop_ms=60  B5_delete2000_rootfs_ext4_loop_ms=32
+--- B6 gcc -O2 编译吞吐（同一 TU 编译 5 次）---
+B6_source_lines=804
+B6_gcc5_ms=4989
+--- B7 Python 解释器启动 (100x) ---
+B7_python_start_100_ms=2916
+--- B8 内存分配+触碰吞吐 (分配并写 512MB) ---
+B8_alloc_touch_512M_ms=907
+--- B9 内存压力指标增量（对比基线）---
+pswpin 1252484
+pswpout 3806990
+allocstall_normal 7182
+allocstall_movable 28800
+pgmajfault 1377480
+pgsteal_direct 1883209
+pgscan_direct 3009444
+pgscan_direct_throttle 2
+compact_stall 131
+compact_fail 126
+PSI_cpu: some avg10=2.81 avg60=5.26 avg300=7.96 total=300025917 full avg10=0.00 avg60=0.00 avg300=0.00 total=0 
+PSI_mem: some avg10=0.16 avg60=0.08 avg300=0.07 total=27746171 full avg10=0.16 avg60=0.08 avg300=0.06 total=18744901 
+PSI_io : some avg10=0.10 avg60=0.16 avg300=0.13 total=11470123 full avg10=0.10 avg60=0.13 avg300=0.09 total=6227059 
+
+===== END [before] =====

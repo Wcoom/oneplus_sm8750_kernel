@@ -1,0 +1,126 @@
+
+##### Droidspaces 环境注入点 #####
+[/etc/profile.d/droidspaces_env.sh]
+[/etc/profile.d/01-locale-fix.sh]
+# Make sure the locale variables are set to valid values.
+eval $(/usr/bin/locale-check C.UTF-8)
+
+##### apt 源与网络 #####
+[sources.list]
+[sources.list.d]
+ubuntu.sources
+ubuntu.sources.orig-20260928
+--- /etc/apt/sources.list.d/ubuntu.sources
+
+Types: deb deb-src
+URIs: https://mirrors.ustc.edu.cn/ubuntu-ports/
+Suites: resolute resolute-updates resolute-backports
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb deb-src
+URIs: https://mirrors.ustc.edu.cn/ubuntu-ports/
+Suites: resolute-security
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+[apt 代理配置]
+
+##### apt 可达性（只读探测） #####
+Reading package lists...
+Building dependency tree...
+Reading state information...
+Solving dependencies...
+Suggested packages:
+  make-doc
+E: Unable to fetch some archives, maybe run apt update or try with --fix-missing?
+
+##### 已装/可装的关键包 #####
+  未装   build-essential
+  未装   make
+  未装   cmake
+  未装   ninja-build
+  未装   clang
+  未装   lld
+  未装   rustc
+  未装   cargo
+  未装   ccache
+  未装   nodejs
+  未装   npm
+  未装   pnpm
+  未装   python3-pip
+  未装   pkg-config
+  未装   autoconf
+  未装   automake
+  未装   libtool
+  未装   gdb
+
+##### apt 缓存与归档占用 #####
+215M	/var/cache/apt
+214M	/var/lib/apt/lists
+
+##### 时间同步 #####
+[timesyncd 状态]
+not-found
+inactive
+[chrony/ntp]
+/usr/sbin/chronyd
+[当前时间 vs 宿主]
+Tue Sep 29 15:38:42 UTC 2026
+780.77 5965.90
+
+##### ulimit 可调性 #####
+[hard limits]
+32768
+64
+unlimited
+/mnt/data/local/tmp/diag5.sh: 23: ulimit: Illegal option -u
+[当前]
+32768
+64
+8192
+/mnt/data/local/tmp/diag5.sh: 24: ulimit: Illegal option -u
+[/etc/security/limits.conf 有效行]
+[/etc/security/limits.d]
+10-coredump-debian.conf
+*               soft    core            0
+root            soft    core            0
+*               hard    core            infinity
+root            hard    core            infinity
+[systemd DefaultLimitNOFILE]
+62:#DefaultLimitCPU=
+63:#DefaultLimitFSIZE=
+64:#DefaultLimitDATA=
+65:#DefaultLimitSTACK=
+66:#DefaultLimitCORE=
+67:#DefaultLimitRSS=
+68:#DefaultLimitNOFILE=1024:524288
+69:#DefaultLimitAS=
+70:#DefaultLimitNPROC=
+71:#DefaultLimitMEMLOCK=8M
+
+##### bun / claude / codex 实况 #####
+[bun]
+1.4.2
+[claude]
+2.1.274 (Claude Code)
+[codex]
+codex-cli 0.158.0
+[/root/code]
+README.md
+ccstatusline-zh
+host-exec-bridge
+tools
+[codex packages 内容]
+app-server-daemon
+standalone
+1.3G	/root/.codex/packages/standalone
+382M	/root/.codex/packages/app-server-daemon
+
+##### 内核可调项在容器内的可见性（只读） #####
+  /proc/sys/vm/swappiness                            w=no r=200
+  /proc/sys/vm/dirty_ratio                           w=yes r=20
+  /proc/sys/vm/overcommit_memory                     w=yes r=1
+  /sys/kernel/mm/transparent_hugepage/enabled        w=yes r=always madvise [never]
+  /sys/kernel/mm/lru_gen/min_ttl_ms                  w=yes r=0
+
+##### 结束 #####

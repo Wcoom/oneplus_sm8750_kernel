@@ -58,7 +58,7 @@
 > 2026-08-06 提交 `522eb9730e2bc` 移除 zram 1:2 与 watermark 100 两项本地调优，保留 swappiness=200（ACK 基线自带，勿当本地改动回退）。
 
 
-## 本地修改与维护记录（截至 2026-09-23；后续维护见第 24 项）
+## 本地修改与维护记录（截至 2026-09-29；后续维护见第 25 项）
 
 1. **fq_guard** (`net/sched/fq_guard.c`, commit `d4050a049` + 稳定性/低功耗优化, `CONFIG_NET_SCH_FQ_GUARD=y`)
    - 内核源码级守护：监听 NETDEV_UP/CHANGE/REGISTER，延迟后强制替换数据接口 root qdisc 为 fq
@@ -279,7 +279,13 @@
     - 构建 exit 0：Image 39,131,648 字节，SHA-256 31908e677667b600e828ef5dc7a165137770e0931af6f38a3b390dc5fc65a789；刷机包 AnyKernel3-20260923-0228.zip，SHA-256 2f32c4ef1444f2208b73c0bd2fd13f230165f5053f4a1e184cf50995fca514a7，ZIP 内 Image 哈希一致；本次未自动刷机。
     - 环境说明：迁移到 Ubuntu 26.04 后按本任务书完成首轮维护；项目/工具链位于 /home/wcoom/桌面/oplus13，推送经 SSH 到 github/6.6.118-13T（301e1f905822..d1b7b6d3e399）。
 
-> 2026-09-23 第 24 项记录第九轮 ACK 合并（3 提交）与构建/打包校验；2026-09-20 第 23 项记录第八轮 ACK 合并、构建/打包校验与 DDL 持久化保护；2026-09-11 第 22 项记录 DDL 越界写重启定位与 LXC 补丁重移植（含刷机验证 `#47`）；此前维护记录中的真机验证结论仍按各自日期有效。
+25. **2026-09-29 第十轮 ACK 合并（6.6.143 LTS 大轮）**（内核合并 `b2008ec65a5d`，维护记录 `599b6aaf0318`）
+    - 官方 ACK 从 700526826edfa1bcd25d5b8090a793d9b53f8e94 更新到 55dbf85d9283442cd5a1eaf581ce0464ab45cb71（2026-09-25），共 **219 个提交**，主体为 `Merge tag 'android15-6.6.143_r00'`（`Merge 6.6.143 into android15-6.6-lts` → `Linux 6.6.143`）：netfilter/mptcp/af_unix/rxrpc/sctp/mm-hugetlb/memory-failure/USB serial/typec/drm/mmc/i2c/thunderbolt/ksmbd 等大批 CVE 与稳定性修复，ANDROID 侧含 incfs lockdep 子类、KVM arm64 THP PFN 校验、f2fs `FI_NO_EXTENT` 修复、GKI db845c 符号追加，另有 serdev/hci_qca/genetlink/CIFS-SWN 若干上游自身 Revert；备份分支 `backup/pre-ack-20260929`（@ d1b7b6d3e399）。
+    - ⚠️ **任务书的 `curl +log` 尖端核对本轮不可用**：googlesource 的 HTTP 端点返回 Google 503（直连与经 127.0.0.1:7897 均如此），改用**同一官方源**的 `git ls-remote` 取证（git 协议正常），未退回 GitHub 镜像。
+    - **唯一冲突**为 L1 机械冲突 `Makefile` 的 `SUBLEVEL`（上游 143 vs 本地 118），按红线第 6 条保留本地 118，处理后 `Makefile` 相对 HEAD 无其他差异；未使用 `-X ours/-X theirs`。红线全过：Droidspaces KABI（sched.h 1535/1536）、ghost_task 12 行（pid.c 唯一 hunk 在 `__pidfd_fget`，未触及 ghost_task 区域）、NTSYNC×97、SUBLEVEL=118、CONFIG_ZRAM=n、BBG（gitlink 6e32d811 + `CONFIG_LSM` 末尾 baseband_guard）/FQ_GUARD/ReKernel-X 与命名空间配置均保留；`include/trace/hooks` 本轮**零改动**；导出符号仅新增 `ib_umem_check_rereg`、`nf_ct_helper_expectfn_destroy`，RDMA 两符号随文件迁移净零；`include/net/sock.h`、`include/linux/mm.h` 仅声明级改动、无结构体布局变化；冲突标记三型零残留。
+    - 构建为**全量编译**（工作区迁移后 `out/` 不存在；ccache 2.7G/5G）exit 0、`error:` 0 条：版本 6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k，Image 39,131,648 字节，SHA-256 `2521d004f478cfa69acfb1be04ba5f2dfbd78f203e9e6ea9924b84cd9387d858`；刷机包 `AnyKernel3-20260929-1523.zip`，26,000,413 字节，SHA-256 `641ab312a4bde2a951d1055ee89f9e818b91619a135ecf6f78d398f075cb34e0`，包内 `Image-dtb` 哈希与构建产物一致；**尚未推送 github、尚未刷机**。
+
+> 2026-09-29 第 25 项记录第十轮 ACK 合并（219 提交，含 6.6.143 LTS 合并）与全量构建/打包校验（未推送未刷机）；2026-09-23 第 24 项记录第九轮 ACK 合并（3 提交）与构建/打包校验；2026-09-20 第 23 项记录第八轮 ACK 合并、构建/打包校验与 DDL 持久化保护；2026-09-11 第 22 项记录 DDL 越界写重启定位与 LXC 补丁重移植（含刷机验证 `#47`）；此前维护记录中的真机验证结论仍按各自日期有效。
 
 > 2026-08-06 已清洗全部远程提交正文中的 Claude Code `Co-Authored-By` trailer 并重写历史：3 个定制提交与 3 个合并提交 hash 变更（ReKernel-X `3eb91d7cace`、BBG `cc7887d802`、Droidspaces `605e6859e4`、ACK 两轮 `be9610f4683`/`4860642a0474`、whitewhale 同步 `656ece04bd3`），上游 ack/origin 历史 hash 不变；已强制推送到 `github`。
 

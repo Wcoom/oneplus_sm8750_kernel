@@ -1113,7 +1113,7 @@ ccache -s:  Cacheable calls: 4 / 4 (100.0%)
 | `/etc/systemd/system.conf.d/99-ds-dev.conf` | 不存在 | **已删除**（含空目录） | 上一轮 | ✅ 是 | **已删除** |
 | `/etc/systemd/journald.conf.d/99-ds-dev.conf` | 不存在 | **已删除** | 上一轮 | ✅ 是 | **已删除** |
 | `/usr/local/bin/` 下 16 个 ccache shim | 不存在 | **已删除 16 个**（清单见 `/root/.ds-opt/ccache-shims.list`） | 上一轮 S7 | ✅ 是 | **已删除** |
-| `/mnt/data/ds-build/` | 不存在 | **已删除** | 上一轮 S1/S2 | ✅ 是 | **已删除** |
+| `/mnt/data/ds-build/` | 不存在 | **已删除** | 上一轮 S1/S2 | ✅ 是 | **已删除**。⚠️ 该目录**内含 S4 迁入的 ccache 缓存**（`ds-build/ccache`），已随之删除 —— 见下方「已确认的副作用」 |
 | `/mnt/data/.b3`、`.thp`、`.dsb2` | 不存在 | **已删除** | 上一轮基准测试临时目录 | ✅ 是 | **已删除** |
 | `/etc/systemd/system/fstrim.timer.d/override.conf` + `fstrim.service.d/` | 不存在 | **保留** | 上一轮 S3 | ✅ 是 | ⚠️ **保留待裁决**，理由见下 |
 | `/etc/localtime` | `Etc/UTC` | `Asia/Shanghai` | 上一轮 S6 | ✅ 是 | **保留**（非性能调优，宿主同为 CST） |
@@ -1161,6 +1161,34 @@ rustc cargo gcc g++ node npm python3 pip3 autoconf automake libtool gdb git`）�
 > 该路径比宿主的 f2fs 原生路径慢。**这不是"应该用环境变量调优"的理由** ——
 > 正确做法是用**容器配置**（`bind_mounts` / `--rootfs`）而非环境变量来实现，
 > 属于架构层决策。**当前保持还原状态**，等用户裁决。
+
+#### ⚠️ 已确认的副作用：ccache 缓存随 `ds-build/` 一并被删除
+
+**如实记录**：§7.6 记录 S4 把 ccache 缓存迁到了 **`/mnt/data/ds-build/ccache`**；
+而 §1 清理删除 `/mnt/data/ds-build/` 时，**该缓存随之被删**。
+本轮复查（容器内）四个候选路径**均不存在**：
+
+```
+✗ /mnt/data/.ccache          ✗ /mnt/data/ds-build/ccache
+✗ /root/.cache/ccache        ✗ /var/cache/ccache
+```
+
+**影响评估 —— 低，且不破坏任何不可再生资源**：
+
+1. ccache 缓存是**纯构建缓存**，内容是编译中间产物，**可再生**（重新编译即重建）；
+2. 它**本来就已经失效** —— §7.7 建立的 16 个 ccache shim **也在 §1 中被删除**，
+   即 ccache 当前**不会被任何调用路径自动触发**，留着缓存也不会被命中；
+3. `ccache` 二进制本身完好（`/usr/bin/ccache`，版本 4.12.3），
+   需要时 `CCACHE_DIR=<路径> ccache gcc ...` 或重建 shim 即可重新启用，
+   缓存会在首次使用时于默认位置自动重建。
+
+**为什么这符合 §1 的处置**：该缓存由**上一轮**的 S4 动作创建（非用户原有环境），
+属「上一轮用户空间调优产生的修改」；§2 明确把 ccache 列为**禁止作为优化主体**的项。
+⇒ **删除是 §1 的正确执行结果，不是误删。** 但它确实**有代价**（失去已预热的缓存），
+故在此明确记录，避免日后"缓存为何不见了"的困惑。
+
+> 参考：容器 rootfs 现状 `40G 总 / 4.2G 已用 / 35G 可用（11%）`；
+> 宿主 `/data`（容器内 `/mnt/data`）`220G 总 / 131G 已用 / 89G 可用（60%）`。
 
 ---
 

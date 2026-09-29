@@ -16,6 +16,10 @@
  *     容器启动 → DDL 关（立即）   容器停止 → linger_ms 后 DDL 开   无容器 → DDL 开
  *   全部锚点都是内核冷路径，零轮询、零常驻线程；容器不在时不产生任何写入。
  *   唯一的例外是启动期对厂商符号的有限次重试（见下），解析成功后彻底停止。
+ *   时序保证：容器出现时的写回在 kretprobe 回调内**持锁内联完成**，不经过 work
+ *   调度——否则“linger 计时器刚把 DDL 开回来、容器恰好又启动”时会有 worker
+ *   唤醒延迟量级的“容器已起、DDL 仍开”窗口。work 只承担 linger 延迟与
+ *   启动期符号重试这两类必须可睡眠的任务。
  *
  * 锚点（2026-09-29 真机 ftrace 实测确认，见 README「真机证据」）：
  *   1) kretprobe copy_pid_ns          flags & CLONE_NEWPID 时登记返回的新 pidns
@@ -40,6 +44,9 @@
  *   - 内置形态下符号始终解析不到 → 重试耗尽即放弃，**从不写入**，DDL 保持当前值；
  *   - pidns 表满、或 kretprobe 出现漏事件（nmissed>0）→ 粘性按“有容器”处理，绝不开启；
  *   - 卸载不改动当前值（安全侧：DDL 保持卸载瞬间的值，必要时由用户或开机脚本重置）。
+ *   - 卸载先落 ddlg_stopping 闸门再取消 work / 注销探针：闸门后 kick 与全部探针
+ *     回调直接返回，堵死“cancel 与 unregister 之间探针又排一次 work”的窗口，
+ *     保证卸载完成后绝无任何写入。
  *
  * 自我纠偏：每次重估都与开关的**实时值**比较。外部若改过开关（例如残留的旧保护
  * 脚本开机写了 0），下一次容器事件就会把它纠回本模块的判定结果，不会出现“模块
@@ -98,6 +105,7 @@
 static int *ddlg_flag;			/* 解析成功前为 NULL */
 static int ddlg_applied = -1;		/* 最近一次写入值；-1 = 尚未接管 */
 static int ddlg_tries;			/* 启动期解析重试计数 */
+static bool ddlg_stopping;		/* 卸载闸门：置位后不再排 work、不再写开关 */
 
 #ifdef MODULE
 extern int global_sched_ddl_enabled;
@@ -230,6 +238,9 @@ static void ddlg_kick(bool urgent)
 {
 	struct workqueue_struct *wq = system_power_efficient_wq;
 
+	if (READ_ONCE(ddlg_stopping))
+		return;
+
 	if (urgent)
 		mod_delayed_work(wq, &ddlg_work, 0);
 	else
@@ -237,11 +248,50 @@ static void ddlg_kick(bool urgent)
 				 msecs_to_jiffies(linger_ms));
 }
 
+/*
+ * 唯一判定出口：把「当前是否按有容器处理」折算成开关值并写入。
+ * 必须在持有 ddlg_lock 时调用——判定与写入同锁，与 pidns 表的增删串行化，
+ * 不会出现“读到 busy=0 之后、写入之前容器恰好出现”的窗口。
+ * 未解析（启动早期）与 dry_run 时只判定不写入。
+ */
+static void ddlg_apply_locked(void)
+{
+	int want, actual;
+
+	if (!ddlg_flag)
+		return;		/* 未解析：由 work 的启动期重试链接管 */
+
+	want = (ddlg_degraded || !policy || __ddlg_busy()) ? 0 : 1;
+
+	if (dry_run) {
+		pr_info("[dry-run] 容器=%d 期望 DDL=%d（未写入，当前=%d）\n",
+			__ddlg_busy(), want, READ_ONCE(*ddlg_flag));
+		return;
+	}
+
+	actual = READ_ONCE(*ddlg_flag);
+
+	/*
+	 * 关键：与**实时值**比较，而不是与上次写入值比较。这样即使开关被外部改过
+	 * （残留的旧保护脚本开机写 0、用户手动 echo），下一次重估也会把它纠回本模块
+	 * 的判定结果，而不会永久停在“自认为在管、实际已被覆盖”的状态。
+	 * 重估只发生在容器事件 / 参数写入 / 启动期有限次重试，不引入任何轮询。
+	 */
+	if (want == actual)
+		return;
+
+	WRITE_ONCE(*ddlg_flag, want);
+	ddlg_applied = want;	/* 仅用于 state 诊断：最近一次写入值 */
+	pr_info("DDL %s（容器=%d，原值 %d）\n", want ? "开启" : "关闭",
+		__ddlg_busy(), actual);
+}
+
 static void ddlg_apply(struct work_struct *work)
 {
 	unsigned long flags;
-	bool busy;
-	int want, actual;
+
+	if (READ_ONCE(ddlg_stopping))
+		return;
 
 	/*
 	 * 内置形态在这里做启动期的有限次重试：厂商模块由用户态 init 从
@@ -269,35 +319,8 @@ static void ddlg_apply(struct work_struct *work)
 	}
 
 	spin_lock_irqsave(&ddlg_lock, flags);
-	busy = __ddlg_busy();
+	ddlg_apply_locked();
 	spin_unlock_irqrestore(&ddlg_lock, flags);
-
-	if (ddlg_degraded || !policy)
-		want = 0;
-	else
-		want = busy ? 0 : 1;
-
-	actual = READ_ONCE(*ddlg_flag);
-
-	if (dry_run) {
-		pr_info("[dry-run] 容器=%d 期望 DDL=%d（未写入，当前=%d）\n",
-			busy, want, actual);
-		return;
-	}
-
-	/*
-	 * 关键：与**实时值**比较，而不是与上次写入值比较。这样即使开关被外部改过
-	 * （残留的旧保护脚本开机写 0、用户手动 echo），下一次重估也会把它纠回本模块
-	 * 的判定结果，而不会永久停在“自认为在管、实际已被覆盖”的状态。
-	 * 重估只发生在容器事件 / 参数写入 / 启动期有限次重试，不引入任何轮询。
-	 */
-	if (want == actual)
-		return;
-
-	WRITE_ONCE(*ddlg_flag, want);
-	ddlg_applied = want;	/* 仅用于 state 诊断：最近一次写入值 */
-	pr_info("DDL %s（容器=%d，原值 %d）\n", want ? "开启" : "关闭", busy,
-		actual);
 }
 
 /* ------------------------------------------------------------------ *
@@ -313,7 +336,6 @@ static int ddlg_copy_pid_ns_entry(struct kretprobe_instance *ri,
 	if (!(nsflags & CLONE_NEWPID))
 		return 1;	/* 非 0 = 不调用对应的返回处理 */
 
-	memcpy(ri->data, &nsflags, sizeof(nsflags));
 	return 0;
 }
 
@@ -325,15 +347,22 @@ static int ddlg_copy_pid_ns_ret(struct kretprobe_instance *ri,
 	unsigned long flags;
 	int urgent = 0;
 
-	if (IS_ERR_OR_NULL(ns))
+	if (READ_ONCE(ddlg_stopping) || IS_ERR_OR_NULL(ns))
 		return 0;
 
 	spin_lock_irqsave(&ddlg_lock, flags);
 	urgent = __ddlg_track(ns);
+	/*
+	 * 容器出现时的写回在探针里**内联完成**（持锁）：这里不许等 work 调度。
+	 * 否则“linger 计时器刚把 DDL 开回 1、容器恰好又启动”时，旧实现要等
+	 * kick 唤醒 worker 再补写 0，负载高时窗口可达数十毫秒（容器已起、
+	 * DDL 仍开）。内联后该窗口收缩为锁交接量级（微秒）。
+	 */
+	ddlg_apply_locked();
 	spin_unlock_irqrestore(&ddlg_lock, flags);
 
 	if (urgent)
-		ddlg_kick(true);	/* 容器出现 → 立即关 */
+		ddlg_kick(true);	/* 未解析时交给 work 重试链兜底 */
 
 	return 0;
 }
@@ -342,7 +371,6 @@ static struct kretprobe ddlg_kr_copy_pid_ns = {
 	.kp.symbol_name	= "copy_pid_ns",
 	.entry_handler	= ddlg_copy_pid_ns_entry,
 	.handler	= ddlg_copy_pid_ns_ret,
-	.data_size	= sizeof(unsigned long),
 	.maxactive	= 64,
 };
 
@@ -356,6 +384,9 @@ static int ddlg_zap_pre(struct kprobe *p, struct pt_regs *regs)
 		(struct pid_namespace *)regs_get_kernel_argument(regs, 0);
 	unsigned long flags;
 	int idx, empty = 0;
+
+	if (READ_ONCE(ddlg_stopping))
+		return 0;
 
 	if (READ_ONCE(ddlg_n) == 0)
 		return 0;	/* 无容器时的快速路径：一次原子读，不取锁 */
@@ -391,6 +422,9 @@ static int ddlg_put_pre(struct kprobe *p, struct pt_regs *regs)
 	unsigned long flags;
 	int idx, empty = 0;
 
+	if (READ_ONCE(ddlg_stopping))
+		return 0;
+
 	/*
 	 * 稳态（无容器）下这是每个进程退出都会走的热路径，先做无锁快路径。
 	 * 只有表非空（= 有容器在跑）时才需要看这个锚点。
@@ -399,6 +433,14 @@ static int ddlg_put_pre(struct kprobe *p, struct pt_regs *regs)
 		return 0;
 
 	if (!ns || ns == &init_pid_ns)
+		return 0;
+
+	/*
+	 * 第二道省锁快路径：容器运行期间，全系统每个进程退出都会走到这里。
+	 * count != 1 说明对象本次调用后仍存活（必然无需摘除），一次无锁读
+	 * 就把“锁 + 扫描 64 槽”压缩掉；count == 1 仍会在锁内复核。
+	 */
+	if (refcount_read(&ns->ns.count) != 1)
 		return 0;
 
 	spin_lock_irqsave(&ddlg_lock, flags);
@@ -499,10 +541,12 @@ static int ddlg_state_get(char *buf, const struct kernel_param *kp)
 	return scnprintf(buf, PAGE_SIZE,
 			 "resolved=%d ns=%d overflow=%d degraded=%d policy=%d dry_run=%d linger_ms=%d applied=%d ddl=%d nmissed=%d tries=%d\n",
 			 ddlg_flag ? 1 : 0,
-			 n, overflow, ddlg_degraded, policy, dry_run, linger_ms,
-			 ddlg_applied,
+			 n, overflow, READ_ONCE(ddlg_degraded),
+			 READ_ONCE(policy), READ_ONCE(dry_run),
+			 READ_ONCE(linger_ms), READ_ONCE(ddlg_applied),
 			 ddlg_flag ? READ_ONCE(*ddlg_flag) : -1,
-			 ddlg_kr_copy_pid_ns.nmissed, ddlg_tries);
+			 READ_ONCE(ddlg_kr_copy_pid_ns.nmissed),
+			 READ_ONCE(ddlg_tries));
 }
 
 static const struct kernel_param_ops ddlg_state_ops = {
@@ -565,6 +609,12 @@ err_kr:
 
 static void __exit ddlg_exit(void)
 {
+	/*
+	 * 先落闸门再取消 work：堵死“cancel 与 unregister 之间探针又 kick 一次”
+	 * 的窗口，保证卸载完成后绝无写入（“卸载不改值”承诺由此成立）。
+	 */
+	WRITE_ONCE(ddlg_stopping, true);
+
 	cancel_delayed_work_sync(&ddlg_work);
 
 	unregister_kprobe(&ddlg_kp_put);
@@ -585,4 +635,4 @@ module_exit(ddlg_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("容器作用域的 DDL 动态守护（Droidspaces 容器运行时关闭厂商 DDL）");
 MODULE_AUTHOR("Wcoom");
-MODULE_VERSION("1.1.0");
+MODULE_VERSION("1.2.0");

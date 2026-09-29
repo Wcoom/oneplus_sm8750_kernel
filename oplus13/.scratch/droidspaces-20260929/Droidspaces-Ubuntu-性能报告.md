@@ -3,7 +3,7 @@
 - 设备：OnePlus 13 PJZ110（SM8750），Android 16，KernelSU root
 - 容器：Droidspaces 6.4.5，容器名 `ubuntu`
 - 诊断采集：2026-09-29 15:25–15:45 UTC（只读）
-- 优化与复测：2026-09-29 15:45 – 2026-09-30 00:25（A+B 两组 + 三项授权宿主级操作）
+- 优化与复测：2026-09-29 15:45 – 2026-09-30 00:55（A+B 两组 + 三项授权宿主级操作 + S1/S2/S4/S6 待办项）
 - 采集方式：全部经 `adb → su → droidspaces --name=ubuntu run /bin/sh <脚本>`
 - 约束遵守情况：**未破坏 Android 宿主；未关闭 SELinux；未改 thermal；未锁 CPU 频率；未触碰 vendor 节点；未改任何 boot 镜像；未改 Android cgroup/cpuset**
 
@@ -20,6 +20,9 @@
 > | **C-5** | 假设 rootfs 慢是因为 `nodelalloc` | **实测只有 1.11×**，不是主因。真因是 rootfs 为 **ext4-on-loop-on-f2fs 双层文件系统** | §5.3 |
 > | **C-6** | §7.3 判定「`run` 绕过 PAM ⇒ `/etc/environment` 也失效」 | **错误。`/etc/environment` 对全部路径有效**（由 droidspaces 自身读取注入，不经 PAM）；失效的只有 `limits.d`（pam_limits） | §7.5 |
 > | **C-7** | S2「`TMPDIR` 指向 `/tmp`可提速」 | **是空操作**：`TMPDIR` 原本未设置，默认本就是 `/tmp`（tmpfs）。已显式化但**无可测量收益**；真正的决策在"大构建是否该改用 `/mnt/data`" | §7.5 |
+> | **C-8** | A 组 A4 建立的 `/root/.ccache.conf` | ⚠️ **该文件从未被 ccache 读取过**（既不是系统配置路径，也不是缓存配置路径），**自建立起就完全无效**。已迁到真正会读的 `$CCACHE_DIR/ccache.conf`。**根因：A 组当时只核对了"取值"没核对"来源"** | §7.6 |
+> | **C-9** | S4 声称的收益「缓存放 f2fs 可加快冷读」 | **与 §5.1 实测不符**：读 256 MB 三个落点为 99 / 97 / 99 ms，**几乎无差**；小文件操作 f2fs 反而略慢（20 vs 19 ms）。S4 的真实收益是 **rootfs 空间**（20 GB 上限 vs 40 GB 卷），不是速度 | §5.1 / §7.6 |
+> | **C-10** | （新发现）A 组的 ccache 接管范围 | **裸 `droidspaces run` 下 `gcc` 根本不经过 ccache**（该路径 PATH 无 `/usr/lib/ccache`），只有登录 shell 生效。⇒ 非登录式自动化构建**一直没享受到 ccache** | §7.6 / §8.1 **S7** |
 
 ---
 
@@ -568,22 +571,102 @@ autoconf automake libtool libtool-bin gdb
 **恢复方法**：`cp /root/.ds-opt/environment.bak-pre-dsbuild /etc/environment`（恢复后仅保留 A 组 A6 的内容）。
 **幂等**：脚本以 `DS_DEV_BUILD` 标记块实现，重复执行会先移除旧块再追加。
 
+### 7.6 S4+S6 执行记录：ccache 迁移 + 时区（2026-09-30）
+
+> ⚠️ 本节含**一处对 A 组自身工作的更正**（C-8）与**一处对 S4 收益描述的更正**（C-9），并记下一项**新发现**（C-10）。
+
+#### S4：ccache 缓存迁到 `/mnt/data` + 配置落到真正会被读的位置
+
+- **迁移**：`/root/.cache/ccache` → **`/mnt/data/ds-build/ccache`**（沿用 S1 的 `ds-build` 树；与原计划的 `/mnt/data/ccache` 略有出入）
+- **条目平移**：278 个文件按 `cp -a` 全量迁移，**迁移前后 `find -type f | wc -l` 逐一比对相等**，比对通过后才删除旧目录（ccache 缓存可再生，但仍按可逆流程做）
+- **rootfs 释放**：`/` 可用空间回到 **35 GiB**
+
+**关键修正——配置文件到底该放哪**：
+
+| 位置 | ccache 是否读取 | 说明 |
+|---|---|---|
+| `/etc/ccache.conf` | ✅ 系统级 | 本机不存在 |
+| **`$CCACHE_DIR/ccache.conf`** | ✅ **缓存级** | **本次采用**——配置随缓存目录一起走 |
+| `/root/.ccache.conf` | ❌ **不读** | ⚠️ A 组 A4 建在这里，**从建立之日起就完全没有生效** |
+
+**原文件为何是死的（决定性证据）**：A 组的 `/root/.ccache.conf` 写的是 `compression_level = 6`，而 `ccache --show-config` 报的是 **`compression_level = 0 (default)`**。
+A 组当时只核对了**取值**（看到 `max_size = 20.0 GB` ✓ 就判通过），却没核对**来源**——而该值恰好由 `CCACHE_MAXSIZE` 环境变量同样提供，于是把一次失效的配置**验证成了通过**。
+
+> 📌 **本次最值得记取的教训：验证要看"来源（origin）"，不能只看"取值"。** 一个值正确，不等于是你这次改动造成的。
+
+因此本次全部以 `ccache --show-config` 的 **origin 标记**为准：
+
+```
+(environment)                            cache_dir         = /mnt/data/ds-build/ccache   ← 来自 CCACHE_DIR
+(/mnt/data/ds-build/ccache/ccache.conf)  compression       = true                        ← 配置文件确实被读
+(/mnt/data/ds-build/ccache/ccache.conf)  compression_level = 6
+(/mnt/data/ds-build/ccache/ccache.conf)  max_size          = 20.0 GB
+origin 统计：40 (default) / 1 (environment) / 3 (配置文件)
+```
+
+同时**移除了 `/etc/environment` 里的 `CCACHE_MAXSIZE=20G`**：ccache 的优先级是「**环境变量 > 缓存配置**」，留着它会**遮蔽**配置文件，使 `max_size` 永远显示 `(environment)`，验证就失去判别力。
+现在 `max_size` 显示为 **配置文件路径本身**——**这就是配置文件已生效的证据**。
+
+**决定性测试**（真实编译，而非"变量已设置"）：同一 TU 连续编译两次 ⇒ **1 miss + 1 hit**，缓存文件数 **283 → 287**，条目确实落在 `/mnt/data/ds-build/ccache`。
+
+#### ⚠️ 附带发现（C-10）：裸 `droidspaces run` 下 `gcc` **不经过 ccache**
+
+| 调用路径 | PATH 含 `/usr/lib/ccache`？ | `gcc` 解析为 | 走 ccache？ |
+|---|---|---|---|
+| 登录 shell（`bash -lc`） | ✅ 有（A2 `99-ds-path.sh` 前置） | `/usr/lib/ccache/gcc` | ✅ **是** |
+| **裸 `droidspaces run /bin/sh`** | ❌ **没有** | `/usr/bin/gcc` → `gcc-15` | ❌ **否** |
+
+实测印证：裸 `gcc -c` 之后 `ccache -s` 的 `Cacheable calls` 计数为 **0**；改用 `ccache gcc` 或登录 shell 才计入。
+⇒ **凡以 `droidspaces run /bin/sh <脚本>` 发起的构建（含本报告全部诊断脚本、以及任何非登录式自动化构建），ccache 一律不生效。**
+原因是 `run` 不读任何 shell rc（§7.3），PATH 里自然没有 `/usr/lib/ccache`——这不是配置错误，是该路径的固有行为。可选修法见 §8.1 **S7**（**未执行**）。
+
+#### S6：时区设为 `Asia/Shanghai`
+
+`ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime` + 写入 `/etc/timezone`（原状态：`/etc/localtime -> Etc/UTC`，`/etc/timezone` 不存在）。
+
+| 验证点 | 结果 |
+|---|---|
+| `date` / `date +%Z%z` | `Wed Sep 30 00:50:09 CST 2026` / **`CST+0800`** |
+| `date -u` | `UTC+0000`（UTC 基准未变，只有显示偏移变化） |
+| `/etc/localtime` | → `/usr/share/zoneinfo/Asia/Shanghai` |
+| Python `time.tzname` | `('CST', 'CST')`（绕开 shell 再独立验一次） |
+| `timedatectl` | `Time zone: Asia/Shanghai (CST, +0800)` |
+| **宿主 Android** | `persist.sys.timezone=Asia/Shanghai`，**本就是 CST、未受影响**；两侧现在显示一致，便于日志对齐 |
+
+⚠️ **机制说明**：容器与宿主**共享时间命名空间**（`time:[4026531834]` 两侧相同，实测确认）。故本次改动**只改变显示与日志时区，不动系统时钟**，不存在把宿主时钟带偏的可能。
+⚠️ tzdata 为 `2026c-0ubuntu0.26.04.1`，`Asia/Shanghai` 数据齐备（561 字节）；**未做时区数据库裁剪**（那会牵连无关文件）。
+
+**恢复方法**：
+
+```sh
+# ---- S4 ----
+cp /root/.ds-opt/environment.bak-pre-s4s6 /etc/environment   # 回到 S4 之前的 /etc/environment
+mv /mnt/data/ds-build/ccache /root/.cache/ccache             # 可选：缓存搬回（或直接删，可再生）
+# ---- S6 ----
+ln -sf /usr/share/zoneinfo/Etc/UTC /etc/localtime
+rm -f /etc/timezone
+```
+
 ---
 
 ## 8. 优化方案（**剩余待办，需授权**）
 
 ### 8.1 建议采纳（零风险 / 低风险）
 
-> **S1、S2 已于 2026-09-30 执行完毕，见 §7.5。** 下表保留原条目以存档，剩余项为 S3–S6。
+> **S1、S2 已于 2026-09-30 执行完毕（§7.5）；S4、S6 已于 2026-09-30 执行完毕（§7.6）。**
+> 下表保留原条目以存档，**剩余未执行项为 S3、S5，以及本次新发现的 S7。**
 
 | # | 项目 | 收益 | 风险 | 恢复方法 |
 |---|---|---|---|---|
 | ~~**S1**~~ | ~~构建输出/缓存指向 `/mnt/data`~~ | ✅ **已执行**（§7.5） | — | `cp /root/.ds-opt/environment.bak-pre-dsbuild /etc/environment` |
 | ~~**S2**~~ | ~~`TMPDIR` 指向 `/tmp`~~ | ✅ **已执行，但实测为空操作**（默认本就是 `/tmp`，见 §7.5） | — | 同上 |
 | **S3** | 建立**周期性 `fstrim -v /`**（如每月，或大轮构建后） | 持续回收稀疏镜像膨胀（本次回收 9.8 GiB） | 无 | 不执行即等效回滚 |
-| **S4** | 把 `/root/.cache/ccache` 迁到 `/mnt/data/ccache`（`CCACHE_DIR`）+ 目录 `max_size` | ccache 命中时 **123×**（见 §9.4），缓存放 f2fs 可加快冷读 | 无 | 改回 `CCACHE_DIR` 即可 |
+| ~~**S4**~~ | ~~把 ccache 迁到 `/mnt/data` + `max_size`~~ | ✅ **已执行**（§7.6）。⚠️ 收益更正为 **rootfs 空间**（20 GB 上限 vs 40 GB 卷），**不是速度**（C-9） | — | 见 §7.6「恢复方法」 |
 | **S5** | 清理 `/root/.codex/packages` 的旧版本（保留当前版本） | 释放约 1 GiB | 会删包缓存，下次可能重下 | 无法恢复，但可重下 |
-| **S6** | 设置时区 `Asia/Shanghai`（`ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime` + `/etc/timezone`） | 仅日志可读性 | 无 | 改回 `Etc/UTC` |
+| ~~**S6**~~ | ~~设置时区 `Asia/Shanghai`~~ | ✅ **已执行**（§7.6），仅影响显示/日志 | — | `ln -sf /usr/share/zoneinfo/Etc/UTC /etc/localtime; rm -f /etc/timezone` |
+| **S7** | **让 ccache 在所有调用路径生效**：把 `/usr/lib/ccache/` 的 16 个 shim 链接到 `/usr/local/bin/`（该目录在裸 `run` 的 PATH 中且**先于** `/usr/bin`；当前仅有 `bun bunx claude claude-go claude-native codex` 六个链接，**无 gcc 类冲突**） | 裸 `run` 发起的构建也能吃到 ccache 命中（**123×**，§9.4）。**当前这些构建完全不受 ccache 加速**（C-10） | **低**：ccache 对不可缓存的编译会自动回退真实编译器；但**会改变全局 `gcc`/`clang` 解析**，影响容器内所有构建 | `rm -f /usr/local/bin/{cc,c++,gcc,g++,gcc-15,g++-15,clang,clang++,clang-21,clang++-21,c89-gcc,c99-gcc,aarch64-linux-gnu-gcc,aarch64-linux-gnu-g++,aarch64-linux-gnu-gcc-15,aarch64-linux-gnu-g++-15}`（**仅删这 16 个**，勿用 `rm -rf` 整个目录，其中有 bun/claude/codex） |
+
+> **S7 建议**：收益明确（非登录构建目前零加速），风险可控且完全可逆。若执行，验证方式应与本次一致——**看 origin/实际计数，不看变量是否设置**：在裸 `run` 中做 `ccache -z && gcc -c ... && ccache -s`，确认 `Cacheable calls` 由 0 变为 1。
 
 ### 8.2 不建议（有明确代价或已被实测否证）
 
@@ -729,6 +812,12 @@ ccache -s:  Cacheable calls: 4 / 4 (100.0%)
 | `bench3.py` / `b12.sh` | B6/B7/B3 与 B1/B2 的可比复测 | 已归档 |
 | `final-verify.sh` | 容器健康 + 优化落地复核 | 已归档 |
 | `opt-pkg.sh` | B 组软件包安装（日志 `/root/.ds-opt/apt-install.log`） | 已归档 |
+| `apply-build-dirs.sh` / `verify-build-dirs.sh` | **S1+S2**：构建输出/缓存指向 `/mnt/data` 及逐工具实证 | 已归档（§7.5） |
+| `recon-s4s6.sh` | **S4/S6 侦察**：ccache 配置来源与 origin 统计、时区数据可用性 | 已归档（§7.6） |
+| `apply-s4s6.sh` | **S4+S6 执行**：ccache 迁移 + 缓存级配置 + 时区设置 | 已归档（§7.6） |
+| `verify-s4s6.sh` | S4/S6 首次验证（**该次因调用方式不当未成立，见 `diag-ccache.sh`**） | 已归档（§7.6） |
+| `diag-ccache.sh` | **关键诊断**：查明 ccache 接管方式（裸 run 不生效）与 `CCACHE_MAXSIZE` 来源 | 已归档（§7.6） |
+| `confirm-s4.sh` | S4 最终确认：配置 origin 归属 + 真实编译 1 miss/1 hit | 已归档（§7.6） |
 
 原始输出归档于 `oplus13/.scratch/droidspaces-20260929/raw/`。
 
@@ -744,13 +833,17 @@ ccache -s:  Cacheable calls: 4 / 4 (100.0%)
 | 宿主 `/data` 在容器内 | `/mnt/data` |
 | **A 组配置备份** | `/root/.ds-opt/`（`*.orig`，容器内） |
 | **S1/S2 前快照** | `/root/.ds-opt/environment.bak-pre-dsbuild`（容器内） |
+| **S4/S6 前快照** | `/root/.ds-opt/environment.bak-pre-s4s6`、`/root/.ds-opt/localtime.orig`（容器内） |
+| **失效文件留证** | `/root/.ds-opt/ccache.conf.DEAD-never-read-by-ccache`（A4 遗物，见 §7.6） |
 | **A 组 apt 日志** | `/root/.ds-opt/apt-install.log` |
 | **构建输出/缓存根** | `/mnt/data/ds-build/`（容器内 `/mnt/data` = 宿主 Android `/data`） |
 | Claude Code | `/usr/local/bin/claude` → `/root/.local/bin/claude`（2.1.274） |
 | Codex | `/usr/local/bin/codex` → `/root/.local/bin/codex`（0.158.0） |
 | Bun | `/usr/local/bin/bun` → `/root/.bun/bin/bun`（1.4.2） |
-| ccache 目录 | `/root/.cache/ccache`（`max_size = 20 GB`） |
-| ccache shim | `/usr/lib/ccache/`（含 `gcc` `g++` `cc` `clang` `clang++` 裸名，故前置有效） |
+| **ccache 目录（S4 后）** | **`/mnt/data/ds-build/ccache`**（原 `/root/.cache/ccache`，已迁移） |
+| **ccache 配置（S4 后）** | **`/mnt/data/ds-build/ccache/ccache.conf`**（缓存级；`max_size=20G`、`compression=true`、`compression_level=6`） |
+| ccache shim | `/usr/lib/ccache/`（16 个，全部 → `../../bin/ccache`：`gcc` `g++` `cc` `c++` `clang` `clang++` 及各自带版本号/交叉前缀的名字） |
+| ⚠️ ccache 生效范围 | **仅登录 shell**（PATH 里有 `/usr/lib/ccache`）；**裸 `droidspaces run` 下不生效**，见 §7.6 C-10 / §8.1 S7 |
 
 ## 附录 C：一键回滚速查
 
@@ -763,9 +856,10 @@ cp /root/.ds-opt/bash.bashrc.orig /etc/bash.bashrc                    # A3'
 rm -f /etc/security/limits.d/99-ds-dev.conf                           # A3''
 rm -f /etc/systemd/systemd.conf.d/99-ds-dev.conf 2>/dev/null
 rm -f /etc/systemd/system.conf.d/99-ds-dev.conf                       # A3''
-rm -f /root/.ccache.conf                                              # A4
+# A4（/root/.ccache.conf）已于 S4 迁走：文件现在在
+#   /root/.ds-opt/ccache.conf.DEAD-never-read-by-ccache   （它本就从未被 ccache 读取，见 §7.6）
 rm -f /etc/systemd/journald.conf.d/99-ds-dev.conf                     # A5
-cp /root/.ds-opt/environment.orig /etc/environment                    # A6（并一并撤销 S1/S2）
+cp /root/.ds-opt/environment.orig /etc/environment                    # A6（并一并撤销 S1/S2/S4）
 
 # ---- S1 + S2：构建输出/缓存指向 /mnt/data ----
 # 方式一（外科式，仅撤本次）：恢复追加前的备份
@@ -774,6 +868,15 @@ cp /root/.ds-opt/environment.bak-pre-dsbuild /etc/environment
 # cp /root/.ds-opt/environment.orig /etc/environment
 # 可选：删除落盘数据（删除前确认没有正在进行的构建）
 # rm -rf /mnt/data/ds-build
+
+# ---- S4：ccache 迁移 ----
+cp /root/.ds-opt/environment.bak-pre-s4s6 /etc/environment   # 恢复 S4 之前的 /etc/environment
+mv /mnt/data/ds-build/ccache /root/.cache/ccache             # 搬回缓存（或直接删，ccache 可再生）
+# 注意：新配置在 $CCACHE_DIR/ccache.conf，搬回后仍在（随目录走）
+
+# ---- S6：时区 ----
+ln -sf /usr/share/zoneinfo/Etc/UTC /etc/localtime
+rm -f /etc/timezone
 
 # ---- B 组软件包 ----
 apt remove build-essential cmake ninja-build pkg-config \

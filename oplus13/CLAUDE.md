@@ -288,7 +288,8 @@
     - **刷机验证的取证结论**：dmesg 19 条 WARNING 全部为既有 vendor 噪声（`/proc/task_info`、`/proc/bcl_stat`、`/proc/oplus_mem` 等重复注册、spmi-pmic-arb、context_tracking）与已知模块 CRC `disagrees about version`（靠 `check_version` 放行），**无一条来自本次合并的代码路径**；本轮合并未触碰 `kernel/seccomp.c` 与 crystal_hybridswap 源码（`zram_drv.c` 仅带入上游 `zram_bvec_write_partial()` UAF 修复一条），故 KernelSU 的 `seccomp_filter_release has_call_to_spin_lock = 1` 信息与 zram 的 `zstdn` 均非本次引入。
     - ⚠️ **发现并已处理：DDL 守护脚本不在设备上**。`/data/adb/service.d/` 只剩 4 个脚本（`99-host-exec.sh`/`box-pikproxy`/`boxproxy-box`/`.zn_cleanup.sh`），无 `99-oplus-sched-ddl-guard.sh`，开机 `sched_ddl_enabled=1`（即第 22 项那类越界写崩溃的风险开关处于开启态）。已按第 22 项既定缓解措施把运行时值写回 `0`；**持久化脚本尚未重新部署**（本地副本 `op_mods/deploy/99-oplus-sched-ddl-guard.sh`，是否放回待定）。
     - **adb 环境更正**：本机现为**原生 Ubuntu**（非 WSL；`/mnt` 为空、有真实 `wlp1s0`），手机 USB 直连，直接用 `/usr/bin/adb`（本文件「刷机到实体机」一条的 Windows `adb.exe` 记法已过时）。⚠️ 手机重启后 USB 会掉一次（`lsusb` 无设备、adb 空），需**拔插数据线**才重新枚举。
-    - **尚未推送 github**。
+    - **已推送 github**（2026-09-29）：本地 `main` → `github/6.6.118-13T`，`d1b7b6d3e399..aa4cc27e43c0`（223 提交，含第十轮 ACK 合并 219 提交与 ddl_guard 内置化）；远端与本地 HEAD 一致。⚠️ 该本地分支名为 `main`、跟踪 `github/6.6.118-13T`（工作区迁移后如此，非分支改名）。
+    - **Release 待发布**：tag 拟 `v6.6.118-13T-20260929`、资产 `AnyKernel3-20260929-2245.zip`（26,004,326 字节，SHA-256 `9f24ac76…`）；新建 Release 的 `gh` 调用被会话权限分类器拦截（理由：未点名 `6.6.118-13T` 远程），待用户执行或明确授权。
 
 26. **ddl_guard：容器作用域的 DDL 动态守护（方案 A，2026-09-29）——已并入内核并刷机验证**（根仓库 `fa3b24c`；源码唯一真源 = 内核树 `drivers/misc/ddl_guard.c`，`oplus13/ddl_guard_ko/ddl_guard.c` 是指向它的符号链接）
     - **目标**：把第 22/25 项的"恒关 DDL"升级为被动跟随 Droidspaces 容器生命周期——容器起来立即关、容器停止 `linger_ms`（默认 3s）后开回来；事件驱动、零轮询、零常驻线程。DDL 关只是少一层调度优化，所以"只在有风险时关"是比恒关更好的取舍。

@@ -99,3 +99,11 @@
 - 红线校验: KABI 槽位（sched.h 1535/1536）保留 / ghost_task 12 行 / NTSYNC×97 / SUBLEVEL=118 / CONFIG_ZRAM=n / BBG / FQ_GUARD / REKERNEL_X / 命名空间与 SYSVIPC 均通过；git diff --check 通过；vendor hook 目录无本地改删；BBG gitlink 6e32d811 保持
 - 构建: bash /home/wcoom/桌面/内核构建.sh exit 0；版本 6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k；Image 39,131,648 字节；SHA-256 31908e677667b600e828ef5dc7a165137770e0931af6f38a3b390dc5fc65a789
 - 打包: AnyKernel3-20260923-0228.zip，25,999,984 字节；SHA-256 2f32c4ef1444f2208b73c0bd2fd13f230165f5053f4a1e184cf50995fca514a7；ZIP 内 Image SHA-256 与构建产物一致
+
+=== 2026-09-29 第十轮 ACK 增量合并 ===
+- ACK fetch: 700526826edfa1bcd25d5b8090a793d9b53f8e94 -> 55dbf85d9283442cd5a1eaf581ce0464ab45cb71（2026-09-25），219 个提交；分支尖端核对以 git ls-remote 取证（googlesource HTTP +log 端点本轮返回 Google 503，git 协议正常）；备份分支 backup/pre-ack-20260929
+- 合并提交: b2008ec65a5d（第一父 d1b7b6d3e399，第二父 55dbf85d9283）；唯一冲突为 L1 机械冲突 Makefile SUBLEVEL（上游 143 vs 本地 118），按任务书红线第 6 条与 §5/§6 保留本地 118；处理后 Makefile 相对 HEAD 无其他差异；未使用 -X ours/-X theirs
+- ACK 提交范围要点: Merge tag 'android15-6.6.143_r00' into android15-6.6 / Merge 6.6.143 into android15-6.6-lts / Linux 6.6.143；ANDROID: incfs lockdep 子类、GKI db845c 符号追加、KVM arm64 THP PFN 校验、f2fs FI_NO_EXTENT 修复；serdev/hci_qca/genetlink/CIFS-SWN 若干 Revert
+- 红线校验: KABI 槽位（sched.h 1535/1536）保留 / ghost_task 12 行 / NTSYNC（Kconfig:312 config NTSYNC、drivers/misc/Makefile:26 注册） / SUBLEVEL=118 / CONFIG_ZRAM=n / FQ_GUARD / REKERNEL_X / 命名空间与 SYSVIPC 全 y 均通过；冲突标记三型全树零残留（<<<<<<</>>>>>>> 全树为空，======= 命中均为文档下划线）；vendor hook 目录本轮零改动；导出符号仅新增 ib_umem_check_rereg、nf_ct_helper_expectfn_destroy，RDMA block iterator 两符号随文件迁移为净零移除；核心头 include/net/sock.h、include/linux/mm.h 仅声明级改动，无结构体布局变化；gki_defconfig 本轮上游未改动
+- 构建: bash /home/wcoom/桌面/内核构建.sh 全量编译（out/ 在迁移后不存在，ccache 2.7G/5G）exit 0，日志 /tmp/kbuild-20260929.log 中 error: 0 / make Error 0；版本 6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k；Image 39,131,648 字节；SHA-256 2521d004f478cfa69acfb1be04ba5f2dfbd78f203e9e6ea9924b84cd9387d858；ntsync 符号 97；out/.config 中 "# CONFIG_ZRAM is not set"、CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP="lz4kds"、BBG 与 CONFIG_LSM 末尾 baseband_guard、命名空间/SYSVIPC/NTSYNC/REKERNEL_X/FQ_GUARD 全 y
+- 打包: AnyKernel3-20260929-1523.zip（模板 AnyKernel3-6.6.112-NOKSU-OnePlus8Elite），26,000,413 字节；SHA-256 641ab312a4bde2a951d1055ee89f9e818b91619a135ecf6f78d398f075cb34e0；ZIP 内 Image-dtb SHA-256 与构建产物一致（cmp 通过）；尚未推送 github、尚未刷机

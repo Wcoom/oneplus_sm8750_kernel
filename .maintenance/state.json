@@ -4,12 +4,12 @@
     "ack": {
       "remote": "https://android.googlesource.com/kernel/common",
       "branch": "android15-6.6",
-      "last_merged": "700526826edfa1bcd25d5b8090a793d9b53f8e94",
-      "last_merged_date": "2026-09-23",
-      "note": "第九轮官方源增量合并，448c303366032..700526826edf 共 3 提交（Siengine ABI 符号、x86/mm switch_mm 顺序修复、KVM arm64 iommu identity domain 校验）；合并提交 9a0664240ae5，L0 零冲突，未使用 -X ours/-X theirs；红线校验通过，BBG gitlink 与本地定制保持"
+      "last_merged": "55dbf85d9283442cd5a1eaf581ce0464ab45cb71",
+      "last_merged_date": "2026-09-29",
+      "note": "第十轮官方源增量合并，700526826edfa1bcd25d5b8090a793d9b53f8e94..55dbf85d9283442cd5a1eaf581ce0464ab45cb71 共 219 提交（主体为 Merge tag 'android15-6.6.143_r00' 与 Merge 6.6.143 into android15-6.6-lts）；合并提交 b2008ec65a5d，唯一冲突为 L1 Makefile SUBLEVEL（上游 143，按红线保留本地 118），未使用 -X ours/-X theirs；红线校验通过，BBG gitlink 6e32d811 与本地定制保持"
     }
   },
-  "last_maintenance": "2026-09-23",
+  "last_maintenance": "2026-09-29",
   "local_commits": [
     "a0f59328855f9",
     "450f8996cf343",

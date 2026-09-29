@@ -18,6 +18,8 @@
 > | **C-3** | THP 列为「待人工判断 C1」 | **实测为空操作**：`madvise` 档下 `AnonHugePages` 仍为 0 kB，显式 `MADV_HUGEPAGE` 也拿不到大页。**保持 `never`** | §6.6 / §9.3 |
 > | **C-4** | 建议试 `force_cgroupv1=1` | **实测容器启动即死**（报成功但无进程/无挂载）。**本机不可用，已回滚**。H6 无可用修法 | §6.5 / §7.4 |
 > | **C-5** | 假设 rootfs 慢是因为 `nodelalloc` | **实测只有 1.11×**，不是主因。真因是 rootfs 为 **ext4-on-loop-on-f2fs 双层文件系统** | §5.3 |
+> | **C-6** | §7.3 判定「`run` 绕过 PAM ⇒ `/etc/environment` 也失效」 | **错误。`/etc/environment` 对全部路径有效**（由 droidspaces 自身读取注入，不经 PAM）；失效的只有 `limits.d`（pam_limits） | §7.5 |
+> | **C-7** | S2「`TMPDIR` 指向 `/tmp`可提速」 | **是空操作**：`TMPDIR` 原本未设置，默认本就是 `/tmp`（tmpfs）。已显式化但**无可测量收益**；真正的决策在"大构建是否该改用 `/mnt/data`" | §7.5 |
 
 ---
 
@@ -522,16 +524,62 @@ autoconf automake libtool libtool-bin gdb
 
 **容器重启后，A/B 两组全部配置经复核仍然生效**（符号链接、profile.d、bash.bashrc 两段、ulimit 524288/8 GiB、ccache 20 GB、工具链 22/22）。
 
+### 7.5 S1+S2 执行记录：构建输出/缓存指向 `/mnt/data`（2026-09-30）
+
+> ✅ **一个重要的机制更正**：本次实测证明 **`/etc/environment` 对全部调用路径有效——包括 `droidspaces run`**。
+> §7.3 判定「`run` 绕过 PAM ⇒ `/etc/environment`（pam_env）也失效」**是错的**：`limits.d` 确实失效（pam_limits），但 `/etc/environment` 由 **droidspaces 自身读取并注入**进程环境，不经 PAM。
+> **决定性证据**：`CMAKE_GENERATOR=Ninja` 仅存在于 `/etc/environment`（`grep` 全盘确认 `/etc/profile*`、`/etc/bash.bashrc`、`~/.profile`、`~/.bashrc`、systemd 配置均无），却在裸 `run` 路径下可见。
+> ⇒ **需要全路径生效的环境变量一律写 `/etc/environment`；限额类只能靠 shell rc（见 §7.3）。**
+
+**落点**：`/mnt/data/ds-build/`（`/mnt/data` 是 Android `/data` 的 bind mount，当时 88 GiB 可用）
+
+```
+/mnt/data/ds-build/
+├── cargo-target/   CARGO_TARGET_DIR        构建产物（大文件写密集）
+├── go-build/       GOCACHE                 Go 构建缓存（写密集）
+├── go-mod/         GOMODCACHE              Go 模块缓存
+├── npm/            npm_config_cache        npm 缓存（含 _logs）
+├── bun/            BUN_INSTALL_CACHE_DIR   bun 缓存（本机实际在用的 JS 包管理器）
+└── tmp/            （未设为默认）大构建的 TMPDIR 逃生口
+```
+
+⚠️ **pnpm 未安装**（原 S1 计划中的 "pnpm store" 因此落空），本机 JS 包管理器是 **bun 1.4.2**，故改为设置 bun 缓存。
+⚠️ **CMake 的构建目录无法用环境变量指定**（它是 `-B` 参数，非 env；`CMAKE_GENERATOR=Ninja` 已在 A6 设好）。约定用法：`cmake -B /mnt/data/ds-build/cmake/<项目>`。
+
+**逐工具实证验证**（不是"变量已设置"，而是各工具确实采纳）：
+
+| 变量 | 验证方法 | 结果 |
+|---|---|---|
+| `CARGO_TARGET_DIR` | 真实 `cargo new` + `cargo build`，检查 `target/debug/` 实际落点 | ✅ 落在 `/mnt/data/ds-build/cargo-target/debug` |
+| `GOCACHE` / `GOMODCACHE` | `go env` 反查 | ✅ 两条均为新路径 |
+| `npm_config_cache` | `npm config get cache` 反查 | ✅ `/mnt/data/ds-build/npm` |
+| `BUN_INSTALL_CACHE_DIR` | 临时工程内 `bun pm cache` 反查 | ✅ `/mnt/data/ds-build/bun`（变量名正确） |
+| `TMPDIR` | shell 与登录 shell 内回显 | ✅ `/tmp` |
+
+**副作用检查**：旧默认目录未被继续写入（`/root/.cache/go-build` 稳定在 95M 不变）；rootfs 占用未增长（5.1G）；`/mnt/data` 目录归属 `root:root 755`，可写性冒烟通过。
+
+#### ⚠️ 关于 TMPDIR：这一项**实际是空操作**，需如实说明
+
+任务开始前实测 `TMPDIR`/`TMP`/`TEMP` **三者均为未设置**，而 Linux 的取值顺序是 `$TMPDIR → /tmp → /var/tmp`，`/tmp` 存在且可写 —— **即临时目录本来就已经是 tmpfs**。故 `TMPDIR=/tmp` 只是把既有默认行为**显式化**，**不产生任何可测量的收益**。
+
+> 真正需要注意的是**反方向的风险**：`/tmp` 是 tmpfs（RAM 盘，容量 5.4 GiB = RAM/2）。在 §4.5 那种内存压力下，**一次吃满 /tmp 的大构建会直接加剧 C1**。
+> **大构建建议改用 `TMPDIR=/mnt/data/ds-build/tmp`**（f2fs，88 GiB，不吃 RAM；写速 1169 MB/s 虽低于 tmpfs 的 2065 MB/s，但不触发内存回收）。该目录已建好，可直接用。**未设为默认**——因为无法预知哪些构建算"大"，默认值保持最快的 tmpfs。
+
+**恢复方法**：`cp /root/.ds-opt/environment.bak-pre-dsbuild /etc/environment`（恢复后仅保留 A 组 A6 的内容）。
+**幂等**：脚本以 `DS_DEV_BUILD` 标记块实现，重复执行会先移除旧块再追加。
+
 ---
 
 ## 8. 优化方案（**剩余待办，需授权**）
 
 ### 8.1 建议采纳（零风险 / 低风险）
 
+> **S1、S2 已于 2026-09-30 执行完毕，见 §7.5。** 下表保留原条目以存档，剩余项为 S3–S6。
+
 | # | 项目 | 收益 | 风险 | 恢复方法 |
 |---|---|---|---|---|
-| **S1** | 把构建输出/缓存指向 `/mnt/data`：`CARGO_TARGET_DIR=/mnt/data/.cargo-target`、pnpm store、CMake build 目录 | **大文件写快 2.19×**（§5.2 实测） | 无 | 取消环境变量即可 |
-| **S2** | 大构建的临时目录指向 `/tmp`（`TMPDIR`） | tmpfs 写 2065 MB/s、小文件 10 ms，均最快 | ⚠️ 单次构建临时文件总量需 < ~3 GiB，否则加剧 C1 | 取消环境变量 |
+| ~~**S1**~~ | ~~构建输出/缓存指向 `/mnt/data`~~ | ✅ **已执行**（§7.5） | — | `cp /root/.ds-opt/environment.bak-pre-dsbuild /etc/environment` |
+| ~~**S2**~~ | ~~`TMPDIR` 指向 `/tmp`~~ | ✅ **已执行，但实测为空操作**（默认本就是 `/tmp`，见 §7.5） | — | 同上 |
 | **S3** | 建立**周期性 `fstrim -v /`**（如每月，或大轮构建后） | 持续回收稀疏镜像膨胀（本次回收 9.8 GiB） | 无 | 不执行即等效回滚 |
 | **S4** | 把 `/root/.cache/ccache` 迁到 `/mnt/data/ccache`（`CCACHE_DIR`）+ 目录 `max_size` | ccache 命中时 **123×**（见 §9.4），缓存放 f2fs 可加快冷读 | 无 | 改回 `CCACHE_DIR` 即可 |
 | **S5** | 清理 `/root/.codex/packages` 的旧版本（保留当前版本） | 释放约 1 GiB | 会删包缓存，下次可能重下 | 无法恢复，但可重下 |
@@ -695,7 +743,9 @@ ccache -s:  Cacheable calls: 4 / 4 (100.0%)
 | Droidspaces CLI | `/data/local/Droidspaces/bin/droidspaces` |
 | 宿主 `/data` 在容器内 | `/mnt/data` |
 | **A 组配置备份** | `/root/.ds-opt/`（`*.orig`，容器内） |
+| **S1/S2 前快照** | `/root/.ds-opt/environment.bak-pre-dsbuild`（容器内） |
 | **A 组 apt 日志** | `/root/.ds-opt/apt-install.log` |
+| **构建输出/缓存根** | `/mnt/data/ds-build/`（容器内 `/mnt/data` = 宿主 Android `/data`） |
 | Claude Code | `/usr/local/bin/claude` → `/root/.local/bin/claude`（2.1.274） |
 | Codex | `/usr/local/bin/codex` → `/root/.local/bin/codex`（0.158.0） |
 | Bun | `/usr/local/bin/bun` → `/root/.bun/bin/bun`（1.4.2） |
@@ -715,7 +765,15 @@ rm -f /etc/systemd/systemd.conf.d/99-ds-dev.conf 2>/dev/null
 rm -f /etc/systemd/system.conf.d/99-ds-dev.conf                       # A3''
 rm -f /root/.ccache.conf                                              # A4
 rm -f /etc/systemd/journald.conf.d/99-ds-dev.conf                     # A5
-cp /root/.ds-opt/environment.orig /etc/environment                    # A6
+cp /root/.ds-opt/environment.orig /etc/environment                    # A6（并一并撤销 S1/S2）
+
+# ---- S1 + S2：构建输出/缓存指向 /mnt/data ----
+# 方式一（外科式，仅撤本次）：恢复追加前的备份
+cp /root/.ds-opt/environment.bak-pre-dsbuild /etc/environment
+# 方式二（彻底，连 A6 一起撤）：用 .orig 覆盖整个文件
+# cp /root/.ds-opt/environment.orig /etc/environment
+# 可选：删除落盘数据（删除前确认没有正在进行的构建）
+# rm -rf /mnt/data/ds-build
 
 # ---- B 组软件包 ----
 apt remove build-essential cmake ninja-build pkg-config \

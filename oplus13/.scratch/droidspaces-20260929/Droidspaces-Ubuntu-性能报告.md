@@ -2140,12 +2140,133 @@ Android 的 **LMKD 依据 `/apps` 的压力来决定杀哪个应用**。
   落在节内既有的页对齐余量中，未突破下一页边界。**不要用"Image 大小没变"反推"配置没生效"** ——
   该结论必须由上面 ①②③ 的符号级证据支撑。
 - 打包：`bash dabao.sh` → `AnyKernel3-20260930-0314.zip`（25 MB，`Image-dtb` 已换为本轮产物）。
-- ⚠️ **本轮未能刷机**：WSL 内 `/mnt/` 为空（Windows 盘未挂载），
-  `/mnt/d/刷机/platform-tools/adb.exe` 不可达，需用户在 Windows 侧刷入或先挂载 D 盘。
+- ⚠️ **本轮当时未能刷机**：WSL 内 `/mnt/` 为空（Windows 盘未挂载），
+  `/mnt/d/刷机/platform-tools/adb.exe` 不可达。
+  **后续（同日）已改走 WSL 内原生 adb 完成刷入与实测，见 11.L.11。**
 
 **踩坑留档**：`nm`（binutils）读不了本仓库的 `aarch64` 目标文件，报
 `file format not recognized`，须改用 `$HOME/桌面/oplus13/clang-19/bin/llvm-nm`。
 另 `strings` 默认最小长度 4，`.xz` 仅 3 字符会被静默丢弃，查小字面量须加 `-n 3`。
+
+#### 11.L.11 刷入实测：功能全部生效，但暴露两个构建系统缺陷（2026-09-30）
+
+##### 一、刷入与启动
+
+设备 PJZ110 / Android 16，A/B 槽位当前 `_b`。**root 走 KernelSU 的 LKM 模式**
+（`/proc/modules` 中 `kernelsu 167936 1 - Live (O)` —— `O` 表示外部模块），
+即 KSU 由可加载内核模块提供，不是编译进内核。
+
+| 项 | 值 |
+|---|---|
+| 刷入包 | `AnyKernel3-20260930-0314.zip`，sha256 `3fe7bda3d00343cfa034155b0711bb9cdd266140c6ec7471b2ec8ecbd0e2b48f` |
+| 刷前 boot_b | sha256 `1e585ad200c5ecc4fa8d964c4a5a633eeaec277113380ff2ee9269b4689dbdc4`（09-29 22:50 的 ddl_guard 内核，`#3`） |
+| 刷后 boot_b | sha256 `7bd2aee79e202f8d100c4710978f2d9f7daab756b003d58c921ad8253d0479d2` |
+| boot 内 `KERNEL_SZ` | 39131648 → **39598592**（正好等于新 `Image` 字节数） |
+| 回滚点 | `oplus13/boot-backup/boot_b-20260930-刷前-ddlguard.img`（100663296 字节，md5 `630137610bf924a4c07854e29507b7dd`，sha256 与设备分区直读一致） |
+
+刷机脚本沿用既有风格（多重哈希钉死 + AnyKernel3 `split_boot`/`flash_boot`，
+只替换 boot 分区的内核段、不碰 ramdisk），见 `/data/local/tmp/flash-20260930.sh`。
+`adb reboot` 后系统正常启动，**无 bootloop**，内核构建号由 `#3` 变为 `#5`。
+
+> ⚠️ 目录名里的 **`NOKSU` 含义与 root 安全**：该 AnyKernel3 模板刷出的内核
+> **不含 KernelSU**，但本机 root 是 LKM 模式，只需 `CONFIG_KPROBES=y`（本配置已
+> 具备），因此刷内核**不会丢 root**。这与"KSU 编译进内核"的设备不同——后者刷
+> 无 KSU 内核会永久失去 root 且无法自救。**动手前必须先查 `/proc/modules`。**
+
+##### 二、运行时验证：两项优化都真实生效
+
+| 验证项 | 方法 | 结果 |
+|---|---|---|
+| `FW_LOADER_COMPRESS` | `grep fw_decompress /proc/kallsyms` | `fw_decompress_xz`、`fw_decompress_zstd` 均存在 ⇒ **生效** |
+| nftables 家族 | `grep -c ' nft_' /proc/kallsyms` | **892** ⇒ **生效** |
+| namespaces | `ls /proc/self/ns/` | cgroup/ipc/mnt/net/pid/user/uts 齐全 |
+| 文件系统 | `grep -E "overlay\|ext4\|f2fs\|devtmpfs" /proc/filesystems` | 四项齐全 |
+
+##### 三、⚠️ 发现一：`/proc/config.gz` 不可信 —— 构建系统看不见 `.incbin` 依赖
+
+**现象**：刷入后 `/proc/config.gz` 明确写着
+
+```text
+# CONFIG_FW_LOADER_COMPRESS is not set
+```
+
+而内核**实际拥有该功能**（kallsyms 里两个 `fw_decompress_*` 符号俱在）。两者直接矛盾。
+
+**证据链**：
+
+| 对象 | 字节数 | 行数 | 含本轮配置？ |
+|---|---|---|---|
+| 设备 `/proc/config.gz` | 46127 | 7827 | ❌ |
+| 本地 `Image` 内嵌（按 `IKCFG_ST`…`IKCFG_ED` 提取） | 46127 | 7827 | ❌ |
+| 本地 `out/kernel/config_data.gz` | 46305 | 7872 | ✅ |
+| 本地 `out/.config` | — | 7872 | ✅ |
+
+设备那份与 `raw/r3-out-config-加nftables前-20260930.txt`（7828 行）**只差 1 行**
+（`CONFIG_DDL_GUARD=y`），即**"加 nftables 之前"的基线**——比本轮早**两轮**。
+
+**根因**（`kernel/configs.c`）：
+
+```c
+asm (
+"	.ascii \"IKCFG_ST\"			\n"
+"kernel_config_data:				\n"
+"	.incbin \"kernel/config_data.gz\"	\n"   /* ← 汇编指令，不是 #include */
+"kernel_config_data_end:			\n"
+"	.ascii \"IKCFG_ED\"			\n"
+);
+```
+
+`.incbin` 引用的文件**不进入任何构建缓存的哈希**，于是：
+
+- **Kbuild 的 make 依赖是有的**（`kernel/Makefile:150`
+  `$(obj)/configs.o: $(obj)/config_data.gz`），所以 `configs.o` 确实会被"重建"、
+  时间戳确实更新 —— **这是假象**；
+- **ccache 看不见，但这一层无害**：`configs.o` 是 **LLVM bitcode**（本内核开了
+  LTO）。实测绕过 ccache 重建后字节数**完全不变**（119960），说明 `.incbin`
+  **不在 bitcode 阶段解析**；
+- **ThinLTO 后端缓存看不见 —— 这才是真正的杀手**。Kbuild 的
+  `KBUILD_LDFLAGS += --thinlto-cache-dir=$(extmod_prefix).thinlto-cache`
+  （`Makefile:1013`）在 `out/.thinlto-cache/` 存了 **4648 个条目**。bitcode 内容
+  既不变，哈希就不变，后端直接返回**含旧 `.incbin` 内容**的机器码。
+
+**验证实验（决定性）**：删除 `out/vmlinux` 后完整重链接，退出码 0、耗时 54 秒，
+但 `out/vmlinux` 内嵌 config **仍是 46127 字节的旧数据** ⇒ 后端缓存确认。
+
+**影响与结论**：
+
+- ✅ **内核功能不受影响**。代码按 `autoconf.h` 正确编译（该文件参与 ccache 哈希，
+  所有普通目标文件都会正确重建），`FW_LOADER_COMPRESS` 与 nftables 都是真的；
+- ❌ **只有 IKCONFIG 这一份"元数据"是陈旧的**，且**每轮构建都会如此** —— 它永远
+  停留在**第一次**构建时的那份配置；
+- ⚠️ **判据纠正：今后不要用 `/proc/config.gz` 核对内核配置。** 可信路径是
+  ① `/proc/kallsyms` 里的符号；② 本地 `out/.config`；③ 从 `Image` 按
+  `IKCFG_ST`/`IKCFG_ED` 提取（提取到的同样是那份陈旧数据，只能用于对比定位）。
+
+**可选修复**：让 `configs.o` 的 bitcode 内容发生变化，或删除
+`out/.thinlto-cache` 中对应条目（乃至整个缓存）后再链接。代价是 ThinLTO 需对其余
+bitcode 重做 codegen，非全量编译但需数分钟。**本轮未执行**，留作待办。
+
+##### 四、⚠️ 发现二：`CCACHE_HARDLINK` 让 out/ 里 97% 的目标文件变成只读
+
+`内核构建.sh` 设了 `export CCACHE_HARDLINK="true"`。ccache 用**硬链接**把缓存条目
+落到 out/，而缓存条目的权限是 `-r--r--r--`，于是：
+
+```text
+out/ 下只读 .o：3436 / 3546  （96.9%）
+例：-r--r--r-- 2 wcoom wcoom 38848 out/init/version-timestamp.o
+```
+
+**后果**：带 `FORCE` 依赖、每次 make 都要重建的目标，在重链接时直接失败：
+
+```text
+error: unable to open output file 'init/version-timestamp.o': 'Operation not permitted'
+```
+
+（clang 试图写一个已存在且不可写的文件。）
+
+**规避**：重链接前 `rm -f out/init/version-timestamp.o` 等只读目标即可。根治要么关掉
+`CCACHE_HARDLINK`，要么在构建脚本里先清理只读产物。**本轮采用临时删除，
+构建脚本本身未修改**，留作待办。
 
 ## 附录 A：诊断与基准脚本清单
 

@@ -290,7 +290,23 @@
     - **adb 环境更正**：本机现为**原生 Ubuntu**（非 WSL；`/mnt` 为空、有真实 `wlp1s0`），手机 USB 直连，直接用 `/usr/bin/adb`（本文件「刷机到实体机」一条的 Windows `adb.exe` 记法已过时）。⚠️ 手机重启后 USB 会掉一次（`lsusb` 无设备、adb 空），需**拔插数据线**才重新枚举。
     - **尚未推送 github**。
 
-> 2026-09-29 第 25 项记录第十轮 ACK 合并（219 提交，含 6.6.143 LTS 合并）与全量构建/打包/真机刷入验证（未推送）；2026-09-23 第 24 项记录第九轮 ACK 合并（3 提交）与构建/打包校验；2026-09-20 第 23 项记录第八轮 ACK 合并、构建/打包校验与 DDL 持久化保护；2026-09-11 第 22 项记录 DDL 越界写重启定位与 LXC 补丁重移植（含刷机验证 `#47`）；此前维护记录中的真机验证结论仍按各自日期有效。
+26. **ddl_guard_ko：容器作用域的 DDL 动态守护（方案 A，2026-09-29）**（根仓库 `fa3b24c`，源码 `oplus13/ddl_guard_ko/`；**仅在真机 insmod 验证过，尚未部署、尚未并入内核**）
+    - **目标**：把第 22/25 项的"恒关 DDL"升级为被动跟随 Droidspaces 容器生命周期——容器起来立即关、容器停止 `linger_ms`（默认 3s）后开回来；事件驱动、零轮询、零常驻线程。DDL 关只是少一层调度优化，所以"只在有风险时关"是比恒关更好的取舍。
+    - **锚点**（真机 ftrace 实测，2026-09-29）：① kretprobe `copy_pid_ns`（`entry_handler` 用 `flags & CLONE_NEWPID` 过滤）② kprobe `zap_pid_ns_processes`（容器收尸，停止时恰好 1 次）③ kprobe `put_pid_ns`（兜底，只有表非空时才细看）④ 加载时 `for_each_process` 对账。⚠️ `create_pid_namespace`/`destroy_pid_namespace` 已被 ThinLTO **内联掉、不可挂**。
+    - **机制**：pidns 登记表（64 槽 + 粘性 overflow）+ 单一 `system_power_efficient_wq` 上的 `delayed_work`；`mod_delayed_work(wq, &work, 0)` 立即关、`msecs_to_jiffies(linger_ms)` 延迟开；work 内部不再自排队。参数 `policy`(1=容器作用域/0=恒关)、`linger_ms`、`dry_run`、只读 `state`。
+    - **失败即安全**（红线）：任一探针注册失败、或 `global_sched_ddl_enabled` 静态重定位失败 → **insmod 失败** → DDL 保持开机脚本写的 0；表满或 kretprobe 漏事件（`nmissed>0`）→ 粘性恒关；`rmmod` **不改值**。
+    - **构建三个关键决定**（`build.sh` 头部有详注）：① **不覆盖** `utsrelease.h`（目标内核就是本地 `out/`，与 `fq_guard_ko` 针对上游 prebuilt 的做法相反）；② 不签名（`CONFIG_MODULE_SIG_ALL=` 覆盖）；③ Android 树 modpost 把未定义符号当**错误**，用 `KBUILD_MODPOST_WARN=1` 降级 + `build.sh` 自行审计日志补回严格性（只允许 `global_sched_ddl_enabled` 一个）。
+      - ⚠️ **不要用 `__symbol_get()`**：本树里它只对 `GPL_ONLY` 符号放行，而该符号是普通 `EXPORT_SYMBOL`，必然失败；静态 `extern int` 引用才是可用路径。
+      - ⚠️ **不要写死 CRC**：本地 `check_version()` 恒返回 1 来自那笔**可单独 revert** 的 LXC 补丁 `84708f314ec5c`；不带 `__crc_` 条目走"无符号版本"分支，任何内核都放行。
+    - **真机验证（OnePlus 13 `5d6d4090`，内核 `…-abogki20260727-4k`，dry-run 与真开关各 2 轮容器启停）**：登记容器 pidns 与 `DDL 关闭` **同一毫秒**；`zap` 摘除后 **3.2s**（= linger 3000）恢复开启；运行中反复采样 `ns` 恒为 1（`put` 兜底**没有**误摘活着的 ns）；`nmissed=0` 全程。`policy` 写 0 立即 `ddl=0`；`rmmod` 后节点值不变。
+      - 顺带取证的语义：`put_pid_ns` 在本树是**级联**实现（归零后销毁并继续减父 ns），且 `free_pid()` **不**调用它 → `refcount_read(&ns->ns.count) == 1` 确实等价于"本次调用会销毁该 ns"。启动瞬间 droidspaces 会做一次 `unshare(CLONE_NEWPID)` 试探，留下一个 330μs 内即销毁的短命 pidns（走 `put` 而非 `zap`），随后真容器复用同一 slab 地址重新登记。
+      - 证据：`oplus13/.scratch/ddl-guard-20260929/`。
+    - **⚠️ 已知边界**：容器是崩溃链最可能的触发源但**不是唯一**——minidump 命中线程里出现过 `kswapd0`，内存回收路径也能走到 `update_ddl_hit_history()`。本模块只覆盖容器作用域；若日后**无容器**时也复现同类崩溃，把 `policy` 设 0 退回恒关。"有容器"是**全系统**判定（任何进程 `unshare(CLONE_NEWPID)` 都会让 DDL 关闭，偏安全方向）。本方案**不治本**，治本仍是用完整 OEM 源码重编含 `a772844` 的 `oplus_bsp_sched_assist.ko`。
+    - **部署脚本**：`deploy/99-ddl-guard.sh`（service.d）语义 = **先写 0（安全缺省，等同第 22 项的 `op_mods/deploy/99-oplus-sched-ddl-guard.sh`）→ 再 insmod 交给模块动态管理**；模块加载失败（如换内核后 vermagic 不匹配）就停在 0。脚本顶部 `POLICY=1` 改 0 即退回恒关。⚠️ 每次重刷内核都必须重新构建并替换设备上的 .ko（vermagic/CRC 与内核绑定）。
+    - **当前设备状态**：模块已 `rmmod`、`sched_ddl_enabled` 已恢复为 `0`（即验证前的安全缺省）；**是否持久化部署（把 .ko 放 `/data/adb/ddl_guard/` + service.d 脚本）待用户决定**——部署即意味着无容器时 DDL 回到 1，也就是第 22 项那次崩溃所处的配置（只是当时没有容器作用域保护）。
+    - **并入内核路径**（下一步，可选）：按 `fq_guard` 先例放 `drivers/misc/ddl_guard.c` + `CONFIG_DDL_GUARD=y`，需重刷内核；收益是省掉每次换内核重推 .ko 与自启时序依赖。**在 .ko 多日跑稳之前不建议走这步**。
+
+> 2026-09-29 第 26 项记录 ddl_guard_ko（容器作用域 DDL 动态守护，方案 A）：真机 insmod 验证通过（两轮容器启停 + dry-run/真开关），**尚未部署、尚未并入内核**；第 25 项记录第十轮 ACK 合并（219 提交，含 6.6.143 LTS 合并）与全量构建/打包/真机刷入验证（未推送）；2026-09-23 第 24 项记录第九轮 ACK 合并（3 提交）与构建/打包校验；2026-09-20 第 23 项记录第八轮 ACK 合并、构建/打包校验与 DDL 持久化保护；2026-09-11 第 22 项记录 DDL 越界写重启定位与 LXC 补丁重移植（含刷机验证 `#47`）；此前维护记录中的真机验证结论仍按各自日期有效。
 
 > 2026-08-06 已清洗全部远程提交正文中的 Claude Code `Co-Authored-By` trailer 并重写历史：3 个定制提交与 3 个合并提交 hash 变更（ReKernel-X `3eb91d7cace`、BBG `cc7887d802`、Droidspaces `605e6859e4`、ACK 两轮 `be9610f4683`/`4860642a0474`、whitewhale 同步 `656ece04bd3`），上游 ack/origin 历史 hash 不变；已强制推送到 `github`。
 

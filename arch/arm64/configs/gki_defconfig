@@ -926,3 +926,48 @@ CONFIG_NFT_FIB_INET=y
 CONFIG_NFT_FIB_NETDEV=y
 # CONFIG_NFT_BRIDGE_META / CONFIG_NFT_BRIDGE_REJECT 属桥族，随
 # CONFIG_NF_TABLES_BRIDGE 一并停用（原因见上）。
+
+# --- 固件压缩加载（Droidspaces 官方文档 non-GKI 清单 Step 1）---
+# 机制：允许 firmware_class 在直接读取原始固件失败后，回退尝试 .xz / .zst。
+# 属“向后兼容的降级路径”，正常设备上原始文件存在时完全不会被走到。
+# kABI 结论：安全。全树门控点只有 drivers/base/firmware_loader/main.c 的
+# 310/369/374/468/989/994 六处，全部是函数体级 #ifdef，不涉及任何结构体
+# 成员 —— 不改变任何 struct 布局，与 android/abi_gki_aarch64.stg 基线一致。
+# 代价约为零：两个解压器的依赖在本仓库已是 =y（CONFIG_XZ_DEC=y、
+# CONFIG_ZSTD_DECOMPRESS=y、CONFIG_FW_LOADER_PAGED_BUF=y），
+# 因此不新增任何解压器代码，只增加几 KB 回退逻辑。
+# 注：CONFIG_FW_LOADER_COMPRESS_XZ 在 Kconfig 里有 default y，
+#     此处仍显式写出以便审阅；_ZSTD 无 default，必须显式声明。
+CONFIG_FW_LOADER_COMPRESS=y
+CONFIG_FW_LOADER_COMPRESS_XZ=y
+CONFIG_FW_LOADER_COMPRESS_ZSTD=y
+
+# --- 以下 3 项经核查属于 kABI 基线变更，暂不启用（原因留档）---
+# ① CONFIG_BRIDGE_NETFILTER —— 最严重，已证否
+#    它 select NETFILTER_FAMILY_BRIDGE，使 struct netns_nf 增加
+#    hooks_bridge[5]（40 字节）。仓库自带的 ABI 基线
+#    android/abi_gki_aarch64.stg 里明确记录着：
+#        struct netns_nf  bytesize = 224        （不含 hooks_bridge）
+#        struct net       member "nf" offset = 19072
+#    开启后 netns_nf 变 264 字节，struct net 中 nf 之后的所有成员偏移
+#    整体后移 40 字节 —— 与 OEM 预编译 vendor 模块的编译期布局不符。
+#    该文件同时被 ACK 自己的 abidiff 门禁使用，且
+#    android/abi_gki_aarch64.stg.allowed_breaks 中既无 netns_nf 也无
+#    hooks_bridge 的豁免条目。上游亦有 Google 的显式决定：
+#        a9d650605519 ANDROID: gki_defconfig: disable BRIDGE_NETFILTER
+# ② CONFIG_CGROUP_DEVICE / ③ CONFIG_CGROUP_PIDS —— 同一类，程度较轻
+#    include/linux/cgroup-defs.h 里 CGROUP_SUBSYS_COUNT 是
+#    enum cgroup_subsys_id 的末值，由 include/linux/cgroup_subsys.h 按
+#    IS_ENABLED() 逐项累加。它给 4 个定长数组定尺寸：
+#        cgroup-defs.h:237  struct css_set.subsys[]
+#        cgroup-defs.h:277  struct css_set.e_cset_node[]
+#        cgroup-defs.h:518  struct cgroup.subsys[]
+#        cgroup-defs.h:535  struct cgroup.e_csets[]
+#    当前生效 7 个子系统（cpuset/cpu/cpuacct/io/memory/freezer/net_prio），
+#    每多一个子系统，css_set 与 cgroup 各增长 8+16=24 字节。ABI 基线记录的
+#    是 struct css_set bytesize = 424（对应 7 个），allowed_breaks 中无
+#    css_set 豁免。另外 devices 插在第 5 位会让 freezer/net_prio 的
+#    子系统序号后移，任何按编译期枚举值索引 css->subsys[] 的模块会取错。
+#    实际运行时风险低于 ①（这两个结构体对模块基本不透明），但仍属基线偏离。
+# 结论：三项均为 kABI 基线变更，2026-09-30 经用户明确裁决**维持不启用**。
+# 若日后确需，须先重开该决策并准备回滚（重刷可用 Image），不要直接打开。

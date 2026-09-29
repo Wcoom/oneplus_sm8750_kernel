@@ -3,13 +3,13 @@
 - 设备：OnePlus 13 PJZ110（SM8750），Android 16，KernelSU root
 - 容器：Droidspaces 6.4.5，容器名 `ubuntu`
 - 诊断采集：2026-09-29 15:25–15:45 UTC（只读）
-- 优化与复测：2026-09-29 15:45 – 2026-09-30 01:05（A+B 两组 + 三项授权宿主级操作 + S1–S7 全部待办项）
+- 优化与复测：2026-09-29 15:45 – 2026-09-30 01:20（A+B 两组 + 三项授权宿主级操作 + S1–S7 全部待办项 + `vm.compaction_proactiveness` 运行时 A/B）
 - 采集方式：全部经 `adb → su → droidspaces --name=ubuntu run /bin/sh <脚本>`
 - 约束遵守情况：**未破坏 Android 宿主；未关闭 SELinux；未改 thermal；未锁 CPU 频率；未触碰 vendor 节点；未改任何 boot 镜像；未改 Android cgroup/cpuset**
 
 > ## ⚠️ 本版重要更正（相对初版报告）
 >
-> 初版报告有 **一条结论被实测推翻**、**一处方法学缺陷**、**三项授权测试有了确定结论**：
+> 初版报告有 **一条结论被实测推翻**、**一处方法学缺陷**、**三项授权测试有了确定结论**；后续执行 S1–S7 与 compaction A/B 的过程中又累计 **5 条更正（C-8 ~ C-12、C-13 ~ C-14）**，其中 **C-13 推翻了初版的一处根因认定**（把"分配受阻事件"读成了"压缩执行次数"）：
 >
 > | # | 初版结论 | 更正后 | 依据 |
 > |---|---|---|---|
@@ -25,6 +25,8 @@
 > | **C-10** | （新发现）A 组的 ccache 接管范围 | **裸 `droidspaces run` 下 `gcc` 根本不经过 ccache**（该路径 PATH 无 `/usr/lib/ccache`），只有登录 shell 生效。⇒ 非登录式自动化构建**一直没享受到 ccache** | §7.6 / §8.1 **S7** |
 > | **C-11** | S3 若照 systemd 默认配置直接启用 | ⚠️ **会连带 TRIM 宿主分区**：默认 `--listed-in /etc/fstab:/proc/self/mountinfo` 遍历所有挂载点，而容器内能看到 **9 个宿主挂载**（`dm-61`、`sdf3`）。实测首次运行真的 trim 了 `/dev/block/sdf3` 36.4 MiB。**已收紧为只 TRIM `/`** | §7.7 |
 > | **C-12** | S3 的"容器内定时器不开火"根因 | **systemd 自带的 `fstrim.timer`/`fstrim.service` 都带 `ConditionVirtualization=!container`**，容器内每周被静默跳过（journal 实证）。已用 drop-in 清空该条件 | §7.7 |
+> | **C-13** | §4.5「分配路径长期走 direct reclaim **+ compaction**，compaction 96% 失败 —— 这是唯一会实际拖慢一切工作负载的根因」 | ⚠️ **compaction 部分不成立**。`compact_stall/fail/success` 是「**分配被碎片卡住**」的事件计数（非"压缩运行了几次"），其累计值只在**开机风暴期**增长；运行时 A/B 的 **8 个观测窗口内恒为 +0**，期间甚至发生过 direct reclaim（`pgscan_direct` +50,088/分钟）也没触发一次压缩。⇒ **direct reclaim 长期存在（该半句成立），compaction 是开机暂态而非持续根因**。原报告把累计比值（126/131）当成了持续速率；**原始数据其实已自证**（§4.5 表中 `compact_stall 131→132`、`compact_fail 126→126`，20 分钟仅 +1/+0） | §4.5 / §6.7 |
+> | **C-14** | `vm.compaction_proactiveness` 是否可作为容器侧调优项 | ⚠️ **该 sysctl 不做命名空间隔离**：容器内写入 20 后，**宿主侧独立读到 20**（两侧 `uptime` 3907 vs 8896，证明是不同的 `/proc` 视图却共享同一全局量）。⇒ 容器侧任何脚本写它会**静默改变 Android 宿主**的内存管理行为。已排除 | §6.7 |
 
 ---
 
@@ -256,8 +258,8 @@ allocstall_normal    7,182 → 7,823
 allocstall_movable  28,800 → 32,386     （累计值持续增长）
 pgscan_direct    3,009,444 → 3,358,204 页   直接回收扫描
 pgsteal_direct   1,883,209 → 2,096,164 页   直接回收偷取
-compact_stall          131 → 132
-compact_fail           126 → 126        → 压缩失败率 96%
+compact_stall          131 → 132        ← 20 分钟内仅 +1（见 C-13）
+compact_fail           126 → 126        ← +0；「96%」是开机累计比值，非持续速率
 pswpin           1,252,484 → 1,653,274 页
 pswpout          3,806,990 → 4,728,349 页
 pgmajfault       1,377,480 → 1,815,696
@@ -272,9 +274,14 @@ pages free   39,969      ← 实际空闲页
       high   40,876      ← free < high：系统长期处于水位之下
 ```
 
-**判定：分配路径长期走 direct reclaim + compaction，且 compaction 96% 失败（内存碎片化）。这是唯一会实际拖慢一切工作负载的根因** —— 每次内存分配都可能同步停顿。**本次未处理**（属 Android 宿主侧，红线范围）。
+**判定：分配路径长期走 direct reclaim —— 这一半成立且是唯一会实际拖慢工作负载的根因**（每次内存分配都可能同步停顿）。**本次未处理**（属 Android 宿主侧，红线范围）。
 
-**旁证（本次实测新增）**：`compact_fail/compact_stall = 96%` 还直接解释了为什么 THP 在本机是空操作（§6.6）——连 2 MB 连续物理块都分配不出来。
+> ⚠️ **2026-09-30 更正（C-13）：原判定里的「+ compaction，compaction 96% 失败」不成立。**
+> `compact_stall/fail/success` 计的是「**分配被碎片卡住**」的事件，不是"压缩运行了几次"。上表原始数据其实已自证：20 分钟内 `compact_stall` 仅 +1、`compact_fail` +0，说明压缩**根本没有在持续参与**；「96%」是开机累计比值（126/131）被当成了持续速率。
+> 运行时 A/B（§6.7）进一步确认：**8 个观测窗口内三个计数器恒为 +0**，期间甚至真的发生过 direct reclaim（`pgscan_direct` +50,088/分钟）也没触发一次压缩。
+> ⇒ **direct reclaim 是持续的，compaction 是开机暂态。** 结论修正后，「compaction 失败率高」**不再构成** THP 无效（§6.6）的解释。
+>
+> 另注：`/proc/zoneinfo` 的 `free < high` 水位判定**不受本次更正影响**，仍然成立。
 
 ---
 
@@ -414,7 +421,8 @@ ext4（容器内） → loop50 → rootfs.img（f2fs 文件） → f2fs → UFS
 
 | 项 | 结论 | 依据 |
 |---|---|---|
-| **THP → madvise** | **空操作**。`AnonHugePages` 在 madvise 档仍为 0 kB（显式 `MADV_HUGEPAGE` 也无效），因 compaction 96% 失败无 2 MB 连续块。**保持 `never`** | §9.3 |
+| **THP → madvise** | **空操作**。`AnonHugePages` 在 madvise 档仍为 0 kB（显式 `MADV_HUGEPAGE` 也无效）；计数器旁证 `thp_fault_alloc=0` / `thp_fault_fallback=763`。**保持 `never`**（原"因 compaction 96% 失败"的归因已按 C-13 撤回） | §6.6 / §9.3 |
+| **`vm.compaction_proactiveness` → 20 / 100** | **零收益 + 永久成本**：8 个窗口 `compact_stall` 恒 +0，却每分钟烧 0.2–0.6% 单核且不收敛。**保持 0** | §6.7 |
 | **`nodelalloc` → `delalloc`** | 仅 1.11×/1.29×，非 rootfs 慢的主因，不值得持久化 | §5.3 |
 | **`force_cgroupv1=1`** | **容器启动即死**，已回滚 | §6.5 |
 | **把构建目录迁到 `/mnt/data`「不会更快」** | **初版判断错误**，实测快 2.19× | §5.1 |
@@ -453,10 +461,87 @@ tlb_madv 在 madvise 档 vs never 档 = 1.05×
 tlb_plain 对照                    = 0.97×   （两者都在噪声内）
 ```
 
-**判定：THP 在本机完全无效。** 即使切到 `madvise` 并显式请求，`AnonHugePages` 始终为 0 —— 根因是 §4.5 的 **compaction 96% 失败**，无法凑出 2 MB 连续物理页。这同时解释了厂商为何出厂就设为 `never`。
+**判定：THP 在本机完全无效。** 即使切到 `madvise` 并显式请求，`AnonHugePages` 始终为 0。这解释了厂商为何出厂就设为 `never`。
+
+计数器旁证（本次补充，开机累计）：`thp_fault_alloc = 0` / `thp_fault_fallback = 763` —— **763 次大页缺页全部回落到 4 KB 页，零成功**。
+
+> ⚠️ **归因更正（C-13）**：原报告把根因写成「§4.5 的 compaction 96% 失败」。该归因**不再成立** —— §6.7 的 A/B 证明压缩在稳态下根本不运行，所以"压缩失败率高"不是这里的原因。
+> 本站**只测到结果**（大页分配恒失败），**未测机制**。可能的方向是 `GFP_TRANSHUGE_LIGHT` 一类路径本身就不触发直接压缩、或内存压力下大页分配被直接放弃 —— 但**本次没有证据**，故不再给因果结论。
 
 > 已确认回滚：`/sys/kernel/mm/transparent_hugepage/enabled` = `always madvise [never]`。
 > 另注：宿主侧 MemFree 在测试期间从 263 MB 升到 520 MB，说明 C1 的内存压力本身也是时变的。
+
+### 6.7 `vm.compaction_proactiveness` 运行时 A/B（本次执行，**已回滚到 0**）
+
+§4.5 曾把"compaction 失败"列为唯一持续性根因，并据此把本参数列为**唯一不必重编内核、又能直击该根因的调节点**。本节即为对它的运行时实测。
+
+| 项 | 内容 |
+|---|---|
+| **修改对象** | 宿主 `/proc/sys/vm/compaction_proactiveness` —— **不做命名空间隔离，是 Android 宿主全局内核参数**（C-14） |
+| **预期收益** | 唤醒内核后台线程 `kcompactd` 主动整理碎片 → 降低直接压缩失败率、缓解 C1 内存压力、可能救活 THP |
+| **潜在风险** | `kcompactd` 常驻后台扫描占用 CPU；改变宿主内存管理行为 |
+| **恢复方法** | `echo 0 > /proc/sys/vm/compaction_proactiveness` —— **已执行并双向确认**（宿主读到 0、容器内读到 0）。该参数**不持久化**，重启即回默认；原始值另存于 `/data/local/tmp/proact.orig` |
+
+**测试设计**：8 个观测窗口（7×60 s + 1 组 120 s 双窗口），相位 `p=0`（设备原值）/ `p=20`（内核默认）/ `p=100`（最激进）；其中一轮按 **A(0) → B(100) → A(0)** 配对，以控制背景活动漂移。
+
+#### ① 旋钮确实生效 —— 三组独立复现
+
+| 观测窗口 | p | `kcompactd` migrate_scanned | free_scanned | CPU/窗口 | `compact_stall`/`fail`/`success` |
+|---|---|---|---|---|---|
+| 空载 A（基线） | **0** | **0** | **0** | **0** | 0 / 0 / 0 |
+| 空载 B | 20 | 496,170 | 3,408,404 | 0.13 s | 0 / 0 / 0 |
+| 空载 C | 100 | 1,341,216 | 8,367,059 | 0.26 s | 0 / 0 / 0 |
+| 长窗口·子窗1 | 100 | 1,099,200 | 6,705,285 | 0.27 s | 0 / 0 / 0 |
+| 长窗口·子窗2 | 100 | 1,307,489 | 4,949,519 | 0.38 s | 0 / 0 / 0 |
+| 配对 A1（对照） | **0** | **0** | **0** | **0** | 0 / 0 / 0 |
+| 配对 B（处理） | 100 | 679,104 | 4,486,537 | 0.18 s | 0 / 0 / 0 |
+| 配对 A2（对照） | **0** | **0** | **0** | **0** | 0 / 0 / 0 |
+
+**p=0 的三个窗口里 `kcompactd` 完全静默（0 扫描 / 0 CPU）；p>0 的三个窗口全部立即活动。** 旋钮有效，且此前已确认 `kcompactd` 开机 2.3 小时只烧了 0.75 秒 CPU——即设备出厂设置下这个后台线程基本不存在。
+
+#### ② 成本：小，但**永久且不收敛**
+
+长窗口 120 秒（p=100）的两个连续子窗口工作量**基本持平**（1.10M/6.71M vs 1.31M/4.95M；CPU 27 vs 38 jiffies）。
+
+⇒ 它**不是"整理一次就完事"**，而是每分钟固定消耗 **0.2–0.6% 单核**的常驻税，且看不到自终止点。
+
+#### ③ 收益：**测不出**
+
+- **`compact_stall` / `compact_fail` / `compact_success` 在全部 8 个窗口恒为 +0** —— 稳态下直接压缩一次都没发生。
+- 期间**确实有内存压力**：配对 A1 窗口 `pgscan_direct` +50,088 页 —— **但连一次压缩都没触发**。
+- **buddyinfo 高阶空闲块测试被证伪**：配对 A/B/A 三个窗口的高阶块（order 7–10）净变化为 **−22 / −6 / −10**，全在个位数且方向不一致。而 MemFree 在三个窗口摆动 **−4.5 / +90 / −118 MB** ——**压缩不可能增加 MemFree**（它只重排空闲页，不释放内存），故 B 窗口的 +90 MB 必为背景应用活动。**背景活动的幅度比任何可归因于压缩的信号大一个数量级**，该测量被混淆，**不构成收益证据**。
+
+#### ④ 附带澄清：三组 `compact_*` 计数器分属三条不同路径
+
+侦察时曾观察到「写 `1` 到 `/proc/sys/vm/compact_memory` 触发全量压缩，计数器却毫无变化」，本次已查清——**那是预期行为，不是异常**：
+
+```
+写 compact_memory=1 前后：
+  compact_migrate_scanned  5,716,163 → 5,904,739   (+188,576)  ← 变
+  compact_free_scanned    38,268,256 → 39,934,300  (+1,666,044) ← 变
+  compact_isolated         1,785,110 → 1,857,804   (+72,694)   ← 变
+  compact_stall/fail/success      148/131/17 → 不变
+  compact_daemon_*                全部不变
+```
+
+| 计数器组 | 含义 | 由谁产生 |
+|---|---|---|
+| `compact_migrate_scanned` / `free_scanned` / `isolated` | **压缩动作**本身的工作量（全局） | 所有压缩路径 |
+| `compact_stall` / `fail` / `success` | **分配被碎片卡住**的事件（≠"压缩运行了几次"） | 仅**直接压缩**路径 |
+| `compact_daemon_*` | 同上，但专属于 | 仅 `kcompactd` |
+
+全量压缩走的是**第三条路径**（不经直接压缩、不经 kcompactd），所以后两组不变。**这正是 C-13 的机理**：把 `compact_fail/compact_stall` 读成"压缩失败率"是范畴错误——它其实是**分配受阻率**。
+
+> 另一处需注意的坑：`compact_daemon_wake` **不能当作工作量代理**。长窗口子窗2 实测 `wake` +0 而扫描量仍增 620 万页、CPU 仍烧 0.38 s。本节所有工作量结论均以**扫描量与 CPU**为准。
+
+#### ⑤ 结论：**维持 `0`，不采纳**
+
+1. 旋钮有效、单价便宜，但**买不到任何可测收益**——它要解决的问题（分配被碎片卡住）在这台设备的稳态下**根本没有发生**；
+2. C1 的真正内容是 **direct reclaim 长期存在**（`allocstall_movable`、`pgscan_direct` 持续增长），而主动压缩**对回收压力无能为力**——它只重排空闲页，不释放内存；
+3. 代价是**永久性**的（不收敛），收益是**零**；
+4. C-14：从容器侧写它会**改到 Android 宿主**，属红线。
+
+**⇒ 建议保持设备原值 `0`。已作为"实测否证"条目列入 §8.2。**
 
 ---
 
@@ -774,6 +859,7 @@ fstrim[5337]: /: 1.1 GiB (1129177088 bytes) trimmed      ← 仅此一行，无�
 | 项 | 理由 |
 |---|---|
 | THP → madvise | **实测空操作**（§6.6），零收益却有内存风险，**保持 never** |
+| **`vm.compaction_proactiveness` → 20/100** | **实测零收益 + 永久成本**（§6.7）：8 个窗口内 `compact_stall` 恒为 +0（稳态根本没有分配被碎片卡住），却每分钟固定烧 0.2–0.6% 单核且**不收敛**。且该参数**不做命名空间隔离**，容器侧写它会改到宿主（C-14）。**保持 0** |
 | `delalloc` remount | 仅 1.11×/1.29×，需开机钩子，且削弱崩溃持久性（§5.3） |
 | `force_cgroupv1=1` | **实测容器起不来**（§6.5） |
 | 改 `swappiness` / `dirty_ratio` / `overcommit_memory` | 宿主全局，影响 Android |
@@ -923,6 +1009,13 @@ ccache -s:  Cacheable calls: 4 / 4 (100.0%)
 | `recon-s5.sh` / `recon-s5b.sh` | S5 深入侦察（第一次 `du` 因 `current` 是指向 `releases/` 内的符号链接而在同次调用中按 inode 去重、数字互相抵消，故补做逐个 `du` 的干净读数） | 已归档（§7.7） |
 | `apply-s357.sh` | **S3+S5+S7 执行**：建 16 个 shim、fstrim drop-in、带三重安全闸的旧版删除 | 已归档（§7.7） |
 | `fix-fstrim-scope.sh` | **C-11 修正**：把 fstrim 的 `ExecStart` 由「遍历所有挂载点」收紧为「只 TRIM `/`」 | 已归档（§7.7） |
+| `recon-proact.sh` | **compaction A/B 侦察（宿主）**：全部 `compact_*` 与水位读数 + 60 s 空转对照（结论：自然活动为 0） | 已归档（§6.7） |
+| `recon-extfrag.sh` | compaction A/B 侦察（debugfs）：挂载 debugfs、读 `extfrag_index` / `unusable_index`、`kcompactd0` CPU；**顺带发现「`compact_memory` 全量压缩不计数」** | 已归档（§6.7 ④） |
+| `ab-proact.sh` | **A/B 主测**：p = 0 / 20 / 100 三阶段各 60 s，含恢复原值 | 已归档（§6.7 ①） |
+| `ab-proact2.sh` | **收敛性长窗口**：p=100 连续两个 60 s 子窗口 + buddyinfo 逐 order 统计 | 已归档（§6.7 ②） |
+| `ab-proact3.sh` | **配对对照**：A(0) → B(100) → A(0) 各 60 s，用于剥离背景活动漂移 | 已归档（§6.7 ③） |
+| `cmm.sh` | **计数器路径查明**：写 `compact_memory=1` 前后全量 `compact_*` 对照，坐实三组计数器分属三条路径 | 已归档（§6.7 ④） |
+| `c-proact.sh` / `c-set20.sh` | **容器侧可写性与命名空间隔离**：容器内写 20 后由宿主独立读取验证 ⇒ C-14 | 已归档（§6.7 ⑤） |
 
 原始输出归档于 `oplus13/.scratch/droidspaces-20260929/raw/`。
 
@@ -953,6 +1046,7 @@ ccache -s:  Cacheable calls: 4 / 4 (100.0%)
 | ccache 生效范围 | ✅ S7 后**全部路径生效**（登录 shell 走 `/usr/lib/ccache`，裸 `run` 走 `/usr/local/bin`）。S7 之前的缺口见 §7.6 C-10 |
 | **fstrim 定时（S3）** | drop-in `/etc/systemd/system/fstrim.{timer,service}.d/override.conf`；`OnCalendar=weekly`、`Persistent=true` |
 | **codex 版本根（S5 后）** | `/root/.codex/packages/{standalone,app-server-daemon}/releases/`，各只保留 `current` 指向的 `0.158.0` |
+| **compaction A/B 原值备份（宿主）** | `/data/local/tmp/proact.orig`（内容为 `0`） |
 
 ## 附录 C：一键回滚速查
 
@@ -1007,4 +1101,10 @@ apt remove build-essential cmake ninja-build pkg-config \
 # container.config 恢复 force_cgroupv1=0（已处于该状态）
 cp -a /data/local/Droidspaces/Containers/ubuntu/container.config.bak-cgv1 \
       /data/local/Droidspaces/Containers/ubuntu/container.config
+
+# ---- compaction A/B：恢复原值（§6.7）----
+# 本次已在测试结束时回滚并双向确认；此条仅供日后复查或再次实验后使用
+cat /data/local/tmp/proact.orig > /proc/sys/vm/compaction_proactiveness
+cat /proc/sys/vm/compaction_proactiveness     # 应输出 0
+# 该参数不持久化——即使忘了回滚，重启也会回到默认
 ```

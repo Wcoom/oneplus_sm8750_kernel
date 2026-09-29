@@ -72,7 +72,7 @@ WSL2 Ubuntu 环境下的开发工作区，核心工作方向：
 ### mihomo 工程速查（2026-08-29 起）
 
 - **网络链路（重要）**：WSL/Windows 直连 GitHub 超时、gh-proxy.com 被 fake-ip（198.18.0.111）污染；可行链路 = WSL → 手机 mihomo HTTP 代理（192.168.1.177:7890，wlan0 同网段）→ gh-proxy.com → GitHub 全链路 200。git 用法：`git -c http.proxy=http://192.168.1.177:7890 ls-remote https://gh-proxy.com/https://github.com/<repo>.git`；包装器 `mihomo-ebpf-smart-export/tools/git-gh-proxy.sh`（手机 IP 为 DHCP 动态，变了要改 PHONE_PROXY）
-- **mihomo 构建/部署**：`GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -tags with_ebpf`（GOOS=android 才能读 Android 系统 CA 池；缺 with_ebpf 则 bpf fd=0 无劫持）；部署到 `/data/adb/box/bin/mihomo`，chown root:net_admin 后必须再 chmod 6755（chown 会清 setuid 位）；必须 setsid 启动；Windows adb 位于 `/mnt/d/刷机/platform-tools/adb.exe`（2026-08-30 核实；旧记录 /mnt/c/WINDOWS/system32 已失效；WSL 内无 adb）
+- **mihomo 构建/部署**：`GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -tags with_ebpf`（GOOS=android 才能读 Android 系统 CA 池；缺 with_ebpf 则 bpf fd=0 无劫持）；部署到 `/data/adb/box/bin/mihomo`，chown root:net_admin 后必须再 chmod 6755（chown 会清 setuid 位）；必须 setsid 启动；**adb 首选 WSL 内原生 `/usr/bin/adb`**（2026-09-30 核实：Android Debug Bridge 1.0.41 / Version 34.0.5-debian，来自 `/usr/lib/android-sdk/platform-tools/`，USB 直通可用、设备直连；内核刷机即走此路径完成）；备选 `/mnt/d/刷机/platform-tools/adb.exe`（2026-08-30 核实，依赖 D 盘挂载；更早记录 `/mnt/c/WINDOWS/system32` 已失效）
 
 ## 6. 会话惯例
 
@@ -250,7 +250,7 @@ UI 融合（聊天内嵌子代理卡片 + 递归嵌套渲染 + 详情页 + 工�
 - Gradle 发行包从**华为镜像**手动预置到 wrapper 缓存（`mirrors.huaweicloud.com/gradle/` 实测 10MB/s，
   官方源仅 ~8KB/s）。JDK 同理：Adoptium API 会 SSL 中断，用华为镜像。
 - ⚠️ `pkill -f "<模式>"` 会匹配到自身命令行导致自杀——本会话踩过两次，务必用 `pkill -f "Gradle[D]aemon"` 这类不自匹配写法。
-- **ADB 在 Windows 侧**：`/mnt/d/刷机/platform-tools/adb.exe`（WSL 内无 adb；设备 PJZ110 / Android 16 / KernelSU root）。
+- **ADB 可用 WSL 内原生 `/usr/bin/adb`**（2026-09-30 核实，USB 直通正常，不必再依赖 Windows 侧；设备 PJZ110 / Android 16 / KernelSU LKM 模式 root）。备选 `/mnt/d/刷机/platform-tools/adb.exe`（需 D 盘已挂载）。⚠️ adb 偶发丢设备（`no devices/emulators found`）而 `lsusb` 仍可见时，`adb kill-server; adb start-server` 即恢复。
   辅助脚本 `eta-android/adb-tap.sh` 可按文案或无障碍描述定位并点击界面元素。
 - 构建命令：`cd eta-android/Eta && source ../gradle-env.sh && ./gradlew :app:assembleDebug :app:testDebugUnitTest`
   （首次全量约 15 分钟，增量 1-2 分钟）。

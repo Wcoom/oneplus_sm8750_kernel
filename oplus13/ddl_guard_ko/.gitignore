@@ -1,0 +1,14 @@
+.build.log
+.ddl_guard.ko.cmd
+.ddl_guard.mod.cmd
+.ddl_guard.mod.o.cmd
+.ddl_guard.o.cmd
+.modules.order.cmd
+.Module.symvers.cmd
+Module.symvers
+ddl_guard.ko
+ddl_guard.mod
+ddl_guard.mod.c
+ddl_guard.mod.o
+ddl_guard.o
+modules.order

@@ -3,7 +3,7 @@
 - 设备：OnePlus 13 PJZ110（SM8750），Android 16，KernelSU root
 - 容器：Droidspaces 6.4.5，容器名 `ubuntu`
 - 诊断采集：2026-09-29 15:25–15:45 UTC（只读）
-- 优化与复测：2026-09-29 15:45 – 2026-09-30 00:55（A+B 两组 + 三项授权宿主级操作 + S1/S2/S4/S6 待办项）
+- 优化与复测：2026-09-29 15:45 – 2026-09-30 01:05（A+B 两组 + 三项授权宿主级操作 + S1–S7 全部待办项）
 - 采集方式：全部经 `adb → su → droidspaces --name=ubuntu run /bin/sh <脚本>`
 - 约束遵守情况：**未破坏 Android 宿主；未关闭 SELinux；未改 thermal；未锁 CPU 频率；未触碰 vendor 节点；未改任何 boot 镜像；未改 Android cgroup/cpuset**
 
@@ -23,6 +23,8 @@
 > | **C-8** | A 组 A4 建立的 `/root/.ccache.conf` | ⚠️ **该文件从未被 ccache 读取过**（既不是系统配置路径，也不是缓存配置路径），**自建立起就完全无效**。已迁到真正会读的 `$CCACHE_DIR/ccache.conf`。**根因：A 组当时只核对了"取值"没核对"来源"** | §7.6 |
 > | **C-9** | S4 声称的收益「缓存放 f2fs 可加快冷读」 | **与 §5.1 实测不符**：读 256 MB 三个落点为 99 / 97 / 99 ms，**几乎无差**；小文件操作 f2fs 反而略慢（20 vs 19 ms）。S4 的真实收益是 **rootfs 空间**（20 GB 上限 vs 40 GB 卷），不是速度 | §5.1 / §7.6 |
 > | **C-10** | （新发现）A 组的 ccache 接管范围 | **裸 `droidspaces run` 下 `gcc` 根本不经过 ccache**（该路径 PATH 无 `/usr/lib/ccache`），只有登录 shell 生效。⇒ 非登录式自动化构建**一直没享受到 ccache** | §7.6 / §8.1 **S7** |
+> | **C-11** | S3 若照 systemd 默认配置直接启用 | ⚠️ **会连带 TRIM 宿主分区**：默认 `--listed-in /etc/fstab:/proc/self/mountinfo` 遍历所有挂载点，而容器内能看到 **9 个宿主挂载**（`dm-61`、`sdf3`）。实测首次运行真的 trim 了 `/dev/block/sdf3` 36.4 MiB。**已收紧为只 TRIM `/`** | §7.7 |
+> | **C-12** | S3 的"容器内定时器不开火"根因 | **systemd 自带的 `fstrim.timer`/`fstrim.service` 都带 `ConditionVirtualization=!container`**，容器内每周被静默跳过（journal 实证）。已用 drop-in 清空该条件 | §7.7 |
 
 ---
 
@@ -647,26 +649,125 @@ ln -sf /usr/share/zoneinfo/Etc/UTC /etc/localtime
 rm -f /etc/timezone
 ```
 
+### 7.7 S3+S5+S7 执行记录：周期性 TRIM、清理 codex 旧版、ccache 全路径生效（2026-09-30）
+
+#### S7：让 ccache 在所有调用路径生效
+
+把 `/usr/lib/ccache/` 的 **16 个 shim** 软链到 `/usr/local/bin/`（该目录在裸 `run` 的 PATH 中且**先于** `/usr/bin`）。建链前逐一核对过 16 个名字，**与现有 6 个链接（`bun` `bunx` `claude` `claude-go` `claude-native` `codex`）零冲突**，建链后逐一复核这 6 个仍指向原目标。
+
+| 检查点 | 执行前 | 执行后 |
+|---|---|---|
+| 裸 `run` 下 `command -v gcc` | `/usr/bin/gcc`（→ `gcc-15`） | **`/usr/local/bin/gcc`**（→ ccache shim） |
+| `gcc --version` | — | `gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0`（版本透传正常） |
+| **`Cacheable calls`（裸 `gcc -c` 两次）** | **0**（C-10） | **2 / 2，1 hit + 1 miss** ✅ |
+
+产物可运行（编译出的程序输出 `s7-ok`），`cc` / `clang` 同样解析到 shim 且版本正确。
+⇒ **裸 `run` 发起的构建现在也能吃到 ccache（§9.4 实测 123×）。**
+
+**恢复方法**：`rm -f` 掉 `/root/.ds-opt/ccache-shims.list` 里列的 16 个名字（**仅这 16 个**，勿对整个目录用 `rm -rf`，其中有 `bun`/`claude`/`codex`）。
+
+#### S3：周期性 TRIM —— 命中 systemd 的容器陷阱，并收紧作用域
+
+**根因（journal 实证，非推测）**：systemd 自带的 `fstrim.timer` 是 `enabled` 的，但 **`fstrim.timer` 与 `fstrim.service` 两个单元都带 `ConditionVirtualization=!container`**，在容器内每次都满足不了：
+
+```
+Sep 30 00:14:21 ubuntu systemd[1]: fstrim.timer - Discard unused blocks once a week
+  skipped, unmet condition check ConditionVirtualization=!container
+```
+
+⇒ 容器内 `fstrim` **从建立起就每周被静默跳过**，这正是 §7.4 里"rootfs 未挂 `discard`、需周期性手动 trim"的原因。
+
+**修法**：为两个单元各建一个 drop-in，清空该条件（`ConditionVirtualization=` 空赋值即重置条件列表）：
+
+```
+/etc/systemd/system/fstrim.timer.d/override.conf     →  [Unit] ConditionVirtualization=
+/etc/systemd/system/fstrim.service.d/override.conf   →  [Unit] ConditionVirtualization=
+```
+
+生效确认：timer 由 `inactive (dead) / Condition unmet` 变为 **`active (waiting)`**，下次触发 `Mon 2026-10-05`（`OnCalendar=weekly` + `Persistent=true`，容器未运行的周期会在下次启动时补跑——本容器 `run_at_boot=0`，故 `Persistent` 是必需项）。
+
+##### ⚠️ 本轮最值得记的一处发现（C-11）：默认行为会 TRIM **宿主**分区
+
+Ubuntu 的 `fstrim.service` 默认用 `--listed-in /etc/fstab:/proc/self/mountinfo`，**遍历所有挂载点**。而本容器 `enable_android_storage=1`，容器内能看到 **9 个宿主分区挂载**：
+
+```
+/ /dev/block/loop50 ext4                                   ← 容器 rootfs（本该只 TRIM 这个）
+/mnt/data                          /dev/block/dm-61 f2fs  ← 宿主 /data
+/mnt/data/user/0                   /dev/block/dm-61[/data]
+/mnt/data/persist_log/.../shutdown /dev/block/sdf3[/media/log/shutdown] ext4
+/mnt/data/persist_log/.../hang_oplus、/cache/factory、criticallog、minidumpbackup、
+/storage/op2storagelog …均来自  /dev/block/sdf3          ← 宿主分区（共 7 处）
+```
+
+**首次实测（默认 ExecStart）的 journal 证实它真的对宿主下手了**：
+
+```
+fstrim[5240]: /mnt/data/persist_log/oplusreserve/media/log/shutdown: 36.4 MiB trimmed on /dev/block/sdf3
+fstrim[5240]: /mnt/data: 0 B (0 bytes) trimmed on /dev/block/dm-61
+fstrim[5240]: /: 34 GiB (36531220480 bytes) trimmed on /dev/block/loop50
+```
+
+TRIM 本身不丢数据（只 discard 文件系统标记为空闲的块，且 util-linux 会跳过不支持 discard 的设备），**但这是容器内的定时任务外溢到宿主存储**——与"不破坏 Android 宿主"的约束不符：宿主分区的维护应由 Android 自身机制负责，不应被容器的定时器周期性触及。
+
+**收紧**：覆盖 `ExecStart` 为只 TRIM 容器自己的 rootfs。
+
+```
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/fstrim --verbose /
+```
+
+**收紧后实测**（决定性验证）：
+
+```
+fstrim[5337]: /: 1.1 GiB (1129177088 bytes) trimmed      ← 仅此一行，无任何宿主分区
+```
+
+**收益落地**：宿主侧 `rootfs.img` 表观 40 GiB（稀疏），**实际占用降至 4.5G**。
+
+**恢复方法**：`rm -rf /etc/systemd/system/fstrim.{timer,service}.d` + `systemctl daemon-reload && systemctl restart fstrim.timer`（即回到"容器内每周被跳过"的出厂状态）。
+
+#### S5：清理 codex 旧版本
+
+`/root/.codex/packages/standalone/releases/` 下有 4 个版本，`current` 指向 **0.158.0**：
+
+| 版本 | 占用 | 处置 |
+|---|---|---|
+| 0.154.0-aarch64-unknown-linux-musl | 284M | 已删 |
+| 0.155.1-aarch64-unknown-linux-musl | 313M | 已删 |
+| 0.156.1-aarch64-unknown-linux-musl | 328M | 已删 |
+| **0.158.0-aarch64-unknown-linux-musl** | 382M | **保留**（`current` 指向它） |
+
+`app-server-daemon/releases/` 下**只有当前版本，无可删**。
+
+**删除前的三重安全闸**（删除不可逆，故先验证再动手）：① `standalone/current` 解析结果 == 保留版本；② `readlink -f $(command -v codex)` 落在保留版本目录内；③ 运行中的 codex 进程数为 0。三项全过才执行。
+
+**结果**：`/root/.codex` **2.1G → 1.2G**（释放 925M）；`codex --version` 仍为 `codex-cli 0.158.0`，`current` 符号链接完好。
+⚠️ 该操作**不可恢复**（旧版本包已删），但需要时可由 codex 的自动更新重新下载。
+
+**恢复方法**：无法直接恢复；`codex` 下次自动更新或手动重装时会重新拉取。
+
 ---
 
 ## 8. 优化方案（**剩余待办，需授权**）
 
 ### 8.1 建议采纳（零风险 / 低风险）
 
-> **S1、S2 已于 2026-09-30 执行完毕（§7.5）；S4、S6 已于 2026-09-30 执行完毕（§7.6）。**
-> 下表保留原条目以存档，**剩余未执行项为 S3、S5，以及本次新发现的 S7。**
+> **S1、S2 于 2026-09-30 执行完毕（§7.5）；S4、S6 于 2026-09-30 执行完毕（§7.6）；S3、S5、S7 于 2026-09-30 执行完毕（§7.7）。**
+> ✅ **本节全部条目已执行完毕。** 下表保留原条目以存档。
 
 | # | 项目 | 收益 | 风险 | 恢复方法 |
 |---|---|---|---|---|
 | ~~**S1**~~ | ~~构建输出/缓存指向 `/mnt/data`~~ | ✅ **已执行**（§7.5） | — | `cp /root/.ds-opt/environment.bak-pre-dsbuild /etc/environment` |
 | ~~**S2**~~ | ~~`TMPDIR` 指向 `/tmp`~~ | ✅ **已执行，但实测为空操作**（默认本就是 `/tmp`，见 §7.5） | — | 同上 |
-| **S3** | 建立**周期性 `fstrim -v /`**（如每月，或大轮构建后） | 持续回收稀疏镜像膨胀（本次回收 9.8 GiB） | 无 | 不执行即等效回滚 |
+| ~~**S3**~~ | ~~建立周期性 `fstrim -v /`~~ | ✅ **已执行**（§7.7）。用 systemd 自带 timer + drop-in 清 `ConditionVirtualization`；⚠️ 已按 C-11 收紧为**只 TRIM 容器 rootfs** | — | 见 §7.7「恢复方法」 |
 | ~~**S4**~~ | ~~把 ccache 迁到 `/mnt/data` + `max_size`~~ | ✅ **已执行**（§7.6）。⚠️ 收益更正为 **rootfs 空间**（20 GB 上限 vs 40 GB 卷），**不是速度**（C-9） | — | 见 §7.6「恢复方法」 |
-| **S5** | 清理 `/root/.codex/packages` 的旧版本（保留当前版本） | 释放约 1 GiB | 会删包缓存，下次可能重下 | 无法恢复，但可重下 |
+| ~~**S5**~~ | ~~清理 `/root/.codex/packages` 的旧版本~~ | ✅ **已执行**（§7.7）：删 3 个旧版，`/root/.codex` **2.1G → 1.2G**（925M） | — | 不可恢复，可重下 |
 | ~~**S6**~~ | ~~设置时区 `Asia/Shanghai`~~ | ✅ **已执行**（§7.6），仅影响显示/日志 | — | `ln -sf /usr/share/zoneinfo/Etc/UTC /etc/localtime; rm -f /etc/timezone` |
-| **S7** | **让 ccache 在所有调用路径生效**：把 `/usr/lib/ccache/` 的 16 个 shim 链接到 `/usr/local/bin/`（该目录在裸 `run` 的 PATH 中且**先于** `/usr/bin`；当前仅有 `bun bunx claude claude-go claude-native codex` 六个链接，**无 gcc 类冲突**） | 裸 `run` 发起的构建也能吃到 ccache 命中（**123×**，§9.4）。**当前这些构建完全不受 ccache 加速**（C-10） | **低**：ccache 对不可缓存的编译会自动回退真实编译器；但**会改变全局 `gcc`/`clang` 解析**，影响容器内所有构建 | `rm -f /usr/local/bin/{cc,c++,gcc,g++,gcc-15,g++-15,clang,clang++,clang-21,clang++-21,c89-gcc,c99-gcc,aarch64-linux-gnu-gcc,aarch64-linux-gnu-g++,aarch64-linux-gnu-gcc-15,aarch64-linux-gnu-g++-15}`（**仅删这 16 个**，勿用 `rm -rf` 整个目录，其中有 bun/claude/codex） |
+| ~~**S7**~~ | ~~让 ccache 在所有调用路径生效（16 个 shim 链入 `/usr/local/bin/`）~~ | ✅ **已执行**（§7.7）。裸 `run` 下 `Cacheable calls` **0 → 2**（1 hit + 1 miss），原有 6 个链接未受影响 | — | 见 §7.7「恢复方法」（**仅删 16 个**，勿 `rm -rf` 整目录） |
 
-> **S7 建议**：收益明确（非登录构建目前零加速），风险可控且完全可逆。若执行，验证方式应与本次一致——**看 origin/实际计数，不看变量是否设置**：在裸 `run` 中做 `ccache -z && gcc -c ... && ccache -s`，确认 `Cacheable calls` 由 0 变为 1。
+> ✅ **S7 执行结果**：收益已兑现——裸 `run` 发起的构建此前**完全不受 ccache 加速**（C-10），现在已纳入（§9.4 实测 123×）。
+> 验证方式沿用本次纪律：**看实际计数，不看变量是否设置**——`ccache -z && gcc -c ... && ccache -s`，`Cacheable calls` 由 0 变为 2。
 
 ### 8.2 不建议（有明确代价或已被实测否证）
 
@@ -818,6 +919,10 @@ ccache -s:  Cacheable calls: 4 / 4 (100.0%)
 | `verify-s4s6.sh` | S4/S6 首次验证（**该次因调用方式不当未成立，见 `diag-ccache.sh`**） | 已归档（§7.6） |
 | `diag-ccache.sh` | **关键诊断**：查明 ccache 接管方式（裸 run 不生效）与 `CCACHE_MAXSIZE` 来源 | 已归档（§7.6） |
 | `confirm-s4.sh` | S4 最终确认：配置 origin 归属 + 真实编译 1 miss/1 hit | 已归档（§7.6） |
+| `recon-s357.sh` | **S3/S5/S7 侦察**：fstrim 单元与 Condition、codex 版本结构、shim 名冲突检查 | 已归档（§7.7） |
+| `recon-s5.sh` / `recon-s5b.sh` | S5 深入侦察（第一次 `du` 因 `current` 是指向 `releases/` 内的符号链接而在同次调用中按 inode 去重、数字互相抵消，故补做逐个 `du` 的干净读数） | 已归档（§7.7） |
+| `apply-s357.sh` | **S3+S5+S7 执行**：建 16 个 shim、fstrim drop-in、带三重安全闸的旧版删除 | 已归档（§7.7） |
+| `fix-fstrim-scope.sh` | **C-11 修正**：把 fstrim 的 `ExecStart` 由「遍历所有挂载点」收紧为「只 TRIM `/`」 | 已归档（§7.7） |
 
 原始输出归档于 `oplus13/.scratch/droidspaces-20260929/raw/`。
 
@@ -843,7 +948,11 @@ ccache -s:  Cacheable calls: 4 / 4 (100.0%)
 | **ccache 目录（S4 后）** | **`/mnt/data/ds-build/ccache`**（原 `/root/.cache/ccache`，已迁移） |
 | **ccache 配置（S4 后）** | **`/mnt/data/ds-build/ccache/ccache.conf`**（缓存级；`max_size=20G`、`compression=true`、`compression_level=6`） |
 | ccache shim | `/usr/lib/ccache/`（16 个，全部 → `../../bin/ccache`：`gcc` `g++` `cc` `c++` `clang` `clang++` 及各自带版本号/交叉前缀的名字） |
-| ⚠️ ccache 生效范围 | **仅登录 shell**（PATH 里有 `/usr/lib/ccache`）；**裸 `droidspaces run` 下不生效**，见 §7.6 C-10 / §8.1 S7 |
+| **ccache shim 入口（S7 后）** | **`/usr/local/bin/`**（16 个 shim 副本，使裸 `run` 也能命中）；原 `/usr/lib/ccache/` 保留不动 |
+| ccache shim 清单（回滚用） | `/root/.ds-opt/ccache-shims.list`（容器内） |
+| ccache 生效范围 | ✅ S7 后**全部路径生效**（登录 shell 走 `/usr/lib/ccache`，裸 `run` 走 `/usr/local/bin`）。S7 之前的缺口见 §7.6 C-10 |
+| **fstrim 定时（S3）** | drop-in `/etc/systemd/system/fstrim.{timer,service}.d/override.conf`；`OnCalendar=weekly`、`Persistent=true` |
+| **codex 版本根（S5 后）** | `/root/.codex/packages/{standalone,app-server-daemon}/releases/`，各只保留 `current` 指向的 `0.158.0` |
 
 ## 附录 C：一键回滚速查
 
@@ -877,6 +986,17 @@ mv /mnt/data/ds-build/ccache /root/.cache/ccache             # 搬回缓存（�
 # ---- S6：时区 ----
 ln -sf /usr/share/zoneinfo/Etc/UTC /etc/localtime
 rm -f /etc/timezone
+
+# ---- S7：ccache shim 入口（只删这 16 个，勿 rm -rf 整个目录！）----
+while read -r s; do [ -n "$s" ] && rm -f "/usr/local/bin/$s"; done < /root/.ds-opt/ccache-shims.list
+
+# ---- S3：fstrim 定时 ----
+rm -rf /etc/systemd/system/fstrim.timer.d /etc/systemd/system/fstrim.service.d
+systemctl daemon-reload && systemctl restart fstrim.timer
+# （回到出厂状态：timer 仍 enabled，但 ConditionVirtualization=!container 会让它每周被跳过）
+
+# ---- S5：codex 旧版本 ----
+# 不可恢复（包已删）。需要时由 codex 自动更新或重装重新拉取。
 
 # ---- B 组软件包 ----
 apt remove build-essential cmake ninja-build pkg-config \

@@ -4,12 +4,12 @@
     "ack": {
       "remote": "https://android.googlesource.com/kernel/common",
       "branch": "android15-6.6",
-      "last_merged": "55dbf85d9283442cd5a1eaf581ce0464ab45cb71",
-      "last_merged_date": "2026-09-29",
-      "note": "第十轮官方源增量合并，700526826edfa1bcd25d5b8090a793d9b53f8e94..55dbf85d9283442cd5a1eaf581ce0464ab45cb71 共 219 提交（主体为 Merge tag 'android15-6.6.143_r00' 与 Merge 6.6.143 into android15-6.6-lts）；合并提交 b2008ec65a5d，唯一冲突为 L1 Makefile SUBLEVEL（上游 143，按红线保留本地 118），未使用 -X ours/-X theirs；红线校验通过，BBG gitlink 6e32d811 与本地定制保持"
+      "last_merged": "f57ed23e10fc91acb00f0381a0ce8d14586d9a87",
+      "last_merged_date": "2026-10-01",
+      "note": "第十一轮官方源增量合并，55dbf85d9283442cd5a1eaf581ce0464ab45cb71..f57ed23e10fc91acb00f0381a0ce8d14586d9a87 共 4 提交（2 条 UPSTREAM Bluetooth RFCOMM 安全/UAF 修复、2 条 ANDROID gzvm 串行化）；合并提交 36ef6c70c3a0，L0 零冲突（仅触及 net/bluetooth/rfcomm/core.c、arch/arm64/geniezone/vm.c、drivers/virt/geniezone/gzvm_mmu.c、gzvm_vcpu.c 四个上游文件，未触碰任何本地定制文件），未使用 -X ours/-X theirs；红线校验通过（KABI 槽位 sched.h:1535-1536、ghost_task×12、NTSYNC 注册、SUBLEVEL=118、CONFIG_ZRAM=n、BBG gitlink 6e32d811、FQ_GUARD/REKERNEL_X/DDL_GUARD 与命名空间配置全保留）"
     }
   },
-  "last_maintenance": "2026-09-29",
+  "last_maintenance": "2026-10-01",
   "local_commits": [
     "a0f59328855f9",
     "450f8996cf343",

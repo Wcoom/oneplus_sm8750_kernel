@@ -113,3 +113,14 @@
 - 刷机告警核查: dmesg WARNING 19 条全为既有 vendor 噪声（proc 重复注册 8、spmi 2、context_tracking/slub/softirq/irq/sysfs/drm_vblank/bdev 各 1）与模块 CRC disagrees about version；本轮合并未触碰 kernel/seccomp.c 与 crystal_hybridswap 源码，zram_drv.c 仅带入上游 zram_bvec_write_partial() UAF 修复
 - 设备状态旁记（非本次内核变更）: /data/adb/service.d 缺 99-oplus-sched-ddl-guard.sh，开机 sched_ddl_enabled=1（风险开关开启）；已按第 22 项缓解措施运行时写回 0，持久化脚本待重新部署
 - 尚未推送 github
+
+=== 2026-10-01 第十一轮 ACK 增量合并 ===
+- ACK fetch: 55dbf85d9283442cd5a1eaf581ce0464ab45cb71 -> f57ed23e10fc91acb00f0381a0ce8d14586d9a87，4 个提交；分支尖端双路取证（官方 +log 端点 curl 本轮 HTTP 200 正常 + git ls-remote，两者一致均为 f57ed23e10fc）；备份分支 backup/pre-ack-202610（@ cb0ce9a5934f）
+- 合并提交: 36ef6c70c3a0（第一父 cb0ce9a5934f = ddl_guard v1.2.0，第二父 f57ed23e10fc）；L0 零冲突——合并相对第一父仅触及 4 个上游文件（net/bluetooth/rfcomm/core.c、arch/arm64/geniezone/vm.c、drivers/virt/geniezone/gzvm_mmu.c、drivers/virt/geniezone/gzvm_vcpu.c），未触碰任何本地定制文件；未使用 -X ours/-X theirs
+- ACK 提交: f57ed23e10fc UPSTREAM: Bluetooth: RFCOMM: serialize security confirmation handling；a023577dd731 UPSTREAM: Bluetooth: RFCOMM: take rfcomm_mutex for the deferred setup accept（两者合为 KASAN slab-use-after-free 修复：rfcomm_security_cfm 遍历 session_list 的 DLC 链时未持 rfcomm_mutex，与 krfcommd 的 rfcomm_session_close 并发导致 UAF）；e5a922bc19bb ANDROID: gzvm: serialize guest page pinning and mapping；d63872a93027 ANDROID: gzvm: destroy vCPU on creation failure and serialize creation
+- 红线校验: KABI 槽位 sched.h:1535/1536 保留 / ghost_task 12 行 / NTSYNC（Kconfig:312 config NTSYNC、drivers/misc/Makefile:26 注册） / SUBLEVEL=118 / CONFIG_ZRAM=n / CONFIG_LSM 末尾 baseband_guard / BBG·FQ_GUARD·REKERNEL_X·DDL_GUARD 与命名空间/SYSVIPC 全 y；冲突标记 <<<<<<< 与 >>>>>>> 全树零命中（======= 命中均为文档下划线装饰）；include/trace/hooks 与 drivers/android/vendor_hooks.c 相对第一父零改动
+- 构建: bash /home/wcoom/桌面/内核构建.sh exit 0，日志 /tmp/kbuild-20261001.log 中 error: 0；版本 6.6.118-android15-8-gf4dc45704e54-abogki20260727-4k；Image 39,598,592 字节；md5 ec090b2ec5627bd157a5b07814f211d6；SHA-256 5ef892389ff51320ef5091a1cafb8ef6abd5a6773c8245ca8add4ba40de18751；4 个改动文件确认重编（out/net/bluetooth/rfcomm/core.o 16:46:35、arch/arm64/geniezone/vm.o 16:46:33、drivers/virt/geniezone/gzvm_mmu.o 与 gzvm_vcpu.o 16:46:31），Image 16:48:04 重链接；ccache 命中 3673/3781 = 97.14%；ntsync 符号 97；out/.config 中 FQ_GUARD/REKERNEL_X/NTSYNC/DDL_GUARD/BBG/SYSVIPC 均 y
+- 构建脚本调整（根仓库 /home/wcoom/桌面/内核构建.sh，不属内核 git 仓库）: 并行度 JOBS 由固定 8 改为 $(nproc)=12（用户要求用满 CPU 与内存，不再为省内存压低并发）；CCACHE_NOHARDLINK=true 与只读 .o 清理保持；改后重跑 exit 0（无改动重跑属空转，仅验证脚本有效，未压到内存峰值）
+- 幂等核对: 合并后再次 fetch，ack/android15-6.6 尖端仍为 f57ed23e10fc，HEAD 已含该提交（git merge-base --is-ancestor 通过），git log HEAD..FETCH_HEAD 为 0 —— 官方源无新提交
+- 记账说明: 第十一轮合并提交本身作于 2026-10-01 16:24:41，但 state.json 当时仍停留在第十轮基线 55dbf85d；本次会话补齐该轮记账并重编
+- 尚未推送 github

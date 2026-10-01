@@ -3029,6 +3029,20 @@ static int __comp_algorithm_store(struct zram *zram, u32 prio, const char *buf)
 	char *compressor;
 	size_t sz;
 
+#if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_LOCK_DEF_COMP)
+	/*
+	 * 主压缩算法锁定为编译期默认值。厂商用户态会在 zram 设备初始化之前
+	 * 改写 comp_algorithm（如 OPPO 的 init.oplus.nandswap.sh 按项目号把
+	 * 23821 写死为 zstdn），而 init_done() 之后内核已拒绝再改，故除此处
+	 * 外没有任何挽回时机。次级压缩算法（recomp_algorithm）不受影响。
+	 */
+	if (prio == ZRAM_PRIMARY_COMP) {
+		pr_info("comp_algorithm: primary compressor locked to \"%s\"\n",
+			default_compressor);
+		return -EPERM;
+	}
+#endif
+
 	sz = strlen(buf);
 	if (sz >= CRYPTO_MAX_ALG_NAME)
 		return -E2BIG;

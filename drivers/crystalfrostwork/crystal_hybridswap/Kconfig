@@ -174,3 +174,22 @@ config CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP
 	  configuration, such as lzo, lzo-rle, lz4, lz4kd, or zstd.  The private
 	  LZ4KD backend is selected directly and all other algorithms continue to
 	  use the kernel Crypto API.
+
+config CRYSTAL_HYBRIDSWAP_ZRAM_LOCK_DEF_COMP
+	bool "Lock the primary zram compressor to the build-time default"
+	depends on CRYSTAL_HYBRIDSWAP
+	default n
+	help
+	  Reject writes to the primary compressor node
+	  (/sys/block/zramX/comp_algorithm) with -EPERM, so the algorithm named
+	  by CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP stays in effect for the whole boot.
+
+	  This exists because vendor userspace may overwrite the primary
+	  compressor before the zram device is initialised, and after
+	  init_done() the algorithm can no longer be changed at all -- leaving no
+	  later point at which a corrected value could be applied.
+
+	  Only the primary compressor is locked; the secondary compressor
+	  (recomp_algorithm) stays writable so recompression keeps working.
+	  Callers that ignore the return value, such as vendor post-boot
+	  scripts, are unaffected.

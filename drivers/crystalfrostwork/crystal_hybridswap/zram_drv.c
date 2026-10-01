@@ -5545,6 +5545,40 @@ static ssize_t disksize_store(struct device *dev,
 		goto out_unlock;
 	}
 
+#ifdef CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_PIN_SIZE
+	/*
+	 * 固化 zram 容量为「物理内存 × 固定比例」，忽略调用方写入的值。
+	 *
+	 * 与 comp_algorithm 的锁定不同，这里必须"替换"而不是"拒绝"：disksize
+	 * 的默认值是 0，拒绝写入会让设备完全没有容量、swap 无法建立。
+	 *
+	 * 动机相同——厂商用户态（OPPO init.oplus.nandswap.sh）会在设备初始化前
+	 * 按项目号写入固定容量，而 init_done() 之后内核拒绝再改，故此处是唯一
+	 * 的干预点。
+	 *
+	 * 注意：放在 init_done() 检查之后，避免对已初始化设备的重复写入也打印
+	 * "pinned to ..." 而谎报本次生效。
+	 *
+	 * 代价提醒：table 与 zms 句柄表是 vzalloc 的，而 vmalloc 不做按需缺页，
+	 * 声明多少页就实打实占多少物理内存（真机 /proc/vmallocinfo 实测
+	 * pages=24320 正好等于 2,490,368 × 40 字节）。比例调大是**立即的常驻
+	 * 开销**，与是否真的用到无关。
+	 */
+	{
+		struct sysinfo si;
+		u64 ram_bytes;
+
+		si_meminfo(&si);
+		ram_bytes = (u64)si.totalram * si.mem_unit;
+		disksize = div_u64(ram_bytes *
+				   CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_PIN_SIZE_PCT,
+				   100);
+		pr_info("disksize: pinned to %llu bytes (%d%% of %llu bytes RAM)\n",
+			disksize,
+			CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_PIN_SIZE_PCT, ram_bytes);
+	}
+#endif
+
 	disksize = PAGE_ALIGN(disksize);
 	if (!disksize) {
 		err = -EINVAL;

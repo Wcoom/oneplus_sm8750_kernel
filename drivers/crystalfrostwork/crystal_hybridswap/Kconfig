@@ -193,3 +193,46 @@ config CRYSTAL_HYBRIDSWAP_ZRAM_LOCK_DEF_COMP
 	  (recomp_algorithm) stays writable so recompression keeps working.
 	  Callers that ignore the return value, such as vendor post-boot
 	  scripts, are unaffected.
+
+config CRYSTAL_HYBRIDSWAP_ZRAM_PIN_SIZE
+	bool "Pin the zram device size to a fixed ratio of physical memory"
+	depends on CRYSTAL_HYBRIDSWAP
+	default n
+	help
+	  Substitute a computed size for every write to
+	  /sys/block/zramX/disksize: instead of the caller's value the device is
+	  sized to CRYSTAL_HYBRIDSWAP_ZRAM_PIN_SIZE_PCT percent of physical
+	  memory.  The write still reports success, so callers that ignore or
+	  check the return value are unaffected.
+
+	  Note the deliberate difference from
+	  CRYSTAL_HYBRIDSWAP_ZRAM_LOCK_DEF_COMP, which rejects writes: disksize
+	  defaults to 0, so rejecting a write would leave the device with no
+	  capacity at all and swap could never be brought up.  Substitution is
+	  therefore required here.
+
+	  Only the size is pinned; the writeback and auto-policy layers are
+	  untouched.
+
+config CRYSTAL_HYBRIDSWAP_ZRAM_PIN_SIZE_PCT
+	int "Pinned zram size as a percentage of physical memory"
+	depends on CRYSTAL_HYBRIDSWAP_ZRAM_PIN_SIZE
+	range 10 400
+	default 150
+	help
+	  Percentage of physical memory the zram device is sized to: 150 means
+	  1.5x RAM.
+
+	  This is NOT free.  Both the per-page table and the ZMS handle table are
+	  vzalloc'd, and vmalloc backs every page eagerly -- it does not fault in
+	  on demand.  The resident cost is therefore fixed at roughly
+
+	      nr_pages * 72 bytes   (40 for zram->table + 32 for zms->handles)
+
+	  as soon as userspace sets the size, whether or not the space is ever
+	  used.  Measured on a 10.79 GiB device: 171 MiB at the stock 9.5 GiB
+	  ceiling, 292 MiB at 150% -- about +121 MiB resident, every boot.
+
+	  Raise this only with that figure in mind, and verify with
+	  /proc/vmallocinfo (the disksize_store and zms_create entries) rather
+	  than by watching MemFree.
